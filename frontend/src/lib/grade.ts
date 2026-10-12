@@ -1,4 +1,5 @@
 import type { PresetId } from './presets'
+import type { Scene } from './scene'
 
 /**
  * Клиентская «имитация» рендера: цветокоррекция на canvas.
@@ -57,6 +58,25 @@ const LOOKS: Record<Exclude<PresetId, 'custom'>, Look> = {
   },
 }
 
+// Интерьер: вечером свет даёт не небо, а тёплые лампы
+const INTERIOR_LOOKS: Partial<typeof LOOKS> = {
+  evening: {
+    filter: 'brightness(0.82) contrast(1.1) saturate(1.05) sepia(0.12)',
+    overlays: [
+      { mode: 'multiply', alpha: 0.35, paint: (c, w, h) => linear(c, w, h, [[0, '#3a3560'], [1, '#6b5a70']]) },
+      { mode: 'screen', alpha: 0.35, paint: (c, w, h) => radial(c, w, h, 0.25, 0.35, [[0, '#ffb760'], [0.35, 'rgba(255,160,80,0)']]) },
+      { mode: 'screen', alpha: 0.3, paint: (c, w, h) => radial(c, w, h, 0.8, 0.45, [[0, '#ffc27a'], [0.3, 'rgba(255,160,80,0)']]) },
+    ],
+  },
+  day: {
+    filter: 'brightness(1.08) contrast(1.12) saturate(1.1)',
+    overlays: [
+      { mode: 'soft-light', alpha: 0.35, paint: (c, w, h) => linear(c, w, h, [[0, '#ffffff'], [1, '#fff1d6']], 'd') },
+      { mode: 'screen', alpha: 0.18, paint: (c, w, h) => radial(c, w, h, 0.3, 0.2, [[0, '#fffbe8'], [0.45, 'rgba(255,255,255,0)']]) },
+    ],
+  },
+}
+
 export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
@@ -79,7 +99,7 @@ async function averageColor(src: string): Promise<string> {
   return `rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`
 }
 
-export async function gradeImage(src: string, preset: PresetId, strength: number, referenceSrc?: string): Promise<Blob> {
+export async function gradeImage(src: string, scene: Scene, preset: PresetId, strength: number, referenceSrc?: string): Promise<Blob> {
   const img = await loadImage(src)
   const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight))
   const w = Math.round(img.naturalWidth * scale)
@@ -98,7 +118,7 @@ export async function gradeImage(src: string, preset: PresetId, strength: number
       overlays: [{ mode: 'soft-light', alpha: 0.75, paint: (c) => { c.fillStyle = tint; c.fillRect(0, 0, w, h) } }],
     }
   } else {
-    look = LOOKS[preset]
+    look = (scene === 'interior' && INTERIOR_LOOKS[preset]) || LOOKS[preset]
   }
 
   // базовый слой

@@ -1,4 +1,5 @@
 import { loadImage } from './grade'
+import type { Scene } from './scene'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 
@@ -6,6 +7,7 @@ export type InpaintMode = 'edit' | 'remove'
 
 export interface InpaintRequest {
   imageUrl: string
+  scene: Scene
   /** Маска: любой непрозрачный пиксель = область для перерисовки */
   mask: HTMLCanvasElement
   mode: InpaintMode
@@ -46,11 +48,13 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   const body = new FormData()
   body.append('image', await fetch(req.imageUrl).then((r) => r.blob()), 'image.png')
   body.append('mask', await exportMask(req.mask, img.naturalWidth, img.naturalHeight), 'mask.png')
+  body.append('scene', req.scene)
   body.append('mode', req.mode)
   if (req.prompt) body.append('prompt', req.prompt)
 
   onProgress(0.05, stages[0])
   const res = await fetch('/api/inpaint', { method: 'POST', body, signal })
+  if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
   if (!res.ok) throw new Error(`Сервер ответил ${res.status}`)
   onProgress(1, stages[stages.length - 1])
   return URL.createObjectURL(await res.blob())

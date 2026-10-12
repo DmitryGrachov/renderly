@@ -1,11 +1,13 @@
 import { gradeImage } from './grade'
 import type { PresetId } from './presets'
+import type { Scene } from './scene'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 
 export interface Img2ImgRequest {
   image: File
   imageUrl: string
+  scene: Scene
   preset: PresetId
   strength: number
   reference?: File | null
@@ -34,19 +36,21 @@ async function mockImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
     }
     tick()
   })
-  const blob = await gradeImage(req.imageUrl, req.preset, req.strength, req.referenceUrl)
+  const blob = await gradeImage(req.imageUrl, req.scene, req.preset, req.strength, req.referenceUrl)
   return URL.createObjectURL(blob)
 }
 
 async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?: AbortSignal) {
   const body = new FormData()
   body.append('image', req.image)
+  body.append('scene', req.scene)
   body.append('preset', req.preset)
   body.append('strength', String(req.strength))
   if (req.reference) body.append('reference', req.reference)
 
   onProgress(0.05, STAGES[0])
   const res = await fetch('/api/img2img', { method: 'POST', body, signal })
+  if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
   if (!res.ok) throw new Error(`Сервер ответил ${res.status}`)
   onProgress(1, STAGES[STAGES.length - 1])
   return URL.createObjectURL(await res.blob())

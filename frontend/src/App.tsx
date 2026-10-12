@@ -1,14 +1,39 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { CheckCircle2 } from 'lucide-react'
-import { Nav, type Tab } from './components/Nav'
+import { Logo, Nav, type Tab } from './components/Nav'
 import { ImgToImg } from './pages/ImgToImg'
 import { Inpainting } from './pages/Inpainting'
 import type { StudioImage } from './lib/types'
+import { AuthPage } from './pages/Auth'
+import { useAuth } from './lib/auth'
 
 const readTab = (): Tab => (location.hash === '#/inpainting' ? 'inpainting' : 'img2img')
 
 export default function App() {
+  const { status } = useAuth()
+  return (
+    <AnimatePresence mode="wait">
+      {status === 'loading' ? (
+        <motion.div key="splash" exit={{ opacity: 0 }} className="grid min-h-dvh place-items-center">
+          <motion.div animate={{ scale: [1, 1.06, 1] }} transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}>
+            <Logo size={44} />
+          </motion.div>
+        </motion.div>
+      ) : status === 'guest' ? (
+        <motion.div key="auth" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+          <AuthPage />
+        </motion.div>
+      ) : (
+        <motion.div key="studio" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+          <Studio />
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+function Studio() {
   const [tab, setTab] = useState<Tab>(readTab)
   const [inpaintImage, setInpaintImage] = useState<StudioImage | null>(null)
   const [toast, setToast] = useState<string | null>(null)

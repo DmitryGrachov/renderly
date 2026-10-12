@@ -5,6 +5,7 @@ import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } 
 import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
 import { inpaint, type InpaintMode } from '../../lib/inpaint'
 import type { StudioImage } from '../../lib/types'
+import { useScene } from '../../lib/scene'
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function Editor({ image, onClose }: Props) {
+  const { scene } = useScene()
   const stageRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const maskRef = useRef<HTMLCanvasElement>(null)
@@ -238,7 +240,7 @@ export function Editor({ image, onClose }: Props) {
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, mask: maskRef.current!, mode, prompt: mode === 'edit' ? text : undefined },
+        { imageUrl: versions[current].url, scene, mask: maskRef.current!, mode, prompt: mode === 'edit' ? text : undefined },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )

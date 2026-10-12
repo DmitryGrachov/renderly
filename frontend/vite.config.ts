@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:8000',
+      // бэкенд из docker compose (BACKEND_PORT) или запущенный вручную
+      '/api': process.env.API_PROXY ?? 'http://127.0.0.1:8010',
     },
   },
 })

@@ -16,6 +16,8 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
       type="button"
       onClick={onSelect}
       disabled={disabled}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
       whileTap={{ scale: 0.97 }}
       className={`group relative overflow-hidden rounded-[18px] bg-white text-left transition-shadow duration-300 ease-apple disabled:opacity-50 ${
         selected
@@ -37,8 +39,9 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
             }}
           />
         )}
+        {preset.room && <Room preset={preset} />}
         {/* силуэт здания */}
-        {!wide && (
+        {!wide && !preset.room && (
           <svg viewBox="0 0 200 40" preserveAspectRatio="none" className="absolute inset-x-0 bottom-0 h-[38%] w-full">
             <path d="M0 40 V26 H34 V14 H70 V22 H96 V6 H134 V18 H160 V24 H200 V40Z" fill="rgba(0,0,0,0.16)" />
           </svg>
@@ -61,5 +64,35 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
         <Check className="size-3" strokeWidth={3} />
       </motion.span>
     </motion.button>
+  )
+}
+
+/** Превью интерьера: стена, окно с «небом» пресета, пятно света на полу */
+function Room({ preset }: { preset: Preset }) {
+  const room = preset.room!
+  return (
+    <div className="absolute inset-0" style={{ background: room.wall }}>
+      {/* пол */}
+      <div className="absolute inset-x-0 bottom-0 h-[26%] bg-black/[0.07]" />
+      {/* окно */}
+      <div
+        className="absolute left-[30%] top-[14%] h-[52%] w-[40%] overflow-hidden rounded-[3px] ring-[3px] ring-white/70 transition-transform duration-700 ease-apple group-hover:scale-[1.04]"
+        style={{ background: preset.sky }}
+      >
+        <div className="absolute inset-y-0 left-1/2 w-[3px] -translate-x-1/2 bg-white/70" />
+      </div>
+      {/* пятно света из окна */}
+      <div
+        className="absolute bottom-[2%] left-[22%] h-[24%] w-[56%] blur-[2px]"
+        style={{ background: room.patch, clipPath: 'polygon(16% 0, 84% 0, 100% 100%, 0 100%)' }}
+      />
+      {/* лампа */}
+      {room.lamp && (
+        <span
+          className="absolute right-[12%] top-[34%] size-2.5 rounded-full"
+          style={{ background: room.lamp, boxShadow: `0 0 18px 8px ${room.lamp}99` }}
+        />
+      )}
+    </div>
   )
 }

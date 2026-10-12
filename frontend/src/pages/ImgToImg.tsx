@@ -5,7 +5,8 @@ import { Dropzone } from '../components/Dropzone'
 import { PresetCard } from '../components/PresetCard'
 import { CompareSlider } from '../components/CompareSlider'
 import { GeneratingOverlay } from '../components/GeneratingOverlay'
-import { CUSTOM_PRESET, PRESETS, presetById, type PresetId } from '../lib/presets'
+import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
+import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
 import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
 
@@ -17,7 +18,13 @@ interface Props {
 
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
+const SUBTITLE: Record<Scene, string> = {
+  exterior: 'Загрузите визуализацию фасада — нейросеть пересветит сцену, сохранив архитектуру и материалы.',
+  interior: 'Загрузите визуализацию интерьера — нейросеть перестроит свет, сохранив мебель, отделку и материалы.',
+}
+
 export function ImgToImg({ onSendToInpaint }: Props) {
+  const { scene } = useScene()
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
@@ -25,7 +32,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const [status, setStatus] = useState<Status>('idle')
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState('')
-  const [result, setResult] = useState<{ url: string; preset: PresetId } | null>(null)
+  const [result, setResult] = useState<{ url: string; preset: PresetId; scene: Scene } | null>(null)
   const [view, setView] = useState<'compare' | 'result'>('compare')
   const [error, setError] = useState<string | null>(null)
   const abort = useRef<AbortController | null>(null)
@@ -60,11 +67,11 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     setError(null)
     try {
       const url = await img2img(
-        { image: source.file, imageUrl: source.url, preset, strength, reference: reference?.file, referenceUrl: reference?.url },
+        { image: source.file, imageUrl: source.url, scene, preset, strength, reference: reference?.file, referenceUrl: reference?.url },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )
-      setResult({ url, preset })
+      setResult({ url, preset, scene })
       setView('compare')
       setStatus('done')
     } catch (e) {
@@ -81,17 +88,17 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     if (!result || !source) return
     const a = document.createElement('a')
     a.href = result.url
-    a.download = `inego_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
+    a.download = `inego_${result.scene}_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
     a.click()
   }
 
   async function sendToInpaint() {
     if (!result || !source) return
-    const name = `inego_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
+    const name = `inego_${result.scene}_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
     onSendToInpaint(await urlToStudioImage(result.url, name))
   }
 
-  const activePreset = presetById(preset)
+  const activePreset = presetById(preset, scene)
 
   return (
     <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
@@ -101,7 +108,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
           initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.05 }}
           className="text-[15px] font-semibold text-gradient sm:text-[17px]"
         >
-          Img to Img
+          Img to Img · {SCENE_LABEL[scene]}
         </motion.p>
         <motion.h1
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.1 }}
@@ -115,7 +122,11 @@ export function ImgToImg({ onSendToInpaint }: Props) {
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.18 }}
           className="mx-auto mt-5 max-w-[560px] text-[17px] leading-relaxed text-mute sm:text-[19px]"
         >
-          Загрузите визуализацию — нейросеть пересветит сцену, сохранив геометрию и материалы.
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span key={scene} className="block" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+              {SUBTITLE[scene]}
+            </motion.span>
+          </AnimatePresence>
         </motion.p>
       </section>
 
@@ -224,9 +235,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
               >
                 <div className="flex flex-col gap-4 rounded-[22px] bg-white p-4 shadow-card ring-1 ring-black/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
                   <div className="flex items-center gap-3">
-                    <span className="size-10 shrink-0 rounded-xl ring-1 ring-black/5" style={{ background: presetById(result.preset).sky }} />
+                    <span className="size-10 shrink-0 rounded-xl ring-1 ring-black/5" style={{ background: presetById(result.preset, result.scene).sky }} />
                     <div>
-                      <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset).title}</div>
+                      <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset, result.scene).title} · {SCENE_LABEL[result.scene]}</div>
                       <div className="text-[13px] text-mute">Перетаскивайте ползунок, чтобы сравнить</div>
                     </div>
                   </div>
@@ -254,8 +265,8 @@ export function ImgToImg({ onSendToInpaint }: Props) {
           <div className="rounded-[28px] bg-white p-5 shadow-card ring-1 ring-black/[0.04] sm:p-6">
             <Step n={1} title="Освещение" hint="Выберите сценарий света" />
             <div className="mt-4 grid grid-cols-2 gap-2.5">
-              {PRESETS.map((p) => (
-                <PresetCard key={p.id} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
+              {presetsFor(scene).map((p) => (
+                <PresetCard key={`${scene}-${p.id}`} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
               ))}
               <PresetCard preset={CUSTOM_PRESET} selected={preset === 'custom'} onSelect={() => setPreset('custom')} disabled={running} wide />
             </div>

@@ -3,7 +3,17 @@ import { motion } from 'motion/react'
 import { ArrowUp, Sparkles, Trash2 } from 'lucide-react'
 import type { InpaintMode } from '../../lib/inpaint'
 
-const SUGGESTIONS = ['Зелёные растения', 'Деревянная терраса', 'Люди', 'Автомобиль', 'Уличный фонарь', 'Мебель']
+import { useScene, type Scene } from '../../lib/scene'
+
+const SUGGESTIONS: Record<Scene, string[]> = {
+  exterior: ['Зелёные растения', 'Деревянная терраса', 'Люди', 'Автомобиль', 'Уличный фонарь', 'Бассейн'],
+  interior: ['Комнатные растения', 'Диван', 'Картина на стене', 'Ковёр', 'Светильник', 'Декор на полке'],
+}
+
+const PLACEHOLDER: Record<Scene, string> = {
+  exterior: 'Например: деревянная терраса с шезлонгами',
+  interior: 'Например: мягкий диван из бежевого букле',
+}
 
 interface Props {
   mode: InpaintMode
@@ -21,6 +31,7 @@ export const POPOVER_WIDTH = 340
 
 export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y, placement }: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
+  const { scene } = useScene()
   useEffect(() => {
     if (mode === 'edit') input.current?.focus({ preventScroll: true })
   }, [mode])
@@ -72,11 +83,11 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
             value={prompt}
             onChange={(e) => onPrompt(e.target.value)}
             rows={2}
-            placeholder="Например: деревянная терраса с шезлонгами"
+            placeholder={PLACEHOLDER[scene]}
             className="mt-3.5 w-full resize-none rounded-[14px] bg-black/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-white focus:ring-2"
           />
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {SUGGESTIONS.map((s) => (
+            {SUGGESTIONS[scene].map((s) => (
               <button
                 key={s}
                 onClick={() => onPrompt(s)}
