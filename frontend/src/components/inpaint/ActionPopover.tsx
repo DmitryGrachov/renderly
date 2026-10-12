@@ -52,7 +52,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         translateY: placement === 'top' ? '-100%' : '0%',
         transformOrigin: placement === 'top' ? 'bottom center' : 'top center',
       }}
-      className="absolute z-30 rounded-[22px] bg-white/[0.88] p-4 backdrop-blur-2xl backdrop-saturate-150 shadow-float ring-1 ring-black/[0.06]"
+      className="absolute z-30 rounded-[22px] bg-surface/[0.88] p-4 backdrop-blur-2xl backdrop-saturate-150 shadow-float ring-1 ring-fg/[0.06]"
       onPointerDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && !e.shiftKey && canConfirm) { e.preventDefault(); onConfirm() }
@@ -84,7 +84,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
             onChange={(e) => onPrompt(e.target.value)}
             rows={2}
             placeholder={PLACEHOLDER[scene]}
-            className="mt-3.5 w-full resize-none rounded-[14px] bg-black/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-white focus:ring-2"
+            className="mt-3.5 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2"
           />
           <div className="mt-2 flex flex-wrap gap-1.5">
             {SUGGESTIONS[scene].map((s) => (
@@ -92,7 +92,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
                 key={s}
                 onClick={() => onPrompt(s)}
                 className={`rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                  prompt === s ? 'bg-ink text-white' : 'bg-black/[0.05] text-ink-2 hover:bg-black/[0.09]'
+                  prompt === s ? 'bg-ink text-on-ink' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.09]'
                 }`}
               >
                 {s}
@@ -103,14 +103,14 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
       )}
 
       <div className="mt-4 flex items-center justify-between gap-2">
-        <button onClick={onReset} className="rounded-full px-3.5 py-2 text-[13px] font-medium text-mute transition-colors hover:bg-black/[0.05] hover:text-ink">
+        <button onClick={onReset} className="rounded-full px-3.5 py-2 text-[13px] font-medium text-mute transition-colors hover:bg-fg/[0.05] hover:text-ink">
           Сбросить
         </button>
         <motion.button
           whileTap={canConfirm ? { scale: 0.96 } : undefined}
           onClick={onConfirm}
           disabled={!canConfirm}
-          className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-[13.5px] font-medium text-white transition-all duration-200 disabled:bg-black/[0.08] disabled:text-faint ${
+          className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-[13.5px] font-medium text-white transition-all duration-200 disabled:bg-fg/[0.08] disabled:text-faint ${
             mode === 'edit' ? 'bg-accent hover:bg-accent-hover' : 'bg-[#ff3b30] hover:bg-[#ff2d20]'
           }`}
         >

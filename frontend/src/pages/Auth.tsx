@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react'
 import { Logo } from '../components/Nav'
+import { ThemeMenu } from '../components/ThemeMenu'
 import { presetsFor } from '../lib/presets'
 import { AuthError, useAuth } from '../lib/auth'
 
@@ -65,6 +66,8 @@ export function AuthPage() {
     <div className="min-h-dvh bg-canvas lg:grid lg:grid-cols-[1.1fr_1fr]">
       <Showcase />
 
+      <ThemeMenu className="!fixed right-5 top-5 z-50 sm:right-8 sm:top-7" />
+
       <main className="flex min-h-dvh items-center justify-center px-5 py-12 sm:px-8">
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={spring} className="w-full max-w-[400px]">
           <div className="mb-10 flex items-center gap-2.5 lg:hidden">
@@ -81,7 +84,7 @@ export function AuthPage() {
             </motion.div>
           </AnimatePresence>
 
-          <div className="mt-8 flex rounded-full bg-black/[0.05] p-1" role="tablist">
+          <div className="mt-8 flex rounded-full bg-fg/[0.05] p-1" role="tablist">
             {(['login', 'register'] as const).map((m) => (
               <button
                 key={m}
@@ -94,7 +97,7 @@ export function AuthPage() {
                 {mode === m && (
                   <motion.span
                     layoutId="auth-mode"
-                    className="absolute inset-0 -z-10 rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06),0_2px_8px_rgba(0,0,0,0.06)]"
+                    className="absolute inset-0 -z-10 rounded-full bg-pill shadow-[0_1px_2px_rgba(0,0,0,0.06),0_2px_8px_rgba(0,0,0,0.06)]"
                     transition={{ type: 'spring', stiffness: 420, damping: 36 }}
                   />
                 )}
@@ -135,7 +138,7 @@ export function AuthPage() {
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.4 }}
                   role="alert"
-                  className="rounded-[14px] bg-[#ff3b30]/[0.08] px-4 py-3 text-[14px] text-[#d70015]"
+                  className="rounded-[14px] bg-danger/10 px-4 py-3 text-[14px] text-danger"
                 >
                   {error.text}
                 </motion.div>
@@ -146,7 +149,7 @@ export function AuthPage() {
               type="submit"
               whileTap={{ scale: 0.98 }}
               disabled={loading}
-              className="group mt-3 flex h-[52px] items-center justify-center gap-2 rounded-full bg-ink text-[16px] font-medium text-white transition-colors hover:bg-black disabled:opacity-70"
+              className="group mt-3 flex h-[52px] items-center justify-center gap-2 rounded-full bg-ink text-[16px] font-medium text-on-ink transition-colors hover:bg-ink-hover disabled:opacity-70"
             >
               {loading ? (
                 <Loader2 className="size-5 animate-spin" />
@@ -189,7 +192,7 @@ function Field({ label, value, onChange, type = 'text', autoComplete, inputMode,
   return (
     <div>
       <div
-        className={`relative h-[56px] rounded-[14px] bg-white transition-shadow duration-200 ${
+        className={`relative h-[56px] rounded-[14px] bg-surface transition-shadow duration-200 ${
           error
             ? 'shadow-[0_0_0_1.5px_#ff3b30]'
             : 'shadow-[0_0_0_1px_rgba(0,0,0,0.1)] focus-within:shadow-[0_0_0_2px_var(--color-accent),0_0_0_6px_rgba(0,113,227,0.12)]'
@@ -218,7 +221,7 @@ function Field({ label, value, onChange, type = 'text', autoComplete, inputMode,
         {error && (
           <motion.p
             initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden px-1 pt-1.5 text-[13px] text-[#d70015]"
+            className="overflow-hidden px-1 pt-1.5 text-[13px] text-danger"
           >
             {error}
           </motion.p>
@@ -247,7 +250,7 @@ function PasswordField({
             type="button"
             onClick={() => setVisible((v) => !v)}
             aria-label={visible ? 'Скрыть пароль' : 'Показать пароль'}
-            className="grid size-9 place-items-center rounded-full text-faint transition-colors hover:bg-black/[0.05] hover:text-ink"
+            className="grid size-9 place-items-center rounded-full text-faint transition-colors hover:bg-fg/[0.05] hover:text-ink"
           >
             {visible ? <EyeOff className="size-[18px]" /> : <Eye className="size-[18px]" />}
           </button>
@@ -262,7 +265,7 @@ function PasswordField({
             <div className="flex items-center gap-3 px-1 pt-2.5">
               <div className="flex flex-1 gap-1">
                 {[0, 1, 2, 3].map((i) => (
-                  <span key={i} className="h-1 flex-1 overflow-hidden rounded-full bg-black/[0.07]">
+                  <span key={i} className="h-1 flex-1 overflow-hidden rounded-full bg-fg/[0.07]">
                     <span
                       className="block h-full rounded-full transition-all duration-500 ease-apple"
                       style={{ width: i < s.bars ? '100%' : '0%', background: s.color }}

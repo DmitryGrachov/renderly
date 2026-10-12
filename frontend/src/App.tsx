@@ -75,7 +75,7 @@ function Studio() {
         </div>
       </main>
 
-      <footer className="border-t border-black/[0.06]">
+      <footer className="border-t border-fg/[0.06]">
         <div className="mx-auto flex max-w-[1280px] px-5 py-8 text-[12px] text-faint sm:px-8">
           <span>© {new Date().getFullYear()} INEGO.dev — AI-инструменты для архитектурной визуализации</span>
         </div>
@@ -88,7 +88,7 @@ function Studio() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
             transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-            className="fixed inset-x-0 bottom-6 z-50 mx-auto flex w-fit items-center gap-2.5 rounded-full bg-ink/90 px-5 py-3 text-[14px] font-medium text-white shadow-float backdrop-blur-xl"
+            className="fixed inset-x-0 bottom-6 z-50 mx-auto flex w-fit items-center gap-2.5 rounded-full bg-ink/90 px-5 py-3 text-[14px] font-medium text-on-ink shadow-float backdrop-blur-xl"
           >
             <CheckCircle2 className="size-[18px] text-emerald-400" />
             {toast}

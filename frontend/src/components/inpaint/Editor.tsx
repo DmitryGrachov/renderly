@@ -321,7 +321,7 @@ export function Editor({ image, onClose }: Props) {
     <div className="flex flex-col gap-4">
       <div
         ref={stageRef}
-        className="checker relative h-[min(78vh,760px)] min-h-[480px] select-none overflow-hidden rounded-[28px] shadow-card ring-1 ring-black/[0.04]"
+        className="checker relative h-[min(78vh,760px)] min-h-[480px] select-none overflow-hidden rounded-[28px] shadow-card ring-1 ring-fg/[0.04]"
       >
         {/* изображение + маска */}
         <div className="absolute" style={{ left, top, width: dispW, height: dispH }}>
@@ -405,7 +405,7 @@ export function Editor({ image, onClose }: Props) {
               <motion.div
                 key="busy"
                 initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
-                className="glass flex items-center gap-3 rounded-full py-1.5 pl-2 pr-1.5 shadow-float ring-1 ring-black/5"
+                className="glass flex items-center gap-3 rounded-full py-1.5 pl-2 pr-1.5 shadow-float ring-1 ring-fg/5"
               >
                 <ProgressRing value={busy.progress} />
                 <span className="min-w-[150px] text-[13px] font-medium">{busy.stage || 'Подготовка'}…</span>
@@ -413,7 +413,7 @@ export function Editor({ image, onClose }: Props) {
                 <button
                   onClick={() => abortRef.current?.abort()}
                   aria-label="Отменить"
-                  className="grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-black/[0.06] hover:text-ink"
+                  className="grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink"
                 >
                   <X className="size-3.5" />
                 </button>
@@ -428,7 +428,7 @@ export function Editor({ image, onClose }: Props) {
             {!bbox && !busy && !drawing && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                className="glass rounded-full px-3.5 py-1.5 text-[12.5px] text-ink-2 shadow-soft ring-1 ring-black/5"
+                className="glass rounded-full px-3.5 py-1.5 text-[12.5px] text-ink-2 shadow-soft ring-1 ring-fg/5"
               >
                 {tool === 'lasso' ? 'Обведите' : 'Закрасьте'} {mode === 'edit' ? 'область, которую нужно изменить' : 'объект, который нужно удалить'}
               </motion.div>
@@ -456,7 +456,7 @@ export function Editor({ image, onClose }: Props) {
           onClick={onClose}
           aria-label="Закрыть изображение"
           title="Закрыть изображение"
-          className="glass absolute right-4 top-4 grid size-9 place-items-center rounded-full text-ink-2 shadow-soft ring-1 ring-black/5 transition hover:bg-white hover:text-ink"
+          className="glass absolute right-4 top-4 grid size-9 place-items-center rounded-full text-ink-2 shadow-soft ring-1 ring-fg/5 transition hover:bg-surface hover:text-ink"
         >
           <X className="size-4" />
         </button>
@@ -493,7 +493,7 @@ export function Editor({ image, onClose }: Props) {
       </div>
 
       {/* история версий */}
-      <div className="flex flex-col gap-3 rounded-[22px] bg-white p-3 shadow-card ring-1 ring-black/[0.04] sm:flex-row sm:items-center sm:pl-4">
+      <div className="flex flex-col gap-3 rounded-[22px] bg-surface p-3 shadow-card ring-1 ring-fg/[0.04] sm:flex-row sm:items-center sm:pl-4">
         <div className="text-[13px] font-semibold text-ink-2 sm:w-16">История</div>
         <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-0.5">
           {versions.map((v, i) => (
@@ -505,7 +505,7 @@ export function Editor({ image, onClose }: Props) {
             >
               <span
                 className={`relative block h-12 w-full overflow-hidden rounded-xl ring-offset-2 transition-all duration-200 ${
-                  i === current ? 'ring-2 ring-ink' : 'ring-1 ring-black/10 group-hover:ring-black/25'
+                  i === current ? 'ring-2 ring-ink' : 'ring-1 ring-fg/10 group-hover:ring-fg/25'
                 }`}
               >
                 <img src={v.url} alt="" className="size-full object-cover" />
@@ -517,21 +517,21 @@ export function Editor({ image, onClose }: Props) {
             </button>
           ))}
         </div>
-        {error && <span className="rounded-full bg-red-50 px-3 py-1.5 text-[12px] text-red-600">{error}</span>}
+        {error && <span className="rounded-full bg-danger/10 px-3 py-1.5 text-[12px] text-danger">{error}</span>}
         <div className="flex gap-2">
           <button
             disabled={current === 0}
             onPointerDown={() => setPeek(true)}
             onPointerUp={() => setPeek(false)}
             onPointerLeave={() => setPeek(false)}
-            className="flex flex-1 select-none items-center justify-center gap-2 rounded-full bg-black/[0.05] px-4 py-2.5 text-[13.5px] font-medium transition-colors hover:bg-black/[0.08] active:bg-black/[0.12] disabled:opacity-40 sm:flex-none"
+            className="flex flex-1 select-none items-center justify-center gap-2 rounded-full bg-fg/[0.05] px-4 py-2.5 text-[13.5px] font-medium transition-colors hover:bg-fg/[0.08] active:bg-fg/[0.12] disabled:opacity-40 sm:flex-none"
             title="Удерживайте, чтобы увидеть предыдущую версию"
           >
             <Eye className="size-4" /> {peek ? 'Предыдущая' : 'Удерживайте'}
           </button>
           <button
             onClick={download}
-            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-4 py-2.5 text-[13.5px] font-medium text-white transition-colors hover:bg-black sm:flex-none"
+            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-4 py-2.5 text-[13.5px] font-medium text-on-ink transition-colors hover:bg-ink-hover sm:flex-none"
           >
             <Download className="size-4" /> Скачать
           </button>
@@ -546,7 +546,7 @@ function ProgressRing({ value }: { value: number }) {
   const c = 2 * Math.PI * r
   return (
     <svg viewBox="0 0 26 26" className="size-7 -rotate-90">
-      <circle cx="13" cy="13" r={r} fill="none" stroke="rgba(0,0,0,0.08)" strokeWidth="3" />
+      <circle cx="13" cy="13" r={r} fill="none" stroke="var(--color-fg)" strokeOpacity={0.08} strokeWidth="3" />
       <circle cx="13" cy="13" r={r} fill="none" stroke="url(#ip-ring)" strokeWidth="3" strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - value)} />
       <defs>
         <linearGradient id="ip-ring" x1="0" y1="0" x2="1" y2="1">

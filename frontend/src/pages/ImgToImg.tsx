@@ -133,13 +133,13 @@ export function ImgToImg({ onSendToInpaint }: Props) {
       {/* How it works */}
       <motion.section
         initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.22 }}
-        className="mb-6 grid gap-px overflow-hidden rounded-[28px] bg-line ring-1 ring-black/[0.04] sm:grid-cols-3">
+        className="mb-6 grid gap-px overflow-hidden rounded-[28px] bg-line ring-1 ring-fg/[0.04] sm:grid-cols-3">
         {[
           ['01', 'Загрузите', 'Рендер из 3ds Max, Revit, SketchUp или даже скриншот вьюпорта.'],
           ['02', 'Выберите свет', 'Четыре выверенных сценария или собственный референс.'],
           ['03', 'Доведите', 'Отправьте результат в Inpainting и поправьте детали кистью.'],
         ].map(([n, t, d]) => (
-          <div key={n} className="bg-white p-6 sm:px-7">
+          <div key={n} className="bg-surface p-6 sm:px-7">
             <div className="text-[13px] font-semibold text-gradient">{n}</div>
             <div className="mt-2 text-[19px] font-semibold tracking-[-0.02em]">{t}</div>
             <p className="mt-1.5 text-[14px] leading-relaxed text-mute">{d}</p>
@@ -154,7 +154,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
       >
         {/* Canvas */}
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="relative aspect-[4/3] min-h-[400px] overflow-hidden rounded-[28px] bg-white shadow-card ring-1 ring-black/[0.04] sm:aspect-[16/10] sm:min-h-0">
+          <div className="relative aspect-[4/3] min-h-[400px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/10] sm:min-h-0">
             <AnimatePresence mode="wait" initial={false}>
               {!source ? (
                 <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
@@ -193,7 +193,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
                   {!running && (
                     <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-end justify-between gap-3">
-                      <div className="glass pointer-events-auto flex min-w-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-soft ring-1 ring-black/5">
+                      <div className="glass pointer-events-auto flex min-w-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-soft ring-1 ring-fg/5">
                         <img src={source.url} alt="" className="size-7 rounded-full object-cover" />
                         <div className="min-w-0 text-[12px] leading-tight">
                           <div className="truncate font-medium">{source.name}</div>
@@ -202,12 +202,12 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                       </div>
                       <div className="pointer-events-auto flex gap-2">
                         {result && (
-                          <div className="glass flex rounded-full p-1 shadow-soft ring-1 ring-black/5">
+                          <div className="glass flex rounded-full p-1 shadow-soft ring-1 ring-fg/5">
                             {(['compare', 'result'] as const).map((v) => (
                               <button
                                 key={v}
                                 onClick={() => setView(v)}
-                                className={`relative rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors ${view === v ? 'text-white' : 'text-ink-2 hover:text-ink'}`}
+                                className={`relative rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors ${view === v ? 'text-on-ink' : 'text-ink-2 hover:text-ink'}`}
                               >
                                 {view === v && <motion.span layoutId="view-pill" className="absolute inset-0 -z-10 rounded-full bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />}
                                 {v === 'compare' ? 'Сравнить' : 'Результат'}
@@ -233,9 +233,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                 initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
                 transition={spring}
               >
-                <div className="flex flex-col gap-4 rounded-[22px] bg-white p-4 shadow-card ring-1 ring-black/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
+                <div className="flex flex-col gap-4 rounded-[22px] bg-surface p-4 shadow-card ring-1 ring-fg/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
                   <div className="flex items-center gap-3">
-                    <span className="size-10 shrink-0 rounded-xl ring-1 ring-black/5" style={{ background: presetById(result.preset, result.scene).sky }} />
+                    <span className="size-10 shrink-0 rounded-xl ring-1 ring-fg/5" style={{ background: presetById(result.preset, result.scene).sky }} />
                     <div>
                       <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset, result.scene).title} · {SCENE_LABEL[result.scene]}</div>
                       <div className="text-[13px] text-mute">Перетаскивайте ползунок, чтобы сравнить</div>
@@ -248,7 +248,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                     <motion.button
                       whileTap={{ scale: 0.97 }}
                       onClick={sendToInpaint}
-                      className="group flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-black sm:flex-none"
+                      className="group flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[14px] font-medium text-on-ink transition-colors hover:bg-ink-hover sm:flex-none"
                     >
                       В Inpainting
                       <ArrowRight className="size-4 transition-transform duration-300 ease-apple group-hover:translate-x-0.5" />
@@ -262,7 +262,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
         {/* Control panel */}
         <aside className="lg:sticky lg:top-20 lg:self-start">
-          <div className="rounded-[28px] bg-white p-5 shadow-card ring-1 ring-black/[0.04] sm:p-6">
+          <div className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
             <Step n={1} title="Освещение" hint="Выберите сценарий света" />
             <div className="mt-4 grid grid-cols-2 gap-2.5">
               {presetsFor(scene).map((p) => (
@@ -319,7 +319,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
               whileTap={canGenerate ? { scale: 0.98 } : undefined}
               onClick={generate}
               disabled={!canGenerate}
-              className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-black/[0.08] disabled:text-faint"
+              className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-fg/[0.08] disabled:text-faint"
             >
               {running ? (
                 <>
@@ -345,7 +345,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
             <AnimatePresence>
               {error && (
-                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-[13px] text-red-600">
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-[13px] text-danger">
                   {error}
                 </motion.p>
               )}
@@ -360,7 +360,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 function Step({ n, title, hint }: { n: number; title: string; hint: string }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-ink text-[12px] font-semibold text-white">{n}</span>
+      <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-ink text-[12px] font-semibold text-on-ink">{n}</span>
       <div>
         <div className="text-[17px] font-semibold tracking-[-0.015em]">{title}</div>
         <div className="text-[13px] text-mute">{hint}</div>
@@ -376,7 +376,7 @@ function IconButton({ children, label, onClick, plain }: { children: React.React
       title={label}
       onClick={onClick}
       className={`grid size-9 place-items-center rounded-full text-ink-2 transition-all duration-300 ease-apple hover:text-ink active:scale-95 ${
-        plain ? 'hover:bg-black/[0.06]' : 'glass shadow-soft ring-1 ring-black/5 hover:bg-white'
+        plain ? 'hover:bg-fg/[0.06]' : 'glass shadow-soft ring-1 ring-fg/5 hover:bg-surface'
       }`}
     >
       {children}
@@ -389,7 +389,7 @@ function SecondaryButton({ children, onClick }: { children: React.ReactNode; onC
     <motion.button
       whileTap={{ scale: 0.97 }}
       onClick={onClick}
-      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-black/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-black/[0.08] sm:flex-none"
+      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-fg/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-fg/[0.08] sm:flex-none"
     >
       {children}
     </motion.button>

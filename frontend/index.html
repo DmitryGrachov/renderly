@@ -9,6 +9,15 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&display=swap" rel="stylesheet" />
     <title>INEGO.dev — AI Archviz</title>
+    <script>
+      // тема до первой отрисовки, без вспышки (ключ — как в src/lib/theme.tsx)
+      try {
+        var p = localStorage.getItem('inego.theme')
+        var dark = p === 'dark' || (p !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+        if (dark) document.querySelector('meta[name="theme-color"]').setAttribute('content', '#000000')
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

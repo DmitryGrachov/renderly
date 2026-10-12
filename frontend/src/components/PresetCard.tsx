@@ -19,7 +19,7 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       whileTap={{ scale: 0.97 }}
-      className={`group relative overflow-hidden rounded-[18px] bg-white text-left transition-shadow duration-300 ease-apple disabled:opacity-50 ${
+      className={`group relative overflow-hidden rounded-[18px] bg-surface text-left transition-shadow duration-300 ease-apple disabled:opacity-50 ${
         selected
           ? 'shadow-[0_0_0_2px_var(--color-ink),0_8px_24px_-8px_rgba(0,0,0,0.25)]'
           : 'shadow-[0_0_0_1px_rgba(0,0,0,0.06)] hover:shadow-[0_0_0_1px_rgba(0,0,0,0.1),0_8px_24px_-12px_rgba(0,0,0,0.2)]'
@@ -59,7 +59,7 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
         initial={false}
         animate={{ scale: selected ? 1 : 0, opacity: selected ? 1 : 0 }}
         transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-        className="absolute right-2 top-2 grid size-5 place-items-center rounded-full bg-ink text-white shadow-md"
+        className="absolute right-2 top-2 grid size-5 place-items-center rounded-full bg-ink text-on-ink shadow-md"
       >
         <Check className="size-3" strokeWidth={3} />
       </motion.span>
@@ -73,7 +73,7 @@ function Room({ preset }: { preset: Preset }) {
   return (
     <div className="absolute inset-0" style={{ background: room.wall }}>
       {/* пол */}
-      <div className="absolute inset-x-0 bottom-0 h-[26%] bg-black/[0.07]" />
+      <div className="absolute inset-x-0 bottom-0 h-[26%] bg-fg/[0.07]" />
       {/* окно */}
       <div
         className="absolute left-[30%] top-[14%] h-[52%] w-[40%] overflow-hidden rounded-[3px] ring-[3px] ring-white/70 transition-transform duration-700 ease-apple group-hover:scale-[1.04]"

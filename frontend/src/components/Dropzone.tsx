@@ -53,10 +53,10 @@ export function Dropzone({ onFile, listenPaste, compact, title, hint }: Props) {
         {...handlers}
         onClick={() => input.current?.click()}
         className={`flex w-full items-center gap-3 rounded-2xl border border-dashed px-4 py-3.5 text-left transition-all duration-300 ease-apple ${
-          over ? 'border-accent bg-accent/[0.04]' : 'border-black/15 hover:border-black/30 hover:bg-black/[0.02]'
+          over ? 'border-accent bg-accent/[0.04]' : 'border-fg/15 hover:border-fg/30 hover:bg-fg/[0.02]'
         }`}
       >
-        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-black/[0.05]">
+        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-fg/[0.05]">
           <ImagePlus className="size-4 text-ink-2" strokeWidth={1.75} />
         </span>
         <span className="min-w-0">
@@ -85,7 +85,7 @@ export function Dropzone({ onFile, listenPaste, compact, title, hint }: Props) {
       />
       <div
         className={`pointer-events-none absolute inset-4 rounded-[22px] border-[1.5px] border-dashed transition-all duration-500 ease-apple sm:inset-6 ${
-          over ? 'scale-[0.985] border-accent' : 'border-black/[0.10] group-hover:border-black/20'
+          over ? 'scale-[0.985] border-accent' : 'border-fg/[0.10] group-hover:border-fg/20'
         }`}
       />
 
@@ -103,7 +103,7 @@ export function Dropzone({ onFile, listenPaste, compact, title, hint }: Props) {
       <p className="relative mt-2 px-6 text-center text-[15px] text-mute">
         или <span className="text-accent">выберите файл</span>
         <span className="hidden sm:inline"> · можно вставить через </span>
-        <kbd className="hidden rounded-md border border-black/10 bg-white px-1.5 py-0.5 font-sans text-[12px] text-ink-2 shadow-[0_1px_0_rgba(0,0,0,0.06)] sm:inline">
+        <kbd className="hidden rounded-md border border-fg/10 bg-surface px-1.5 py-0.5 font-sans text-[12px] text-ink-2 shadow-[0_1px_0_rgba(0,0,0,0.06)] sm:inline">
           Ctrl V
         </kbd>
       </p>
@@ -130,8 +130,8 @@ function StackedCards({ active }: { active: boolean }) {
           transform: active ? 'rotate(14deg) translate(22px,6px)' : 'rotate(8deg) translate(12px,4px)',
         }}
       />
-      <div className="absolute inset-0 grid place-items-center rounded-2xl bg-white shadow-card ring-1 ring-black/[0.04]">
-        <span className="grid size-11 place-items-center rounded-full bg-ink text-white transition-transform duration-500 ease-apple group-hover:-translate-y-0.5">
+      <div className="absolute inset-0 grid place-items-center rounded-2xl bg-surface shadow-card ring-1 ring-fg/[0.04]">
+        <span className="grid size-11 place-items-center rounded-full bg-ink text-on-ink transition-transform duration-500 ease-apple group-hover:-translate-y-0.5">
           <ArrowUp className="size-5" strokeWidth={2.25} />
         </span>
       </div>

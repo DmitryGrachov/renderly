@@ -22,7 +22,7 @@ export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel 
         className="absolute inset-0 mix-blend-soft-light transition-opacity duration-300"
         style={{ background: presetSky, opacity: 0.25 + progress * 0.55 }}
       />
-      <div className="absolute inset-0 bg-white/30" />
+      <div className="absolute inset-0 bg-canvas/30" />
       <div className="absolute inset-0 overflow-hidden">
         <div className="animate-shimmer absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/45 to-transparent" />
       </div>
@@ -32,12 +32,12 @@ export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel 
           initial={{ opacity: 0, y: 12, scale: 0.96 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ type: 'spring', stiffness: 260, damping: 26 }}
-          className="glass w-full max-w-[340px] rounded-[26px] p-6 shadow-float ring-1 ring-black/5"
+          className="glass w-full max-w-[340px] rounded-[26px] p-6 shadow-float ring-1 ring-fg/5"
         >
           <div className="flex items-center gap-4">
             <div className="relative size-16 shrink-0">
               <svg viewBox="0 0 64 64" className="size-full -rotate-90">
-                <circle cx="32" cy="32" r={R} fill="none" stroke="rgba(0,0,0,0.08)" strokeWidth="4" />
+                <circle cx="32" cy="32" r={R} fill="none" stroke="var(--color-fg)" strokeOpacity={0.08} strokeWidth="4" />
                 <circle
                   cx="32" cy="32" r={R} fill="none" stroke="url(#prog-g)" strokeWidth="4" strokeLinecap="round"
                   strokeDasharray={C} strokeDashoffset={C * (1 - progress)}
@@ -73,7 +73,7 @@ export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel 
 
           <div className="mt-5 flex gap-1.5">
             {STAGES.map((s, i) => (
-              <div key={s} className="h-1 flex-1 overflow-hidden rounded-full bg-black/[0.07]">
+              <div key={s} className="h-1 flex-1 overflow-hidden rounded-full bg-fg/[0.07]">
                 <div
                   className="h-full rounded-full bg-ink transition-all duration-500 ease-apple"
                   style={{ width: i < stageIndex ? '100%' : i === stageIndex ? '55%' : '0%' }}
@@ -82,7 +82,7 @@ export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel 
             ))}
           </div>
 
-          <button onClick={onCancel} className="mt-5 w-full rounded-full py-2 text-[13px] font-medium text-mute transition-colors hover:bg-black/[0.04] hover:text-ink">
+          <button onClick={onCancel} className="mt-5 w-full rounded-full py-2 text-[13px] font-medium text-mute transition-colors hover:bg-fg/[0.04] hover:text-ink">
             Отменить
           </button>
         </motion.div>

@@ -50,7 +50,7 @@ export function CompareSlider({ before, after }: Props) {
       <div className="pointer-events-none absolute inset-y-0" style={{ left: `${pos}%` }}>
         <div className="absolute inset-y-0 -translate-x-1/2 w-[2px] bg-white shadow-[0_0_12px_rgba(0,0,0,0.25)]" />
         <div
-          className={`glass absolute top-1/2 grid size-11 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full shadow-float ring-1 ring-black/5 transition-transform duration-300 ease-apple ${
+          className={`glass absolute top-1/2 grid size-11 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full shadow-float ring-1 ring-fg/5 transition-transform duration-300 ease-apple ${
             dragging ? 'scale-110' : ''
           }`}
         >
