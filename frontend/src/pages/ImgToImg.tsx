@@ -1,0 +1,386 @@
+import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
+import { ArrowRight, Download, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
+import { Dropzone } from '../components/Dropzone'
+import { PresetCard } from '../components/PresetCard'
+import { CompareSlider } from '../components/CompareSlider'
+import { GeneratingOverlay } from '../components/GeneratingOverlay'
+import { CUSTOM_PRESET, PRESETS, presetById, type PresetId } from '../lib/presets'
+import { img2img } from '../lib/api'
+import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
+
+type Status = 'idle' | 'running' | 'done' | 'error'
+
+interface Props {
+  onSendToInpaint: (image: StudioImage) => void
+}
+
+const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
+
+export function ImgToImg({ onSendToInpaint }: Props) {
+  const [source, setSource] = useState<StudioImage | null>(null)
+  const [reference, setReference] = useState<StudioImage | null>(null)
+  const [preset, setPreset] = useState<PresetId>('golden')
+  const [strength, setStrength] = useState(0.7)
+  const [status, setStatus] = useState<Status>('idle')
+  const [progress, setProgress] = useState(0)
+  const [stage, setStage] = useState('')
+  const [result, setResult] = useState<{ url: string; preset: PresetId } | null>(null)
+  const [view, setView] = useState<'compare' | 'result'>('compare')
+  const [error, setError] = useState<string | null>(null)
+  const abort = useRef<AbortController | null>(null)
+
+  useEffect(() => () => abort.current?.abort(), [])
+
+  const running = status === 'running'
+  const canGenerate = !!source && !running && (preset !== 'custom' || !!reference)
+
+  async function pickSource(file: File) {
+    if (running) return
+    const img = await toStudioImage(file)
+    setSource(img)
+    setResult(null)
+    setStatus('idle')
+    setError(null)
+  }
+
+  function reset() {
+    abort.current?.abort()
+    setSource(null)
+    setResult(null)
+    setStatus('idle')
+  }
+
+  async function generate() {
+    if (!source || !canGenerate) return
+    const ctrl = new AbortController()
+    abort.current = ctrl
+    setStatus('running')
+    setProgress(0)
+    setError(null)
+    try {
+      const url = await img2img(
+        { image: source.file, imageUrl: source.url, preset, strength, reference: reference?.file, referenceUrl: reference?.url },
+        (p, s) => { setProgress(p); setStage(s) },
+        ctrl.signal,
+      )
+      setResult({ url, preset })
+      setView('compare')
+      setStatus('done')
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        setStatus(result ? 'done' : 'idle')
+        return
+      }
+      setError((e as Error).message)
+      setStatus('error')
+    }
+  }
+
+  function download() {
+    if (!result || !source) return
+    const a = document.createElement('a')
+    a.href = result.url
+    a.download = `inego_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
+    a.click()
+  }
+
+  async function sendToInpaint() {
+    if (!result || !source) return
+    const name = `inego_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
+    onSendToInpaint(await urlToStudioImage(result.url, name))
+  }
+
+  const activePreset = presetById(preset)
+
+  return (
+    <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
+      {/* Hero */}
+      <section className="pb-10 pt-12 text-center sm:pb-12 sm:pt-16">
+        <motion.p
+          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.05 }}
+          className="text-[15px] font-semibold text-gradient sm:text-[17px]"
+        >
+          Img to Img
+        </motion.p>
+        <motion.h1
+          initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.1 }}
+          className="mt-3 text-[44px] font-semibold leading-[1.04] tracking-[-0.035em] sm:text-[64px]"
+        >
+          Один рендер.
+          <br />
+          <span className="text-faint">Любой свет.</span>
+        </motion.h1>
+        <motion.p
+          initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.18 }}
+          className="mx-auto mt-5 max-w-[560px] text-[17px] leading-relaxed text-mute sm:text-[19px]"
+        >
+          Загрузите визуализацию — нейросеть пересветит сцену, сохранив геометрию и материалы.
+        </motion.p>
+      </section>
+
+      {/* How it works */}
+      <motion.section
+        initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.22 }}
+        className="mb-6 grid gap-px overflow-hidden rounded-[28px] bg-line ring-1 ring-black/[0.04] sm:grid-cols-3">
+        {[
+          ['01', 'Загрузите', 'Рендер из 3ds Max, Revit, SketchUp или даже скриншот вьюпорта.'],
+          ['02', 'Выберите свет', 'Четыре выверенных сценария или собственный референс.'],
+          ['03', 'Доведите', 'Отправьте результат в Inpainting и поправьте детали кистью.'],
+        ].map(([n, t, d]) => (
+          <div key={n} className="bg-white p-6 sm:px-7">
+            <div className="text-[13px] font-semibold text-gradient">{n}</div>
+            <div className="mt-2 text-[19px] font-semibold tracking-[-0.02em]">{t}</div>
+            <p className="mt-1.5 text-[14px] leading-relaxed text-mute">{d}</p>
+          </div>
+        ))}
+      </motion.section>
+
+      {/* Workspace */}
+      <motion.section
+        initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.3 }}
+        className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-6"
+      >
+        {/* Canvas */}
+        <div className="flex min-w-0 flex-col gap-4">
+          <div className="relative aspect-[4/3] min-h-[400px] overflow-hidden rounded-[28px] bg-white shadow-card ring-1 ring-black/[0.04] sm:aspect-[16/10] sm:min-h-0">
+            <AnimatePresence mode="wait" initial={false}>
+              {!source ? (
+                <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
+                  <Dropzone onFile={pickSource} listenPaste />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={source.url}
+                  className="checker absolute inset-0"
+                  initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                  transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
+                >
+                  {result && status !== 'running' ? (
+                    view === 'compare' ? (
+                      <CompareSlider before={source.url} after={result.url} />
+                    ) : (
+                      <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" />
+                    )
+                  ) : (
+                    <img src={source.url} alt={source.name} className="absolute inset-0 size-full object-contain" />
+                  )}
+
+                  <AnimatePresence>
+                    {running && (
+                      <motion.div key="gen" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.4 }}>
+                        <GeneratingOverlay
+                          image={source.url}
+                          progress={progress}
+                          stage={stage}
+                          presetSky={activePreset.sky}
+                          onCancel={() => abort.current?.abort()}
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {!running && (
+                    <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-end justify-between gap-3">
+                      <div className="glass pointer-events-auto flex min-w-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-soft ring-1 ring-black/5">
+                        <img src={source.url} alt="" className="size-7 rounded-full object-cover" />
+                        <div className="min-w-0 text-[12px] leading-tight">
+                          <div className="truncate font-medium">{source.name}</div>
+                          <div className="text-faint">{source.width}×{source.height} · {formatSize(source.file.size)}</div>
+                        </div>
+                      </div>
+                      <div className="pointer-events-auto flex gap-2">
+                        {result && (
+                          <div className="glass flex rounded-full p-1 shadow-soft ring-1 ring-black/5">
+                            {(['compare', 'result'] as const).map((v) => (
+                              <button
+                                key={v}
+                                onClick={() => setView(v)}
+                                className={`relative rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors ${view === v ? 'text-white' : 'text-ink-2 hover:text-ink'}`}
+                              >
+                                {view === v && <motion.span layoutId="view-pill" className="absolute inset-0 -z-10 rounded-full bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />}
+                                {v === 'compare' ? 'Сравнить' : 'Результат'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <IconButton label="Убрать изображение" onClick={reset}>
+                          <X className="size-4" />
+                        </IconButton>
+                      </div>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Result actions */}
+          <AnimatePresence>
+            {result && status === 'done' && (
+              <motion.div
+                initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
+                transition={spring}
+              >
+                <div className="flex flex-col gap-4 rounded-[22px] bg-white p-4 shadow-card ring-1 ring-black/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
+                  <div className="flex items-center gap-3">
+                    <span className="size-10 shrink-0 rounded-xl ring-1 ring-black/5" style={{ background: presetById(result.preset).sky }} />
+                    <div>
+                      <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset).title}</div>
+                      <div className="text-[13px] text-mute">Перетаскивайте ползунок, чтобы сравнить</div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <SecondaryButton onClick={download}>
+                      <Download className="size-4" /> Скачать
+                    </SecondaryButton>
+                    <motion.button
+                      whileTap={{ scale: 0.97 }}
+                      onClick={sendToInpaint}
+                      className="group flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-black sm:flex-none"
+                    >
+                      В Inpainting
+                      <ArrowRight className="size-4 transition-transform duration-300 ease-apple group-hover:translate-x-0.5" />
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Control panel */}
+        <aside className="lg:sticky lg:top-20 lg:self-start">
+          <div className="rounded-[28px] bg-white p-5 shadow-card ring-1 ring-black/[0.04] sm:p-6">
+            <Step n={1} title="Освещение" hint="Выберите сценарий света" />
+            <div className="mt-4 grid grid-cols-2 gap-2.5">
+              {PRESETS.map((p) => (
+                <PresetCard key={p.id} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
+              ))}
+              <PresetCard preset={CUSTOM_PRESET} selected={preset === 'custom'} onSelect={() => setPreset('custom')} disabled={running} wide />
+            </div>
+
+            <AnimatePresence initial={false}>
+              {preset === 'custom' && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                  transition={spring} className="overflow-hidden"
+                >
+                  <div className="pt-3">
+                    {reference ? (
+                      <div className="flex items-center gap-3 rounded-2xl bg-canvas p-2 pr-3">
+                        <img src={reference.url} alt="" className="size-12 rounded-xl object-cover" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium">{reference.name}</div>
+                          <div className="text-[12px] text-faint">Референс света</div>
+                        </div>
+                        <IconButton label="Убрать референс" onClick={() => setReference(null)} plain>
+                          <X className="size-4" />
+                        </IconButton>
+                      </div>
+                    ) : (
+                      <Dropzone compact onFile={async (f) => setReference(await toStudioImage(f))} title="Загрузить референс" hint="Фото с нужным настроением света" />
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <div className="my-6 h-px bg-line" />
+
+            <Step n={2} title="Сила эффекта" hint="Насколько сильно менять сцену" />
+            <div className="mt-4">
+              <div className="mb-3 flex items-baseline justify-between">
+                <span className="text-[13px] text-mute">{strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
+                <span className="text-[15px] font-semibold tabular-nums">{Math.round(strength * 100)}%</span>
+              </div>
+              <input
+                type="range" min={0.1} max={1} step={0.01} value={strength} disabled={running}
+                onChange={(e) => setStrength(Number(e.target.value))}
+                className="range w-full"
+                style={{ '--fill': `${((strength - 0.1) / 0.9) * 100}%` } as React.CSSProperties}
+              />
+            </div>
+
+            <div className="my-6 h-px bg-line" />
+
+            <motion.button
+              whileTap={canGenerate ? { scale: 0.98 } : undefined}
+              onClick={generate}
+              disabled={!canGenerate}
+              className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-black/[0.08] disabled:text-faint"
+            >
+              {running ? (
+                <>
+                  <RefreshCw className="size-[18px] animate-spin" /> Рендерим…
+                </>
+              ) : result ? (
+                <>
+                  <RotateCcw className="size-[18px]" /> Сгенерировать заново
+                </>
+              ) : (
+                <>
+                  <Sparkles className="size-[18px]" /> Сгенерировать
+                </>
+              )}
+            </motion.button>
+            <p className="mt-3 text-center text-[12px] text-faint">
+              {!source
+                ? 'Сначала загрузите изображение'
+                : preset === 'custom' && !reference
+                  ? 'Добавьте референс для своего пресета'
+                  : '≈ 15 секунд · 1 кредит'}
+            </p>
+
+            <AnimatePresence>
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-[13px] text-red-600">
+                  {error}
+                </motion.p>
+              )}
+            </AnimatePresence>
+          </div>
+        </aside>
+      </motion.section>
+    </div>
+  )
+}
+
+function Step({ n, title, hint }: { n: number; title: string; hint: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-ink text-[12px] font-semibold text-white">{n}</span>
+      <div>
+        <div className="text-[17px] font-semibold tracking-[-0.015em]">{title}</div>
+        <div className="text-[13px] text-mute">{hint}</div>
+      </div>
+    </div>
+  )
+}
+
+function IconButton({ children, label, onClick, plain }: { children: React.ReactNode; label: string; onClick: () => void; plain?: boolean }) {
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={`grid size-9 place-items-center rounded-full text-ink-2 transition-all duration-300 ease-apple hover:text-ink active:scale-95 ${
+        plain ? 'hover:bg-black/[0.06]' : 'glass shadow-soft ring-1 ring-black/5 hover:bg-white'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function SecondaryButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+  return (
+    <motion.button
+      whileTap={{ scale: 0.97 }}
+      onClick={onClick}
+      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-black/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-black/[0.08] sm:flex-none"
+    >
+      {children}
+    </motion.button>
+  )
+}

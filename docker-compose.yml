@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    container_name: inego-backend
+    environment:
+      # ComfyUI обычно крутится на хосте рядом с GPU
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # true — генерация имитируется в браузере; false — запросы идут в backend
+        VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+    container_name: inego-frontend
+    ports:
+      - "${INEGO_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

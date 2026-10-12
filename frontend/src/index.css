@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", system-ui, sans-serif;
+
+  --color-ink: #1d1d1f;
+  --color-ink-2: #424245;
+  --color-mute: #6e6e73;
+  --color-faint: #86868b;
+  --color-line: #e8e8ed;
+  --color-canvas: #f5f5f7;
+  --color-accent: #0071e3;
+  --color-accent-hover: #0077ed;
+
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px -8px rgb(0 0 0 / 0.08);
+  --shadow-card: 0 1px 1px rgb(0 0 0 / 0.02), 0 4px 12px rgb(0 0 0 / 0.04), 0 24px 48px -24px rgb(0 0 0 / 0.12);
+  --shadow-float: 0 2px 4px rgb(0 0 0 / 0.04), 0 32px 80px -16px rgb(0 0 0 / 0.22);
+
+  --ease-apple: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --animate-shimmer: shimmer 2.2s var(--ease-apple) infinite;
+  --animate-float: float 6s ease-in-out infinite;
+
+  @keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  --animate-breathe: breathe 1.6s ease-in-out infinite;
+  --animate-ants: ants 0.6s linear infinite;
+
+  @keyframes breathe {
+    0%, 100% { opacity: 0.42; }
+    50% { opacity: 0.68; }
+  }
+  @keyframes ants {
+    to { stroke-dashoffset: -12; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv11", "ss01", "ss03";
+  }
+  body {
+    @apply bg-canvas text-ink font-sans;
+    letter-spacing: -0.011em;
+  }
+  ::selection {
+    background: rgb(0 113 227 / 0.18);
+  }
+}
+
+@layer components {
+  .text-gradient {
+    background: linear-gradient(100deg, #ff8a3d 0%, #ff4f7b 35%, #8f5cff 70%, #2f7bff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* только стандартное свойство: при ручном -webkit- Lightning CSS выкидывает обычное */
+  .glass {
+    background: rgb(255 255 255 / 0.72);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+  .glass-nav {
+    background: rgb(251 251 253 / 0.82);
+    backdrop-filter: saturate(180%) blur(24px);
+  }
+
+  .checker {
+    background-color: #fafafa;
+    background-image:
+      linear-gradient(45deg, #f0f0f2 25%, transparent 25%),
+      linear-gradient(-45deg, #f0f0f2 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #f0f0f2 75%),
+      linear-gradient(-45deg, transparent 75%, #f0f0f2 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+  }
+
+  /* Apple-style range slider */
+  .range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(to right, var(--color-ink) var(--fill, 50%), var(--color-line) var(--fill, 50%));
+    outline: none;
+  }
+  .range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.18);
+    cursor: grab;
+    transition: transform 0.2s var(--ease-apple);
+  }
+  .range::-webkit-slider-thumb:active { transform: scale(1.12); cursor: grabbing; }
+  .range::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.18);
+  }
+}
