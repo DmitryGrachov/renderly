@@ -18,6 +18,8 @@ export interface Img2ImgRequest {
   keepBg?: boolean
   /** true — окружение (земля, озеленение, люди перед зданием) с исходника, false — по референсу */
   keepSur?: boolean
+  /** Сид генерации; не задан — случайный */
+  seed?: number | null
   reference?: File | null
   referenceUrl?: string
 }
@@ -26,8 +28,14 @@ export type ProgressFn = (progress: number, stage: string) => void
 
 export const STAGES = ['Анализ геометрии', 'Построение карты глубины', 'Расчёт освещения', 'Финальный рендер'] as const
 
-/** Возвращает object URL готового изображения. */
-export async function img2img(req: Img2ImgRequest, onProgress: ProgressFn, signal?: AbortSignal): Promise<string> {
+export interface Img2ImgResult {
+  /** object URL готового изображения */
+  url: string
+  /** сид, с которым сделан рендер (для повтора и «добивания» той же картинки) */
+  seed: number
+}
+
+export async function img2img(req: Img2ImgRequest, onProgress: ProgressFn, signal?: AbortSignal): Promise<Img2ImgResult> {
   return USE_MOCK ? mockImg2Img(req, onProgress, signal) : realImg2Img(req, onProgress, signal)
 }
 
@@ -45,7 +53,7 @@ async function mockImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
     tick()
   })
   const blob = await gradeImage(req.imageUrl, req.scene, req.preset, req.strength, req.referenceUrl)
-  return URL.createObjectURL(blob)
+  return { url: URL.createObjectURL(blob), seed: req.seed ?? Math.floor(Math.random() * 1e9) }
 }
 
 async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?: AbortSignal) {
@@ -58,6 +66,7 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
   body.append('keep_sky', String(!!req.keepSky))
   body.append('keep_bg', String(!!req.keepBg))
   body.append('keep_sur', String(!!req.keepSur))
+  if (req.seed != null) body.append('seed', String(req.seed))
   if (req.reference) body.append('reference', req.reference)
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время рендера
@@ -77,7 +86,7 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
     }
     const blob = await res.blob()
     onProgress(1, STAGES[STAGES.length - 1])
-    return URL.createObjectURL(blob)
+    return { url: URL.createObjectURL(blob), seed: Number(res.headers.get('X-Seed')) }
   } finally {
     clearInterval(timer)
   }

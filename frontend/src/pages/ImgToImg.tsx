@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Download, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
+import { ArrowRight, Download, Lock, LockOpen, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { PresetCard } from '../components/PresetCard'
 import { CompareSlider } from '../components/CompareSlider'
@@ -33,10 +33,13 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const [keepSky, setKeepSky] = useState(false)
   const [keepBg, setKeepBg] = useState(false)
   const [keepSur, setKeepSur] = useState(false)
+  // Сид: пока замок закрыт, каждая генерация идёт с ним — картинку можно «добивать» материалами и пресетом
+  const [seed, setSeed] = useState('')
+  const [seedLocked, setSeedLocked] = useState(false)
   const [status, setStatus] = useState<Status>('idle')
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState('')
-  const [result, setResult] = useState<{ url: string; preset: PresetId; scene: Scene } | null>(null)
+  const [result, setResult] = useState<{ url: string; preset: PresetId; scene: Scene; seed: number } | null>(null)
   const [view, setView] = useState<'compare' | 'result'>('compare')
   const [error, setError] = useState<string | null>(null)
   const abort = useRef<AbortController | null>(null)
@@ -70,12 +73,14 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     setProgress(0)
     setError(null)
     try {
-      const url = await img2img(
-        { image: source.file, imageUrl: source.url, scene, preset, strength, materials, keepSky, keepBg, keepSur, reference: reference?.file, referenceUrl: reference?.url },
+      const fixedSeed = seedLocked && seed !== '' ? Number(seed) : null
+      const res = await img2img(
+        { image: source.file, imageUrl: source.url, scene, preset, strength, materials, keepSky, keepBg, keepSur, seed: fixedSeed, reference: reference?.file, referenceUrl: reference?.url },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )
-      setResult({ url, preset, scene })
+      setResult({ url: res.url, preset, scene, seed: res.seed })
+      if (!seedLocked) setSeed(String(res.seed))
       setView('compare')
       setStatus('done')
     } catch (e) {
@@ -242,7 +247,26 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                     <span className="size-10 shrink-0 rounded-xl ring-1 ring-fg/5" style={{ background: presetById(result.preset, result.scene).sky }} />
                     <div>
                       <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset, result.scene).title} · {SCENE_LABEL[result.scene]}</div>
-                      <div className="text-[13px] text-mute">Перетаскивайте ползунок, чтобы сравнить</div>
+                      <div className="flex flex-wrap items-center gap-x-2 text-[13px] text-mute">
+                        <span>Сид <span className="font-medium tabular-nums text-ink-2">{result.seed}</span></span>
+                        <span aria-hidden>·</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const same = seedLocked && seed === String(result.seed)
+                            setSeed(String(result.seed))
+                            setSeedLocked(!same)
+                          }}
+                          disabled={running}
+                          className="inline-flex items-center gap-1 font-medium text-accent transition-colors hover:text-accent-hover"
+                        >
+                          {seedLocked && seed === String(result.seed) ? (
+                            <><Lock className="size-3.5" /> Зафиксирован</>
+                          ) : (
+                            <><LockOpen className="size-3.5" /> Зафиксировать</>
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -349,6 +373,35 @@ export function ImgToImg({ onSendToInpaint }: Props) {
             </div>
 
             <div className="my-6 h-px bg-line" />
+
+            <div className="mb-3 flex items-center gap-2">
+              <label htmlFor="seed" className="text-[13px] text-mute">Сид</label>
+              <input
+                id="seed"
+                inputMode="numeric"
+                value={seed}
+                disabled={running}
+                placeholder="случайный"
+                onChange={(e) => {
+                  const v = e.target.value.replace(/\D/g, '').slice(0, 14)
+                  setSeed(v)
+                  setSeedLocked(v !== '')
+                }}
+                className="min-w-0 flex-1 rounded-full bg-fg/[0.04] px-3.5 py-2 text-[14px] tabular-nums outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
+              />
+              <button
+                type="button"
+                onClick={() => setSeedLocked((v) => !v && seed !== '')}
+                disabled={running || seed === ''}
+                aria-label={seedLocked ? 'Снять фиксацию сида' : 'Зафиксировать сид'}
+                title={seedLocked ? 'Сид зафиксирован — повторяет картинку' : 'Каждый раз новый сид'}
+                className={`grid size-9 shrink-0 place-items-center rounded-full transition-all duration-300 ease-apple active:scale-95 disabled:opacity-40 ${
+                  seedLocked ? 'bg-accent text-white' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.08]'
+                }`}
+              >
+                {seedLocked ? <Lock className="size-4" /> : <LockOpen className="size-4" />}
+              </button>
+            </div>
 
             <motion.button
               whileTap={canGenerate ? { scale: 0.98 } : undefined}

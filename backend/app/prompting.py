@@ -5,9 +5,11 @@ DeepSeek смотрит на исходник (вьюпорт / клей / сл�
 """
 
 import base64
+import hashlib
 import io
 import json
 import logging
+from collections import OrderedDict
 
 import httpx
 from PIL import Image
@@ -16,6 +18,11 @@ from .config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL
 from .presets import PRESETS
 
 log = logging.getLogger("inego")
+
+# Ответы DeepSeek по входам: тот же исходник + те же настройки → тот же промпт,
+# поэтому с фиксированным сидом картинка повторяется (DeepSeek формулирует по-разному даже при temperature 0)
+_cache: OrderedDict[str, tuple[str, list[float] | None]] = OrderedDict()
+CACHE_SIZE = 256
 
 # Обязательные блоки — добавляются в промпт всегда, даже если DeepSeek недоступен.
 INTRO = "Turn this draft render into a photorealistic architectural photograph."
@@ -104,7 +111,7 @@ def _data_url(image: bytes, max_side: int = 1536) -> str:
 
 
 async def _chat(messages: list[dict], json_mode: bool = False) -> str:
-    body = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0.2}
+    body = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=90) as client:
@@ -190,6 +197,15 @@ async def build_prompt(
     if not DEEPSEEK_API_KEY:
         return assemble(fallback_body(scene, look), materials, has_ref, *keep), None
 
+    h = hashlib.sha256(image)
+    h.update(hashlib.sha256(reference or b"").digest())
+    h.update(json.dumps([scene, preset, materials, keep]).encode())
+    key = h.hexdigest()
+    if key in _cache:
+        _cache.move_to_end(key)
+        log.info("Промпт из кэша (те же входы)")
+        return _cache[key]
+
     try:
         if preset == "custom" and has_ref:
             look = await describe_look(reference)
@@ -230,7 +246,11 @@ async def build_prompt(
         if materials:
             # переведённая DeepSeek спецификация; если не вернул — исходный текст архитектора
             materials = (data.get("materials") or "").strip() or materials
-        return assemble(data["prompt"], materials, has_ref, *keep), _box(data.get("box")) if need_box else None
+        result = assemble(data["prompt"], materials, has_ref, *keep), _box(data.get("box")) if need_box else None
+        _cache[key] = result
+        if len(_cache) > CACHE_SIZE:
+            _cache.popitem(last=False)
+        return result
     except Exception as e:  # noqa: BLE001 — генерация не должна падать из-за LLM
         log.warning("DeepSeek недоступен, использую шаблонный промпт: %s", e)
         return assemble(fallback_body(scene, look), materials, has_ref, *keep), None

@@ -212,8 +212,15 @@ async def run_img2img(
     keep_sky: bool = False,
     keep_bg: bool = False,
     keep_sur: bool = False,
-) -> bytes:
-    """Возвращает JPEG финального рендера — в разрешении генерации, строго в пропорциях исходника."""
+    seed: int | None = None,
+) -> tuple[bytes, int]:
+    """JPEG финального рендера (в разрешении генерации, строго в пропорциях исходника) и использованный сид.
+
+    seed — для повторяемости: тот же сид + те же входы дают ту же картинку, поэтому её можно
+    «добивать» материалами и пресетом, не меняя всю сцену. None — случайный.
+    """
+    if seed is None:
+        seed = random.randrange(2**48)
     src = Image.open(io.BytesIO(image)).convert("RGB")
     width, height = fit_size(*src.size, RENDER_MEGAPIXELS)
 
@@ -221,8 +228,8 @@ async def run_img2img(
     prompt, box = await build_prompt(image, scene, preset, ref_bytes, materials, keep_sky, keep_bg, keep_sur)
     denoise = denoise_for(strength)
     log.info(
-        "img2img %s/%s %dx%d denoise=%.2f keep sky=%s bg=%s sur=%s box=%s\n%s",
-        scene, preset, width, height, denoise, keep_sky, keep_bg, keep_sur, box, prompt,
+        "img2img %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
+        scene, preset, width, height, denoise, seed, keep_sky, keep_bg, keep_sur, box, prompt,
     )
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
@@ -235,7 +242,7 @@ async def run_img2img(
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
 
         workflow = build_workflow(
-            source_name, width, height, prompt, denoise, random.randrange(2**48), ref_name, keep_sky, keep_bg, keep_sur, box
+            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box
         )
         out = await _run(client, workflow)
 
@@ -246,7 +253,7 @@ async def run_img2img(
         result = result.resize(exact, Image.LANCZOS)
     buf = io.BytesIO()
     result.save(buf, "JPEG", quality=95)
-    return buf.getvalue()
+    return buf.getvalue(), seed
 
 
 async def run_inpaint(image: bytes, mask: bytes, scene: str, mode: str, prompt: str | None = None) -> bytes:

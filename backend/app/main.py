@@ -56,6 +56,8 @@ async def img2img(
     keep_sky: bool = Form(False),
     keep_bg: bool = Form(False),  # фон: всё позади главного здания
     keep_sur: bool = Form(False),  # окружение: земля, озеленение, люди, машины перед зданием
+    # сид генерации; пусто — случайный. Фактический сид возвращается в заголовке X-Seed
+    seed: int | None = Form(None, ge=0, lt=2**48),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
@@ -65,7 +67,7 @@ async def img2img(
         raise HTTPException(400, "Custom preset requires a reference image")
 
     try:
-        result = await comfy.run_img2img(
+        result, used_seed = await comfy.run_img2img(
             await image.read(),
             scene,
             preset,
@@ -75,11 +77,12 @@ async def img2img(
             keep_sky,
             keep_bg,
             keep_sur,
+            seed,
         )
     except (comfy.ComfyError, httpx.HTTPError) as e:
         log.exception("img2img failed")
         raise HTTPException(502, f"Генерация не удалась: {e}") from e
-    return Response(content=result, media_type="image/jpeg")
+    return Response(content=result, media_type="image/jpeg", headers={"X-Seed": str(used_seed)})
 
 
 @app.post("/api/inpaint")
