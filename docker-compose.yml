@@ -23,8 +23,11 @@ services:
       # Пустой — сгенерируется временный (сессии сбросятся при перезапуске)
       JWT_SECRET: ${JWT_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      # ComfyUI обычно крутится на хосте рядом с GPU
-      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+      # По умолчанию — сервис comfyui ниже; ComfyUI на хосте: http://host.docker.internal:8188
+      COMFYUI_URL: ${COMFYUI_URL:-http://comfyui:8188}
+      # DeepSeek: описывает исходник и собирает промпт (без ключа — промпт из пресета)
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -49,5 +52,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  comfyui:
+    build: ./comfyui
+    container_name: inego-comfyui
+    # Первый старт докачивает ~12 ГБ моделей в volume comfy_models
+    gpus: all
+    environment:
+      COMFYUI_ARGS: ${COMFYUI_ARGS:-}
+    volumes:
+      - comfy_models:/opt/ComfyUI/models
+      - comfy_output:/opt/ComfyUI/output
+    ports:
+      # UI ComfyUI — только локально, для отладки workflow
+      - "127.0.0.1:${COMFYUI_PORT:-8188}:8188"
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  comfy_models:
+  comfy_output:

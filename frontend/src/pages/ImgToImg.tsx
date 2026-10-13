@@ -29,6 +29,10 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
   const [strength, setStrength] = useState(0.7)
+  const [materials, setMaterials] = useState('')
+  const [keepSky, setKeepSky] = useState(false)
+  const [keepBg, setKeepBg] = useState(false)
+  const [keepSur, setKeepSur] = useState(false)
   const [status, setStatus] = useState<Status>('idle')
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState('')
@@ -67,7 +71,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     setError(null)
     try {
       const url = await img2img(
-        { image: source.file, imageUrl: source.url, scene, preset, strength, reference: reference?.file, referenceUrl: reference?.url },
+        { image: source.file, imageUrl: source.url, scene, preset, strength, materials, keepSky, keepBg, keepSur, reference: reference?.file, referenceUrl: reference?.url },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )
@@ -297,9 +301,40 @@ export function ImgToImg({ onSendToInpaint }: Props) {
               )}
             </AnimatePresence>
 
+            <div className="mt-3 divide-y divide-line overflow-hidden rounded-2xl bg-canvas">
+              <KeepToggle
+                title="Сохранить небо"
+                hint={keepSky ? 'Те же облака, свет и цвет — по референсу' : 'Небо — по референсу'}
+                checked={keepSky} onChange={setKeepSky} disabled={running}
+              />
+              <KeepToggle
+                title="Сохранить фон"
+                hint={keepBg ? 'Та же застройка позади, свет и цвет — по референсу' : 'Фон — по референсу'}
+                checked={keepBg} onChange={setKeepBg} disabled={running}
+              />
+              <KeepToggle
+                title="Сохранить окружение"
+                hint={keepSur ? 'Те же дороги, озеленение и машины, свет — по референсу' : 'Окружение — по референсу'}
+                checked={keepSur} onChange={setKeepSur} disabled={running}
+              />
+            </div>
+
             <div className="my-6 h-px bg-line" />
 
-            <Step n={2} title="Сила эффекта" hint="Насколько сильно менять сцену" />
+            <Step n={2} title="Материалы" hint="Необязательно — иначе берём с изображения" />
+            <textarea
+              value={materials}
+              onChange={(e) => setMaterials(e.target.value)}
+              disabled={running}
+              rows={3}
+              maxLength={600}
+              placeholder="Стены — серая штукатурка, цоколь — бежевый рваный камень, кровля — графитовый фальц"
+              className="mt-4 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
+            />
+
+            <div className="my-6 h-px bg-line" />
+
+            <Step n={3} title="Сила эффекта" hint="Насколько сильно менять сцену" />
             <div className="mt-4">
               <div className="mb-3 flex items-baseline justify-between">
                 <span className="text-[13px] text-mute">{strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
@@ -354,6 +389,32 @@ export function ImgToImg({ onSendToInpaint }: Props) {
         </aside>
       </motion.section>
     </div>
+  )
+}
+
+function KeepToggle({ title, hint, checked, onChange, disabled }: {
+  title: string
+  hint: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+}) {
+  return (
+    <label className={`flex cursor-pointer items-center gap-3 px-3.5 py-2.5 ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium">{title}</div>
+        <div className="text-[12px] text-faint">{hint}</div>
+      </div>
+      <input type="checkbox" className="peer sr-only" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span
+        aria-hidden
+        className={`relative h-[26px] w-[44px] shrink-0 rounded-full transition-colors duration-300 ease-apple peer-focus-visible:ring-2 peer-focus-visible:ring-accent/40 ${checked ? 'bg-accent' : 'bg-fg/[0.12]'}`}
+      >
+        <span
+          className={`absolute top-[3px] left-[3px] size-5 rounded-full bg-white shadow-sm transition-transform duration-300 ease-apple ${checked ? 'translate-x-[18px]' : ''}`}
+        />
+      </span>
+    </label>
   )
 }
 

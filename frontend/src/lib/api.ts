@@ -10,6 +10,14 @@ export interface Img2ImgRequest {
   scene: Scene
   preset: PresetId
   strength: number
+  /** Материалы от архитектора; пустая строка — не применяются */
+  materials?: string
+  /** true — небо с исходника, false — по референсу */
+  keepSky?: boolean
+  /** true — фон (всё позади здания) с исходника, false — по референсу */
+  keepBg?: boolean
+  /** true — окружение (земля, озеленение, люди перед зданием) с исходника, false — по референсу */
+  keepSur?: boolean
   reference?: File | null
   referenceUrl?: string
 }
@@ -46,12 +54,31 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
   body.append('scene', req.scene)
   body.append('preset', req.preset)
   body.append('strength', String(req.strength))
+  if (req.materials?.trim()) body.append('materials', req.materials.trim())
+  body.append('keep_sky', String(!!req.keepSky))
+  body.append('keep_bg', String(!!req.keepBg))
+  body.append('keep_sur', String(!!req.keepSur))
   if (req.reference) body.append('reference', req.reference)
 
-  onProgress(0.05, STAGES[0])
-  const res = await fetch('/api/img2img', { method: 'POST', body, signal })
-  if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
-  if (!res.ok) throw new Error(`Сервер ответил ${res.status}`)
-  onProgress(1, STAGES[STAGES.length - 1])
-  return URL.createObjectURL(await res.blob())
+  // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время рендера
+  const expected = 30000
+  const start = performance.now()
+  const timer = setInterval(() => {
+    const t = (performance.now() - start) / expected
+    const p = 0.95 * (1 - Math.exp(-2.2 * t))
+    onProgress(p, STAGES[Math.min(STAGES.length - 1, Math.floor((p / 0.95) * STAGES.length))])
+  }, 200)
+  try {
+    const res = await fetch('/api/img2img', { method: 'POST', body, signal })
+    if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
+    if (!res.ok) {
+      const detail = await res.json().then((j) => j.detail as string).catch(() => '')
+      throw new Error(detail || `Сервер ответил ${res.status}`)
+    }
+    const blob = await res.blob()
+    onProgress(1, STAGES[STAGES.length - 1])
+    return URL.createObjectURL(blob)
+  } finally {
+    clearInterval(timer)
+  }
 }

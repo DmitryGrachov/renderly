@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -7,7 +8,7 @@ from fastapi.responses import Response
 from . import comfy
 from .auth import current_user
 from .auth import router as auth_router
-from .config import CORS_ORIGINS
+from .config import CORS_ORIGINS, log
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
@@ -49,6 +50,12 @@ async def img2img(
     preset: str = Form(...),
     strength: float = Form(0.7),
     reference: UploadFile | None = File(None),
+    # Материалы от архитектора; пусто — берутся с изображения
+    materials: str | None = Form(None, max_length=600),
+    # true — зона остаётся как на исходнике, false — по референсу
+    keep_sky: bool = Form(False),
+    keep_bg: bool = Form(False),  # фон: всё позади главного здания
+    keep_sur: bool = Form(False),  # окружение: земля, озеленение, люди, машины перед зданием
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
@@ -57,14 +64,22 @@ async def img2img(
     if preset == "custom" and reference is None:
         raise HTTPException(400, "Custom preset requires a reference image")
 
-    result = await comfy.run_img2img(
-        await image.read(),
-        scene,
-        preset,
-        strength,
-        await reference.read() if reference else None,
-    )
-    return Response(content=result, media_type=image.content_type or "image/png")
+    try:
+        result = await comfy.run_img2img(
+            await image.read(),
+            scene,
+            preset,
+            strength,
+            await reference.read() if reference else None,
+            materials,
+            keep_sky,
+            keep_bg,
+            keep_sur,
+        )
+    except (comfy.ComfyError, httpx.HTTPError) as e:
+        log.exception("img2img failed")
+        raise HTTPException(502, f"Генерация не удалась: {e}") from e
+    return Response(content=result, media_type="image/jpeg")
 
 
 @app.post("/api/inpaint")
