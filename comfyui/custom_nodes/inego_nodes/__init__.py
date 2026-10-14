@@ -118,20 +118,46 @@ def _to_uint8(image: torch.Tensor) -> np.ndarray:
     return (image.clamp(0, 1).numpy() * 255).astype(np.uint8)
 
 
-def _segment(rgb: np.ndarray) -> tuple[np.ndarray, dict[int, str]]:
-    """Карта классов ADE20k [H, W]."""
+def _segment(rgb: np.ndarray, sky_prob: bool = False):
+    """Карта классов ADE20k [H, W]; с sky_prob — ещё и вероятность неба [H, W] (для мягкой маски неба)."""
     processor, model = _segformer()
     h, w = rgb.shape[:2]
     model.to(_device())
+    names = {int(k): v.split(";")[0].strip().lower() for k, v in model.config.id2label.items()}
     try:
         inputs = processor(images=rgb, return_tensors="pt").to(_device())
         with torch.no_grad():
             logits = model(**inputs).logits
         labels = F.interpolate(logits, size=(h, w), mode="bilinear", align_corners=False).argmax(1)[0].cpu().numpy()
+        prob = None
+        if sky_prob:
+            sky_ids = [i for i, n in names.items() if n in SKY]
+            p = logits.softmax(1)[:, sky_ids].sum(1, keepdim=True)
+            prob = F.interpolate(p, size=(h, w), mode="bilinear", align_corners=False)[0, 0].cpu().numpy()
     finally:
         model.to("cpu")
-    names = {int(k): v.split(";")[0].strip().lower() for k, v in model.config.id2label.items()}
-    return labels, names
+    return (labels, names, prob) if sky_prob else (labels, names)
+
+
+def _clean_sky(prob: np.ndarray) -> np.ndarray:
+    """Цельная маска неба из вероятности: без пятен и клочьев.
+
+    По argmax полупрозрачные объёмы и дымка рвутся на клочья «небо / не небо» — плашка неба вклеивалась
+    пятнами. Сглаженная вероятность даёт цельные области; мелкие островки и дыры убираются.
+    """
+    h, w = prob.shape
+    area = h * w
+    p = ndimage.gaussian_filter(prob.astype(np.float32), sigma=min(h, w) * 0.012)
+    m = p > 0.5
+    lab, n = ndimage.label(m)
+    if n:
+        sizes = ndimage.sum(m, lab, range(1, n + 1))
+        m = np.isin(lab, 1 + np.where(sizes >= 0.003 * area)[0])
+    holes, n = ndimage.label(~m)
+    if n:
+        sizes = ndimage.sum(~m, holes, range(1, n + 1))
+        m |= np.isin(holes, 1 + np.where(sizes < 0.003 * area)[0])
+    return m
 
 
 def _sam_building(rgb: np.ndarray, box: list[float]) -> np.ndarray | None:
@@ -245,14 +271,19 @@ class InegoKeepZones:
             return (empty, empty, empty, empty)
 
         rgb = _to_uint8(image[0])
-        labels, names = _segment(rgb)
-        ids = lambda group: [i for i, n in names.items() if n in group]  # noqa: E731
-        sky = np.isin(labels, ids(SKY))
         split = keep_background or keep_surroundings
+        if refine and keep_sky and not split:
+            # только небо: цельная маска из сглаженной вероятности, без клочьев на дымке и полупрозрачных объёмах
+            labels, names, prob = _segment(rgb, sky_prob=True)
+            sky = _clean_sky(prob)
+        else:
+            labels, names = _segment(rgb)
+            sky = np.isin(labels, [i for i, n in names.items() if n in SKY])
+        ids = lambda group: [i for i, n in names.items() if n in group]  # noqa: E731
 
         building = None
         box = _parse_box(building_box)
-        if split and box:
+        if building is None and split and box:
             building = _sam_building(rgb, box)
         if building is None:
             building = _segformer_building(np.isin(labels, ids(ARCH)))
@@ -370,19 +401,16 @@ class InegoZoneRestyle:
 
 
 def _sky_mask(rgb: np.ndarray) -> np.ndarray:
-    """Небо SegFormer без здания и без точечной ряби."""
-    labels, names = _segment(rgb)
-    sky = np.isin(labels, [i for i, n in names.items() if n in SKY])
-    if sky.any():
-        k = max(3, round(min(sky.shape) * 0.01) | 1)
-        sky = ndimage.median_filter(sky.astype(np.uint8), size=k).astype(bool)
-    return sky
+    """Цельная маска неба SegFormer (по сглаженной вероятности, без ряби и клочьев)."""
+    _, _, prob = _segment(rgb, sky_prob=True)
+    return _clean_sky(prob)
 
 
 class InegoSkyMatch:
     """Цвет неба результата — как у неба референса: градиент от зенита к горизонту по полосам высоты (LAB).
 
-    Облака и их расклад не трогаются — меняются только тон, цвет и яркость неба, чтобы попасть в референс.
+    Облака и их расклад не трогаются: цвет считается только по чистому небу (без облаков), а яркие пиксели
+    облаков получают ослабленный сдвиг — иначе белые облака окрашиваются в цвет неба (сиреневые, серые).
     """
 
     BANDS = 6
@@ -403,8 +431,8 @@ class InegoSkyMatch:
     CATEGORY = "inego"
 
     @classmethod
-    def _profile(cls, lab: torch.Tensor, sky: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
-        """Средний LAB по полосам высоты неба (сверху вниз) и общий разброс."""
+    def _profile(cls, lab: torch.Tensor, sky: np.ndarray) -> np.ndarray | None:
+        """Средний LAB чистого неба (без облаков: нижние 70% яркости полосы) по полосам высоты сверху вниз."""
         rows = np.where(sky.any(1))[0]
         if sky.sum() < 0.02 * sky.size or rows.size < cls.BANDS:
             return None
@@ -418,13 +446,12 @@ class InegoSkyMatch:
                 means.append(None)
                 continue
             sel = lab[:, torch.from_numpy(m)]
-            means.append(sel.mean(-1).numpy())
+            clear = sel[:, sel[0] <= torch.quantile(sel[0], 0.7)]
+            means.append(clear.mean(-1).numpy())
         valid = [x for x in means if x is not None]
         if not valid:
             return None
-        means = [x if x is not None else valid[0] for x in means]
-        std = lab[:, torch.from_numpy(sky)].std(-1).numpy() + 1e-3
-        return np.stack(means), std
+        return np.stack([x if x is not None else valid[0] for x in means])
 
     def run(self, image, reference, strength, feather):
         import kornia
@@ -441,7 +468,7 @@ class InegoSkyMatch:
                      100 * sky_i.mean(), 100 * sky_r.mean())
             return (image,)
 
-        (mi, si), (mr, sr) = prof_i, prof_r
+        mi, mr = prof_i, prof_r
         h, w = sky_i.shape
         rows = np.where(sky_i.any(1))[0]
         top, bottom = rows.min(), rows.max() + 1
@@ -450,13 +477,22 @@ class InegoSkyMatch:
         rel = np.clip((np.arange(h) - top) / max(1, bottom - top), 0, 1)
         mean_i_row = np.stack([np.interp(rel, centers, mi[:, c]) for c in range(3)])
         mean_r_row = np.stack([np.interp(rel, centers, mr[:, c]) for c in range(3)])
-        scale = torch.from_numpy(sr / si).float()[:, None, None].clamp(0.5, 2.0)
         mi_t = torch.from_numpy(mean_i_row).float()[:, :, None]
         mr_t = torch.from_numpy(mean_r_row).float()[:, :, None]
-        matched = (lab_i - mi_t) * scale + mr_t
+        # облака — пиксели заметно ярче чистого неба своей полосы: им сдвиг ослаблен, они остаются белыми
+        cloud = ((lab_i[0:1] - mi_t[0:1] - 8.0) / 15.0).clamp(0, 1)
+        matched = lab_i + (mr_t - mi_t) * (1 - 0.85 * cloud)
 
         # край — по настоящему контуру, иначе у здания остаётся полоска неба старого цвета
         m = _refine(sky_i, _to_uint8(image[0])) if feather else sky_i.astype(np.float32)
+        # небо, просвечивающее сквозь редкие кроны и ветки: SegFormer относит всю крону к дереву, и небо внутри
+        # оставалось старого цвета — пятно вокруг дерева. Рядом с небом подкрашиваем ещё и по цвету: пиксели,
+        # близкие к чистому небу своей полосы; ветки, листва и фасады по цвету отличаются и не задеваются
+        near = ndimage.binary_dilation(sky_i, iterations=max(1, round(min(h, w) * 0.04)))
+        diff = lab_i - mi_t
+        dist = torch.sqrt((0.5 * diff[0]) ** 2 + diff[1] ** 2 + diff[2] ** 2)
+        by_colour = torch.exp(-(dist / 12.0) ** 2).numpy() * near
+        m = np.maximum(m, by_colour.astype(np.float32))
         m = torch.from_numpy(m).float()[None] * strength
         out = lab_i * (1 - m) + matched * m
         rgb = kornia.color.lab_to_rgb(out[None]).clamp(0, 1)[0]

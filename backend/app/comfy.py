@@ -6,11 +6,10 @@
   3. кадр генерируется в тех же пропорциях, результат приводится к размеру исходника.
 Референс подаётся вторым ReferenceLatent (image 2) — эталон неба, света, атмосферы и растительности.
 
-Небо (экстерьер с референсом):
-  - без «Сохранить небо» небо полного рендера перерисовывается целиком по маске неба, а образец — только
-    вырезанное небо референса (рамку чистого неба даёт DeepSeek): так переносятся облачность, её плотность и цвет,
-    а облака черновика не просачиваются;
-  - в конце InegoSkyMatch подгоняет цвет неба к небу референса по полосам от зенита к горизонту.
+Небо (экстерьер с референсом) — без масок и вклеек, их швы на дымке и полупрозрачных объёмах давали артефакты:
+  - без «Сохранить небо» вырезанное небо референса (рамку чистого неба даёт DeepSeek) подаётся в основной проход
+    третьим ReferenceLatent (image 3) — образец неба, облачность и её плотность заданы текстом;
+  - в конце InegoSkyMatch мягко подгоняет цвет неба к небу референса по полосам от зенита к горизонту.
 
 «Сохранить небо / фон / окружение» — сохраняется расклад зоны (где газон, дорога, деревья, облака),
 а сама зона перерисовывается фотореально в стилистике референса:
@@ -44,7 +43,7 @@ from .config import (
     log,
 )
 from .presets import reference_image
-from .prompting import analyze_reference, build_prompt, sky_instruction, zone_instruction
+from .prompting import analyze_reference, build_prompt, zone_instruction
 
 REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
@@ -116,13 +115,18 @@ def _sampling(
     return [f"decode{tag}", 0]
 
 
-def _conditioning(wf: dict, tag: str, image_latent: list, reference: str | None, text: str = "text") -> list:
-    """Текст + image 1 (что редактируем) + image 2 (референс света)."""
+def _conditioning(
+    wf: dict, tag: str, image_latent: list, reference: str | None, text: str = "text", sky: bool = False
+) -> list:
+    """Текст + image 1 (что редактируем) + image 2 (референс) [+ image 3 — небо референса]."""
     wf[f"cond{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": [text, 0], "latent": image_latent}}
     positive = [f"cond{tag}", 0]
     if reference:
         wf[f"cond_ref{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["ref_lat", 0]}}
         positive = [f"cond_ref{tag}", 0]
+    if sky:
+        wf[f"cond_sky{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["sky_ref_lat", 0]}}
+        positive = [f"cond_sky{tag}", 0]
     return positive
 
 
@@ -141,7 +145,6 @@ def build_workflow(
     model: str = DEFAULT_MODEL,
     zone_prompt: str = "",
     sky_ref: str | None = None,
-    sky_prompt: str = "",
     sky_match: bool = False,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
@@ -158,30 +161,17 @@ def build_workflow(
     if reference:
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
         wf["ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["ref_img", 0], "vae": ["vae", 0]}}
+    sky = bool(sky_ref and reference and not keep_sky)
+    if sky:
+        # небо референса крупно — образец неба для основного прохода (image 3)
+        wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
+        wf["sky_ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["sky_ref_img", 0], "vae": ["vae", 0]}}
 
     # проход 1 — полный рендер
-    positive = _conditioning(wf, "", ["src_lat", 0], reference)
+    positive = _conditioning(wf, "", ["src_lat", 0], reference, sky=sky)
     image = _sampling(wf, "", positive, ["src_lat", 0], width, height, max(1, round(TOTAL_STEPS * denoise)), seed)
     # Differential Diffusion — мягкий край для всех проходов по маске
     wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["unet", 0], "strength": 1.0}}
-
-    if sky_ref and not keep_sky:
-        # замена неба: маска неба полного рендера, шум только под ней, образец — небо референса как image 1
-        # (не черновик: иначе модель воспроизводит его облака)
-        wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
-        wf["sky_ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["sky_ref_img", 0], "vae": ["vae", 0]}}
-        wf["sky_zones"] = {
-            "class_type": "InegoKeepZones",
-            "inputs": {
-                "image": image, "keep_sky": True, "keep_background": False, "keep_surroundings": False,
-                "grow": 0.0, "feather": 0.006, "building_box": "", "refine": True,
-            },
-        }
-        wf["sky_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": image, "vae": ["vae", 0]}}
-        wf["sky_masked"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["sky_lat", 0], "mask": ["sky_zones", 0]}}
-        wf["text_s"] = {"class_type": "CLIPTextEncode", "inputs": {"text": sky_prompt, "clip": ["clip", 0]}}
-        wf["cond_s"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text_s", 0], "latent": ["sky_ref_lat", 0]}}
-        image = _sampling(wf, "_s", ["cond_s", 0], ["sky_masked", 0], width, height, TOTAL_STEPS, seed + 2, model=["diffdiff", 0])
 
     if keep_sky or keep_bg or keep_sur:
         wf["zones"] = {
@@ -309,22 +299,19 @@ async def run_img2img(
     zone_prompt = await zone_instruction(ref_bytes, keep_sky, keep_bg, keep_sur) if (keep_sky or keep_bg or keep_sur) else ""
     if zone_prompt:
         log.info("Перерисовка зон:\n%s", zone_prompt)
-    # небо референса: рамка чистого неба из разбора DeepSeek (из кэша) — для замены неба в экстерьере
-    sky_box, sky_prompt = None, ""
+    # небо референса: рамка чистого неба из разбора DeepSeek (из кэша) — образец неба (image 3) в экстерьере
+    sky_box = None
     exterior = scene == "exterior"
     if ref_bytes and exterior and not keep_sky:
         try:
-            analysis = await analyze_reference(ref_bytes)
-            sky_box = analysis.get("_sky_box")
-            sky_prompt = sky_instruction(analysis) if sky_box else ""
-        except Exception as e:  # noqa: BLE001 — без замены неба генерация всё равно идёт
+            sky_box = (await analyze_reference(ref_bytes)).get("_sky_box")
+        except Exception as e:  # noqa: BLE001 — без образца неба генерация всё равно идёт
             log.warning("Разбор референса для неба недоступен: %s", e)
-    if sky_prompt:
-        log.info("Замена неба, рамка %s:\n%s", sky_box, sky_prompt)
     denoise = denoise_for(strength)
     log.info(
         "img2img %s %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
-        model, scene, preset, width, height, denoise, seed, keep_sky, keep_bg, keep_sur, box, prompt,
+        model, scene, preset, width, height, denoise, seed, keep_sky, keep_bg, keep_sur, box,
+        prompt + (f"\n[image 3: небо референса, рамка {sky_box}]" if sky_box else ""),
     )
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
@@ -342,7 +329,7 @@ async def run_img2img(
 
         workflow = build_workflow(
             source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model,
-            zone_prompt, sky_name, sky_prompt, sky_match=exterior,
+            zone_prompt, sky_name, sky_match=exterior,
         )
         out = await _run(client, workflow)
 

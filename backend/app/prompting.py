@@ -42,7 +42,9 @@ INTRO = (
 KEEP_GEOMETRY = (
     "Keep the exact same camera position, focal length, perspective, framing and horizon line. "
     "Keep the building geometry, massing, silhouette, proportions, floor count, window layout, every opening, "
-    "edge and line exactly as in image 1; do not add, remove or move any architectural element."
+    "edge and line exactly as in image 1; do not add, remove or move any architectural element. The roofline "
+    "and the silhouette of the building against the sky stay exactly as in image 1: no added rooftop volumes, "
+    "penthouses, extra floors, parapets, antennas, signs or structures on or above the roof."
 )
 KEEP_MATERIALS = (
     "Keep every material exactly as in image 1: the same material type, colour, texture pattern, joint and panel "
@@ -272,26 +274,11 @@ def clouds_text(cloud_cover: str, image: str = "image 2") -> str:
     return f"Cloud cover exactly as in {image}, the same amount and density of clouds, no more and no fewer: {cloud_cover}"
 
 
-SKY_INSTRUCTION = (
-    "Replace only the sky with a real photographed sky exactly like the sky in image 1: the same colours and "
-    "gradient from the zenith to the horizon, the same light, the same cloud types, amount and density. "
-    "Everything outside the sky stays exactly as it is; the sky meets the rooftops, trees and horizon naturally, "
-    "with the haze and glow of image 1 near the horizon."
+# образец неба: вырезанное чистое небо референса подаётся в основной проход третьей картинкой
+SKY_IMAGE = (
+    "Image 3 is a close-up of the sky of image 2: the sky of the result must look exactly like image 3, with the "
+    "same colours, gradient, light, cloud types, amount and density; no clouds from image 1 remain."
 )
-
-
-def sky_instruction(analysis: dict) -> str:
-    """Команда для прохода замены неба (image 1 — вырезанное небо референса)."""
-    a = analysis
-    parts = [SKY_INSTRUCTION]
-    if a.get("cloud_cover"):
-        parts.append(clouds_text(a["cloud_cover"], "image 1"))
-    if a.get("sky"):
-        parts.append(f"Sky: {a['sky']}")
-    if a.get("light_rays_and_atmosphere"):
-        parts.append(f"Atmosphere: {a['light_rays_and_atmosphere']}")
-    parts.append("It must look like an unretouched real photograph of the sky.")
-    return " ".join(parts)
 
 
 def reference_block(analysis: dict, keep_sky: bool, keep_bg: bool, keep_sur: bool) -> str:
@@ -337,9 +324,10 @@ def assemble(
     keep_sky: bool = False,
     keep_bg: bool = False,
     keep_sur: bool = False,
+    sky_image: bool = False,
 ) -> str:
     """Промпт = вступление + замки здания + рамка референса + замки зон + разбор референса
-    + описательная часть под здание + фотореализм + финальный замок здания."""
+    + описательная часть под здание + [образец неба] + фотореализм + финальный замок здания."""
     lock = SPEC_MATERIALS.format(spec=materials.rstrip(".") + ".") if materials else KEEP_MATERIALS
     parts = [INTRO, KEEP_GEOMETRY, lock]
     if has_ref:
@@ -350,7 +338,7 @@ def assemble(
         parts.append(KEEP_BG)
     if keep_sur:
         parts.append(KEEP_SUR)
-    parts += [ref_text, body.strip(), PHOTOREAL, FINAL_LOCK]
+    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", PHOTOREAL, FINAL_LOCK]
     return " ".join(p for p in parts if p)
 
 
@@ -450,14 +438,15 @@ async def build_prompt(
     has_ref = reference is not None
 
     keep = (keep_sky, keep_bg, keep_sur)
-    need_box = keep_bg or keep_sur
+    # рамка главного здания: для зон и для замка силуэта при замене неба (экстерьер)
+    need_box = keep_bg or keep_sur or scene == "exterior"
 
     if not DEEPSEEK_API_KEY:
         return assemble(fallback_body(scene, look), materials, "", has_ref, *keep), None
 
     h = hashlib.sha256(image)
     h.update(hashlib.sha256(reference or b"").digest())
-    h.update(json.dumps([scene, preset, materials, keep, "v4"]).encode())
+    h.update(json.dumps([scene, preset, materials, keep, "v6"]).encode())
     key = h.hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
@@ -501,7 +490,12 @@ async def build_prompt(
         if materials:
             # переведённая DeepSeek спецификация; если не вернул — исходный текст архитектора
             materials = (data.get("materials") or "").strip() or materials
-        result = assemble(data["prompt"], materials, ref_text, has_ref, *keep), _box(data.get("box")) if need_box else None
+        # образец неба (image 3) — экстерьер без «Сохранить небо», если на референсе есть чистое небо
+        sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box"))
+        result = (
+            assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image),
+            _box(data.get("box")) if need_box else None,
+        )
         _cache[key] = result
         if len(_cache) > CACHE_SIZE:
             _cache.popitem(last=False)
