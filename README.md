@@ -5,7 +5,7 @@ AI-инструменты для архитектурной визуализац
 ```
 frontend/  React + Vite + TypeScript + Tailwind v4
 backend/   FastAPI + PostgreSQL (авторизация, DeepSeek → промпт, клиент ComfyUI)
-comfyui/   ComfyUI + FLUX.2 [klein] 4B в Docker (GPU)
+comfyui/   ComfyUI + FLUX.2 [klein] 4B / 9B в Docker (GPU)
 ```
 
 ## Docker (рекомендуется)
@@ -22,6 +22,8 @@ docker compose down              # остановить (данные БД со�
 - `db` — PostgreSQL 16, данные в volume `pgdata`. Таблицы создаются при старте бэкенда.
 - `comfyui` — ComfyUI на GPU (нужен NVIDIA Container Toolkit / Docker Desktop с WSL2). При первом старте
   докачивает в volume `comfy_models` ~14 ГБ: `flux-2-klein-4b-fp8`, `qwen_3_4b`, `flux2-vae`, SegFormer, SAM 2.1, Depth Anything V2. UI — http://127.0.0.1:8188.
+  FLUX.2 klein 9B (`flux-2-klein-9b-fp8` + `qwen_3_8b_fp8mixed`, ещё ~17 ГБ) скачивается, только если задан `HF_TOKEN`:
+  репозиторий gated (FLUX Non-Commercial License) — сначала примите условия на странице модели на Hugging Face.
 - Настройки — в `.env` в корне (см. `.env.example`).
 - После изменения `VITE_USE_MOCK` нужна пересборка: `docker compose up -d --build frontend`.
 
@@ -59,7 +61,10 @@ uvicorn app.main:app --reload --port 8010
 
 Адрес ComfyUI задаётся через `COMFYUI_URL` (по умолчанию `http://127.0.0.1:8188`).
 
-## Img2img экстерьера (FLUX.2 klein 4B)
+## Img2img экстерьера (FLUX.2 klein 4B / 9B)
+
+Модель выбирается в запросе: поле `model` в `POST /api/img2img` — `klein-4b` (по умолчанию) или `klein-9b`.
+Если веса выбранной модели ещё не скачаны в ComfyUI, бэкенд отвечает 503 с понятной ошибкой.
 
 1. **DeepSeek** (`deepseek-flash`, vision) смотрит на исходник и пишет инструкцию редактирования: материалы,
    окружение и свет пресета + обязательный блок «сохранить камеру, перспективу, геометрию, проёмы».

@@ -24,9 +24,19 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 
-# FLUX.2 [klein] 4B (distilled) в ComfyUI
-FLUX_UNET = os.getenv("FLUX_UNET", "flux-2-klein-4b-fp8.safetensors")
-FLUX_TEXT_ENCODER = os.getenv("FLUX_TEXT_ENCODER", "qwen_3_4b.safetensors")
+# FLUX.2 [klein] (distilled) в ComfyUI: модель выбирается в запросе, VAE общий.
+# 9B закрыта лицензией BFL — ComfyUI скачает её только при заданном HF_TOKEN.
+FLUX_MODELS = {
+    "klein-4b": {
+        "unet": os.getenv("FLUX_4B_UNET", "flux-2-klein-4b-fp8.safetensors"),
+        "text_encoder": os.getenv("FLUX_4B_TEXT_ENCODER", "qwen_3_4b.safetensors"),
+    },
+    "klein-9b": {
+        "unet": os.getenv("FLUX_9B_UNET", "flux-2-klein-9b-fp8.safetensors"),
+        "text_encoder": os.getenv("FLUX_9B_TEXT_ENCODER", "qwen_3_8b_fp8mixed.safetensors"),
+    },
+}
+DEFAULT_MODEL = "klein-4b"
 FLUX_VAE = os.getenv("FLUX_VAE", "flux2-vae.safetensors")
 # Площадь кадра генерации в мегапикселях (пропорции исходника сохраняются)
 RENDER_MEGAPIXELS = float(os.getenv("RENDER_MEGAPIXELS", "1.5"))

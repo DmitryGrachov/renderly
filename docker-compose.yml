@@ -59,6 +59,8 @@ services:
     gpus: all
     environment:
       COMFYUI_ARGS: ${COMFYUI_ARGS:-}
+      # нужен только для FLUX.2 klein 9B (gated-репозиторий BFL)
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - comfy_models:/opt/ComfyUI/models
       - comfy_output:/opt/ComfyUI/output

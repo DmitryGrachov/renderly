@@ -3,19 +3,32 @@
 set -euo pipefail
 M=/opt/ComfyUI/models
 
-fetch() {  # fetch <папка> <файл> <url>
+fetch() {  # fetch <папка> <файл> <url> [доп. аргументы curl]
   local dst="$M/$1/$2"
   [ -s "$dst" ] && return 0
   mkdir -p "$M/$1"
   echo "[models] скачиваю $2 ..."
-  curl -fL --retry 5 --retry-delay 5 -C - -o "$dst.part" "$3"
-  mv "$dst.part" "$dst"
+  # mv только после успешной загрузки — иначе пустой файл «прикинулся» бы моделью
+  # --retry-all-errors: обрыв посреди файла (curl 18) тоже повторяется, -C - докачивает с места обрыва
+  curl -fL --retry 10 --retry-delay 5 --retry-all-errors -C - -o "$dst.part" "${@:4}" "$3" && mv "$dst.part" "$dst"
 }
 
 HF=https://huggingface.co
 fetch diffusion_models flux-2-klein-4b-fp8.safetensors "$HF/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors"
 fetch text_encoders    qwen_3_4b.safetensors           "$HF/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors"
 fetch vae              flux2-vae.safetensors           "$HF/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
+
+# FLUX.2 klein 9B — gated (FLUX Non-Commercial License): примите условия на
+# huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8 и задайте HF_TOKEN
+if [ -n "${HF_TOKEN:-}" ]; then
+  fetch diffusion_models flux-2-klein-9b-fp8.safetensors "$HF/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors" \
+    -H "Authorization: Bearer $HF_TOKEN" \
+    || echo "[models] klein 9B не скачана — проверьте HF_TOKEN и принятие лицензии"
+  fetch text_encoders    qwen_3_8b_fp8mixed.safetensors  "$HF/Comfy-Org/flux2-klein-9B/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors" \
+    || echo "[models] qwen_3_8b не скачан"
+else
+  echo "[models] HF_TOKEN не задан — FLUX.2 klein 9B пропущена"
+fi
 
 # SegFormer для маски неба/окружения (нод InegoKeepMask)
 [ -d "$M/segformer" ] || python -c "

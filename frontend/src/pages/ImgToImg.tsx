@@ -93,7 +93,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     try {
       const fixedSeed = seedLocked && seed !== '' ? Number(seed) : null
       const res = await img2img(
-        { image: source.file, imageUrl: source.url, scene, preset, strength, materials, keepSky, keepBg, keepSur, seed: fixedSeed, reference: reference?.file, referenceUrl: reference?.url },
+        { image: source.file, imageUrl: source.url, model, scene, preset, strength, materials, keepSky, keepBg, keepSur, seed: fixedSeed, reference: reference?.file, referenceUrl: reference?.url },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )

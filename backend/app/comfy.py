@@ -1,4 +1,4 @@
-"""Клиент ComfyUI: img2img экстерьера на FLUX.2 [klein] 4B.
+"""Клиент ComfyUI: img2img экстерьера на FLUX.2 [klein] 4B / 9B.
 
 Как сохраняется геометрия:
   1. исходник подаётся как ReferenceLatent (image 1) — klein редактирует его, а не рисует с нуля;
@@ -26,8 +26,8 @@ from .config import (
     HARMONIZE,
     LOCAL_LIGHT,
     COMFYUI_URL,
-    FLUX_TEXT_ENCODER,
-    FLUX_UNET,
+    DEFAULT_MODEL,
+    FLUX_MODELS,
     FLUX_VAE,
     RENDER_MEGAPIXELS,
     log,
@@ -39,6 +39,10 @@ TOTAL_STEPS = 8  # шаги полного расписания; при denoise 
 
 
 class ComfyError(RuntimeError):
+    pass
+
+
+class ModelUnavailable(ComfyError):
     pass
 
 
@@ -111,11 +115,13 @@ def build_workflow(
     keep_bg: bool = False,
     keep_sur: bool = False,
     building_box: list[float] | None = None,
+    model: str = DEFAULT_MODEL,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
+    files = FLUX_MODELS[model]
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": FLUX_UNET, "weight_dtype": "default"}},
-        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": FLUX_TEXT_ENCODER, "type": "flux2", "device": "default"}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": files["text_encoder"], "type": "flux2", "device": "default"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX_VAE}},
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         "src_img": {"class_type": "LoadImage", "inputs": {"image": source}},
@@ -166,6 +172,15 @@ def build_workflow(
     return wf
 
 
+async def _check_model(client: httpx.AsyncClient, model: str) -> None:
+    """Понятная ошибка вместо «Value not in list», если веса модели ещё не скачаны в ComfyUI."""
+    files = FLUX_MODELS[model]
+    for folder, name in (("diffusion_models", files["unet"]), ("text_encoders", files["text_encoder"])):
+        r = await client.get(f"/models/{folder}")
+        if r.status_code == 200 and name not in r.json():
+            raise ModelUnavailable(f"Модель {model} ещё не загружена в ComfyUI (нет {name})")
+
+
 async def _upload(client: httpx.AsyncClient, data: bytes, name: str) -> str:
     r = await client.post("/upload/image", files={"image": (name, data, "image/png")}, data={"type": "input", "subfolder": "inego"})
     r.raise_for_status()
@@ -213,6 +228,7 @@ async def run_img2img(
     keep_bg: bool = False,
     keep_sur: bool = False,
     seed: int | None = None,
+    model: str = DEFAULT_MODEL,
 ) -> tuple[bytes, int]:
     """JPEG финального рендера (в разрешении генерации, строго в пропорциях исходника) и использованный сид.
 
@@ -228,11 +244,12 @@ async def run_img2img(
     prompt, box = await build_prompt(image, scene, preset, ref_bytes, materials, keep_sky, keep_bg, keep_sur)
     denoise = denoise_for(strength)
     log.info(
-        "img2img %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
-        scene, preset, width, height, denoise, seed, keep_sky, keep_bg, keep_sur, box, prompt,
+        "img2img %s %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
+        model, scene, preset, width, height, denoise, seed, keep_sky, keep_bg, keep_sur, box, prompt,
     )
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        await _check_model(client, model)
         src_fit = src.resize((width, height), Image.LANCZOS)
         source_name = await _upload(client, to_png(src_fit), f"{uuid.uuid4().hex}.png")
         ref_name = None
@@ -242,7 +259,7 @@ async def run_img2img(
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
 
         workflow = build_workflow(
-            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box
+            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model
         )
         out = await _run(client, workflow)
 

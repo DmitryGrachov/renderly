@@ -18,6 +18,8 @@ export interface Img2ImgRequest {
   keepBg?: boolean
   /** true — окружение (земля, озеленение, люди перед зданием) с исходника, false — по референсу */
   keepSur?: boolean
+  /** Модель на бэкенде: klein-4b | klein-9b */
+  model?: string
   /** Сид генерации; не задан — случайный */
   seed?: number | null
   reference?: File | null
@@ -66,6 +68,7 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
   body.append('keep_sky', String(!!req.keepSky))
   body.append('keep_bg', String(!!req.keepBg))
   body.append('keep_sur', String(!!req.keepSur))
+  if (req.model) body.append('model', req.model)
   if (req.seed != null) body.append('seed', String(req.seed))
   if (req.reference) body.append('reference', req.reference)
 

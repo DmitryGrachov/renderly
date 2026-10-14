@@ -4,7 +4,7 @@ import { MODELS, fmt, type ModelId, type UsageDay } from '../lib/account'
 
 const H = 260
 const PAD = { top: 12, right: 8, bottom: 28, left: 44 }
-const ORDER: ModelId[] = ['klein', 'dev', 'pro'] // снизу вверх, порядок фиксирован
+const ORDER: ModelId[] = MODELS.map((m) => m.id) // снизу вверх, порядок фиксирован
 
 const dayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' })
 const longFmt = new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })

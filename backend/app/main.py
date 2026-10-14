@@ -8,7 +8,7 @@ from fastapi.responses import Response
 from . import comfy
 from .auth import current_user
 from .auth import router as auth_router
-from .config import CORS_ORIGINS, log
+from .config import CORS_ORIGINS, DEFAULT_MODEL, FLUX_MODELS, log
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
@@ -58,9 +58,13 @@ async def img2img(
     keep_sur: bool = Form(False),  # окружение: земля, озеленение, люди, машины перед зданием
     # сид генерации; пусто — случайный. Фактический сид возвращается в заголовке X-Seed
     seed: int | None = Form(None, ge=0, lt=2**48),
+    # FLUX.2 klein: klein-4b | klein-9b
+    model: str = Form(DEFAULT_MODEL),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
+    if model not in FLUX_MODELS:
+        raise HTTPException(400, f"Unknown model: {model}")
     if preset not in PRESETS[scene]:
         raise HTTPException(400, f"Unknown preset: {preset}")
     if preset == "custom" and reference is None:
@@ -78,7 +82,10 @@ async def img2img(
             keep_bg,
             keep_sur,
             seed,
+            model,
         )
+    except comfy.ModelUnavailable as e:
+        raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:
         log.exception("img2img failed")
         raise HTTPException(502, f"Генерация не удалась: {e}") from e

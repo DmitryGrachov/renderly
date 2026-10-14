@@ -4,7 +4,7 @@ import {
   ArrowDownRight, ArrowUpRight, Check, Coins, Gauge, Gift, ImageIcon, Paintbrush, Plus, Sparkles, Timer, Zap,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
-import { MODELS, PACKS, fmt, modelById, useAccount, type Activity, type ModelId, type Pack } from '../lib/account'
+import { MODELS, PACKS, dayTotal, fmt, modelById, useAccount, type Activity, type ModelId, type Pack } from '../lib/account'
 import { UsageChart } from '../components/UsageChart'
 
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
@@ -30,7 +30,7 @@ export function Account({ onToast }: Props) {
   const prev = usage.slice(-days * 2, -days)
 
   const stats = useMemo(() => {
-    const sum = (arr: typeof usage) => arr.reduce((s, d) => s + d.byModel.klein + d.byModel.dev + d.byModel.pro, 0)
+    const sum = (arr: typeof usage) => arr.reduce((s, d) => s + dayTotal(d), 0)
     const renders = (arr: typeof usage) =>
       arr.reduce((s, d) => s + MODELS.reduce((a, m) => a + d.byModel[m.id] / m.cost, 0), 0)
     const byModel = Object.fromEntries(MODELS.map((m) => [m.id, slice.reduce((s, d) => s + d.byModel[m.id], 0)])) as Record<ModelId, number>
@@ -49,7 +49,7 @@ export function Account({ onToast }: Props) {
   }, [slice, prev])
 
   // расход в текущем «месяце» тарифа — последние 18 дней (до продления 12)
-  const monthSpent = usage.slice(-18).reduce((s, d) => s + d.byModel.klein + d.byModel.dev + d.byModel.pro, 0)
+  const monthSpent = usage.slice(-18).reduce((s, d) => s + dayTotal(d), 0)
   const firstName = user?.name.split(/\s+/)[0] ?? ''
   const current = modelById(model)
 
@@ -128,7 +128,7 @@ export function Account({ onToast }: Props) {
         className="mt-14"
       >
         <SectionHead title="Модель генерации" sub="Используется по умолчанию в Img to Img и Inpainting. Стоимость списывается за каждый рендер." />
-        <div className="mt-6 grid gap-5 md:grid-cols-3 lg:gap-6" role="radiogroup" aria-label="Модель генерации">
+        <div className="mt-6 grid gap-5 md:grid-cols-2 lg:gap-6" role="radiogroup" aria-label="Модель генерации">
           {MODELS.map((m) => (
             <ModelCard key={m.id} id={m.id} active={m.id === model} onSelect={() => { setModel(m.id); onToast(`Модель по умолчанию: ${m.name}`) }} />
           ))}

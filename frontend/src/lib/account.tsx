@@ -7,7 +7,7 @@ import { useAuth } from './auth'
  * а расход за прошлые дни детерминированно генерируется из id пользователя.
  */
 
-export type ModelId = 'klein' | 'dev' | 'pro'
+export type ModelId = 'klein-4b' | 'klein-9b'
 
 export interface Model {
   id: ModelId
@@ -21,40 +21,35 @@ export interface Model {
   badge?: string
 }
 
+// id совпадают с ключами моделей на бэкенде (поле model в /api/img2img)
 export const MODELS: Model[] = [
   {
-    id: 'klein',
-    name: 'FLUX.2 klein',
+    id: 'klein-4b',
+    name: 'FLUX.2 klein 4B',
     tag: '4B · distilled',
     description: 'Мгновенные итерации. Идеальна для поиска света и быстрых правок.',
     cost: 2,
     speed: 5,
     quality: 3,
-    time: '≈ 6 с',
+    time: '≈ 15 с',
   },
   {
-    id: 'dev',
-    name: 'FLUX.2 dev',
-    tag: '32B · guidance',
-    description: 'Баланс скорости и детализации. Чистые материалы, аккуратная геометрия.',
-    cost: 6,
-    speed: 3,
+    id: 'klein-9b',
+    name: 'FLUX.2 klein 9B',
+    tag: '9B · distilled',
+    description: 'Вдвое больше параметров: чище материалы, точнее мелкая геометрия и свет.',
+    cost: 4,
+    speed: 4,
     quality: 4,
-    time: '≈ 18 с',
-    badge: 'Популярная',
-  },
-  {
-    id: 'pro',
-    name: 'FLUX.2 pro',
-    tag: 'Max · 4K',
-    description: 'Финальная подача для клиента. Максимум деталей и фотореализма.',
-    cost: 14,
-    speed: 2,
-    quality: 5,
-    time: '≈ 40 с',
-    badge: 'Флагман',
+    time: '≈ 20 с',
+    badge: 'Детальнее',
   },
 ]
+
+const ZERO: Record<ModelId, number> = { 'klein-4b': 0, 'klein-9b': 0 }
+
+/** Сумма токенов за день по всем моделям. */
+export const dayTotal = (d: UsageDay) => MODELS.reduce((s, m) => s + d.byModel[m.id], 0)
 
 export const modelById = (id: ModelId) => MODELS.find((m) => m.id === id) ?? MODELS[0]
 
@@ -126,9 +121,8 @@ function fakeUsage(seed: string): UsageDay[] {
     out.push({
       date,
       byModel: {
-        klein: renders(14) * 2,
-        dev: renders(5) * 6,
-        pro: renders(1.6) * 14,
+        'klein-4b': renders(16) * 2,
+        'klein-9b': renders(6) * 4,
       },
     })
   }
@@ -146,7 +140,7 @@ function fakeHistory(seed: string, usage: UsageDay[]): Activity[] {
   let t = now - 1000 * 60 * 14
   for (let i = 0; i < 14; i++) {
     const kind = r() < 0.7 ? 'render' : 'inpaint'
-    const model = (['klein', 'klein', 'dev', 'dev', 'pro'] as ModelId[])[Math.floor(r() * 5)]
+    const model: ModelId = r() < 0.6 ? 'klein-4b' : 'klein-9b'
     out.push({
       id: `h${i}`,
       at: t,
@@ -185,9 +179,9 @@ const MODEL_KEY = 'inego.model'
 const readModel = (): ModelId => {
   try {
     const v = localStorage.getItem(MODEL_KEY)
-    if (v === 'klein' || v === 'dev' || v === 'pro') return v
+    if (v === 'klein-4b' || v === 'klein-9b') return v
   } catch { /* storage недоступен */ }
-  return 'klein'
+  return 'klein-4b'
 }
 
 interface Local {
@@ -232,11 +226,13 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
   // реальные списания этой сессии добавляются в сегодняшний столбик
   const usage = useMemo(() => {
     const today = startOfDay(new Date()).getTime()
-    const extra: Record<ModelId, number> = { klein: 0, dev: 0, pro: 0 }
-    for (const e of local.events) if (e.amount < 0 && e.model && startOfDay(new Date(e.at)).getTime() === today) extra[e.model] -= e.amount
+    const extra = { ...ZERO }
+    for (const e of local.events) {
+      if (e.amount < 0 && e.model && e.model in extra && startOfDay(new Date(e.at)).getTime() === today) extra[e.model] -= e.amount
+    }
     return baseUsage.map((d, i) =>
       i === baseUsage.length - 1
-        ? { ...d, byModel: { klein: d.byModel.klein + extra.klein, dev: d.byModel.dev + extra.dev, pro: d.byModel.pro + extra.pro } }
+        ? { ...d, byModel: Object.fromEntries(MODELS.map((m) => [m.id, d.byModel[m.id] + extra[m.id]])) as Record<ModelId, number> }
         : d,
     )
   }, [baseUsage, local.events])
