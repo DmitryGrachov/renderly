@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Download, Lock, LockOpen, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
+import { ArrowRight, Dices, Download, Lock, LockOpen, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { PresetCard } from '../components/PresetCard'
 import { CompareSlider } from '../components/CompareSlider'
@@ -8,7 +8,7 @@ import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
-import { useAccount } from '../lib/account'
+import { fmt, modelById, useAccount } from '../lib/account'
 import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
 
 type Status = 'idle' | 'running' | 'done' | 'error'
@@ -26,7 +26,8 @@ const SUBTITLE: Record<Scene, string> = {
 
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
-  const { charge } = useAccount()
+  const { charge, model } = useAccount()
+  const activeModel = modelById(model)
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
@@ -45,11 +46,25 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const [view, setView] = useState<'compare' | 'result'>('compare')
   const [error, setError] = useState<string | null>(null)
   const abort = useRef<AbortController | null>(null)
+  const hintRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => () => abort.current?.abort(), [])
 
   const running = status === 'running'
   const canGenerate = !!source && !running && (preset !== 'custom' || !!reference)
+
+  // чип подсказки: дописывает «Кровля — » и ставит курсор в конец; пустой незаполненный пункт заменяется
+  function addHint(label: string) {
+    const base = materials.trimEnd().replace(/[,;]$/, '').replace(/(^|,\s*)[^,—]*—$/, '').trimEnd()
+    const next = (base ? `${base}, ${label.toLowerCase()} — ` : `${label} — `).slice(0, 600)
+    setMaterials(next)
+    requestAnimationFrame(() => {
+      const el = hintRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(next.length, next.length)
+    })
+  }
 
   async function pickSource(file: File) {
     if (running) return
@@ -251,24 +266,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                     <div>
                       <div className="text-[15px] font-semibold tracking-[-0.01em]">Готово · {presetById(result.preset, result.scene).title} · {SCENE_LABEL[result.scene]}</div>
                       <div className="flex flex-wrap items-center gap-x-2 text-[13px] text-mute">
-                        <span>Сид <span className="font-medium tabular-nums text-ink-2">{result.seed}</span></span>
+                        <span>{source?.width}×{source?.height}</span>
                         <span aria-hidden>·</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const same = seedLocked && seed === String(result.seed)
-                            setSeed(String(result.seed))
-                            setSeedLocked(!same)
-                          }}
-                          disabled={running}
-                          className="inline-flex items-center gap-1 font-medium text-accent transition-colors hover:text-accent-hover"
-                        >
-                          {seedLocked && seed === String(result.seed) ? (
-                            <><Lock className="size-3.5" /> Зафиксирован</>
-                          ) : (
-                            <><LockOpen className="size-3.5" /> Зафиксировать</>
-                          )}
-                        </button>
+                        <span>Сид <span className="font-medium tabular-nums text-ink-2">{result.seed}</span></span>
                       </div>
                     </div>
                   </div>
@@ -289,6 +289,99 @@ export function ImgToImg({ onSendToInpaint }: Props) {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Seed + prompt hint */}
+          <div className="overflow-hidden rounded-[22px] bg-surface shadow-card ring-1 ring-fg/[0.04]">
+            <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-6 sm:pl-5">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-[15px] font-semibold tracking-[-0.01em]">
+                  Сид
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors duration-300 ${
+                      seedLocked ? 'bg-accent/10 text-accent' : 'bg-fg/[0.05] text-mute'
+                    }`}
+                  >
+                    {seedLocked ? 'Зафиксирован' : 'Случайный'}
+                  </span>
+                </div>
+                <div className="text-[13px] text-mute">
+                  {seedLocked ? 'Повторяет композицию — меняйте свет и подсказку поверх неё' : 'Каждая генерация — новый вариант'}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  aria-label="Сид"
+                  inputMode="numeric"
+                  value={seed}
+                  disabled={running}
+                  placeholder="случайный"
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/\D/g, '').slice(0, 14)
+                    setSeed(v)
+                    setSeedLocked(v !== '')
+                  }}
+                  className="w-full min-w-0 rounded-full bg-fg/[0.04] px-4 py-2 text-[14px] tabular-nums outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60 sm:w-[168px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => { setSeed(String(Math.floor(Math.random() * 2 ** 32))); setSeedLocked(true) }}
+                  disabled={running}
+                  aria-label="Случайный сид"
+                  title="Новый случайный сид"
+                  className="group grid size-9 shrink-0 place-items-center rounded-full bg-fg/[0.05] text-ink-2 transition-all duration-300 ease-apple hover:bg-fg/[0.08] hover:text-ink active:scale-95 disabled:opacity-40"
+                >
+                  <Dices className="size-4 transition-transform duration-500 ease-apple group-hover:rotate-[24deg]" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSeedLocked((v) => !v && seed !== '')}
+                  disabled={running || seed === ''}
+                  aria-label={seedLocked ? 'Снять фиксацию сида' : 'Зафиксировать сид'}
+                  title={seedLocked ? 'Сид зафиксирован — повторяет картинку' : 'Каждый раз новый сид'}
+                  className={`grid size-9 shrink-0 place-items-center rounded-full transition-all duration-300 ease-apple active:scale-95 disabled:opacity-40 ${
+                    seedLocked ? 'bg-accent text-white' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.08]'
+                  }`}
+                >
+                  {seedLocked ? <Lock className="size-4" /> : <LockOpen className="size-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="mx-4 h-px bg-line sm:mx-5" />
+
+            <div className="p-4 sm:px-5 sm:pb-5">
+              <div className="flex items-baseline justify-between gap-3">
+                <div>
+                  <div className="text-[15px] font-semibold tracking-[-0.01em]">Подсказка</div>
+                  <div className="text-[13px] text-mute">Необязательно — материалы и детали, иначе берём с изображения</div>
+                </div>
+                <span className="shrink-0 text-[12px] tabular-nums text-faint">{materials.length}/600</span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {HINT_CHIPS[scene].map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    disabled={running}
+                    onClick={() => addHint(c)}
+                    className="rounded-full px-3 py-1 text-[12.5px] font-medium text-ink-2 ring-1 ring-fg/[0.08] transition-all duration-200 hover:bg-fg/[0.04] hover:text-ink active:scale-95 disabled:opacity-50"
+                  >
+                    + {c}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                ref={hintRef}
+                value={materials}
+                onChange={(e) => setMaterials(e.target.value)}
+                disabled={running}
+                rows={3}
+                maxLength={600}
+                placeholder={HINT_PLACEHOLDER[scene]}
+                className="mt-3 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
+              />
+            </div>
+          </div>
         </div>
 
         {/* Control panel */}
@@ -348,20 +441,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
             <div className="my-6 h-px bg-line" />
 
-            <Step n={2} title="Материалы" hint="Необязательно — иначе берём с изображения" />
-            <textarea
-              value={materials}
-              onChange={(e) => setMaterials(e.target.value)}
-              disabled={running}
-              rows={3}
-              maxLength={600}
-              placeholder="Стены — серая штукатурка, цоколь — бежевый рваный камень, кровля — графитовый фальц"
-              className="mt-4 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
-            />
-
-            <div className="my-6 h-px bg-line" />
-
-            <Step n={3} title="Сила эффекта" hint="Насколько сильно менять сцену" />
+            <Step n={2} title="Сила эффекта" hint="Насколько сильно менять сцену" />
             <div className="mt-4">
               <div className="mb-3 flex items-baseline justify-between">
                 <span className="text-[13px] text-mute">{strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
@@ -376,35 +456,6 @@ export function ImgToImg({ onSendToInpaint }: Props) {
             </div>
 
             <div className="my-6 h-px bg-line" />
-
-            <div className="mb-3 flex items-center gap-2">
-              <label htmlFor="seed" className="text-[13px] text-mute">Сид</label>
-              <input
-                id="seed"
-                inputMode="numeric"
-                value={seed}
-                disabled={running}
-                placeholder="случайный"
-                onChange={(e) => {
-                  const v = e.target.value.replace(/\D/g, '').slice(0, 14)
-                  setSeed(v)
-                  setSeedLocked(v !== '')
-                }}
-                className="min-w-0 flex-1 rounded-full bg-fg/[0.04] px-3.5 py-2 text-[14px] tabular-nums outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
-              />
-              <button
-                type="button"
-                onClick={() => setSeedLocked((v) => !v && seed !== '')}
-                disabled={running || seed === ''}
-                aria-label={seedLocked ? 'Снять фиксацию сида' : 'Зафиксировать сид'}
-                title={seedLocked ? 'Сид зафиксирован — повторяет картинку' : 'Каждый раз новый сид'}
-                className={`grid size-9 shrink-0 place-items-center rounded-full transition-all duration-300 ease-apple active:scale-95 disabled:opacity-40 ${
-                  seedLocked ? 'bg-accent text-white' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.08]'
-                }`}
-              >
-                {seedLocked ? <Lock className="size-4" /> : <LockOpen className="size-4" />}
-              </button>
-            </div>
 
             <motion.button
               whileTap={canGenerate ? { scale: 0.98 } : undefined}
@@ -431,7 +482,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                 ? 'Сначала загрузите изображение'
                 : preset === 'custom' && !reference
                   ? 'Добавьте референс для своего пресета'
-                  : '≈ 15 секунд · 1 кредит'}
+                  : `${activeModel.name} · ${activeModel.time} · ${fmt(activeModel.cost)} ток.`}
             </p>
 
             <AnimatePresence>
@@ -446,6 +497,16 @@ export function ImgToImg({ onSendToInpaint }: Props) {
       </motion.section>
     </div>
   )
+}
+
+const HINT_CHIPS: Record<Scene, string[]> = {
+  exterior: ['Стены', 'Цоколь', 'Кровля', 'Окна', 'Озеленение'],
+  interior: ['Пол', 'Стены', 'Потолок', 'Мебель', 'Текстиль'],
+}
+
+const HINT_PLACEHOLDER: Record<Scene, string> = {
+  exterior: 'Стены — серая штукатурка, цоколь — бежевый рваный камень, кровля — графитовый фальц',
+  interior: 'Пол — дубовая ёлочка, стены — тёплая известковая штукатурка, диван — бежевое букле',
 }
 
 function KeepToggle({ title, hint, checked, onChange, disabled }: {
