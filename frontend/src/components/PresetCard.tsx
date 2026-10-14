@@ -23,9 +23,9 @@ export function PresetCard({ preset, selected, onSelect, disabled, wide }: Props
         selected
           ? 'shadow-[0_0_0_2px_var(--color-ink),0_8px_24px_-8px_rgba(0,0,0,0.25)]'
           : 'shadow-[0_0_0_1px_rgba(0,0,0,0.06)] hover:shadow-[0_0_0_1px_rgba(0,0,0,0.1),0_8px_24px_-12px_rgba(0,0,0,0.2)]'
-      } ${wide ? 'col-span-2 flex items-stretch' : ''}`}
+      } ${wide ? 'col-span-2 flex items-stretch' : 'flex flex-col'}`}
     >
-      <div className={`relative overflow-hidden ${wide ? 'w-[92px] shrink-0' : 'h-[76px]'}`} style={{ background: preset.sky }}>
+      <div className={`relative overflow-hidden ${wide ? 'w-[92px] shrink-0' : 'h-[76px] w-full shrink-0'}`} style={{ background: preset.sky }}>
         {preset.sun && (
           <span
             className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full transition-transform duration-700 ease-apple group-hover:scale-110"
