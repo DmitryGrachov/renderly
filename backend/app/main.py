@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -12,12 +13,16 @@ from .config import CORS_ORIGINS, DEFAULT_MODEL, FLUX_MODELS, log
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
+from .prompting import warm_preset_analyses
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
+    # разборы встроенных референсов DeepSeek — в фоне, сервер стартует сразу
+    warm = asyncio.create_task(warm_preset_analyses())
     yield
+    warm.cancel()
 
 
 app = FastAPI(title="INEGO.dev API", version="0.2.0", lifespan=lifespan)

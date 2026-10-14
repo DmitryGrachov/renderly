@@ -35,6 +35,7 @@ from .config import (
 from .presets import reference_image
 from .prompting import build_prompt
 
+REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
 
 
@@ -59,12 +60,13 @@ def to_png(img: Image.Image) -> bytes:
 
 
 def denoise_for(strength: float) -> float:
-    """«Сила» из UI (0.1–1) → доля шагов: 0.75…1.0.
+    """«Сила» из UI (0.1–1) → доля шагов: 0.9…1.0.
 
-    Геометрию держит ReferenceLatent, а не стартовый латент: ниже ~0.75 сквозь рендер
-    проступают пятна и плоские заливки исходника (клей так и остаётся клеем).
+    Геометрию держит ReferenceLatent, а не стартовый латент: при низком denoise сквозь рендер
+    проступают черновое небо, плоская трава и заливки исходника, и окружение с референса
+    почти не переносится. С 0.9 небо, растительность и атмосфера берутся с референса, здание не меняется.
     """
-    return 0.75 + 0.25 * max(0.0, min(1.0, strength))
+    return 0.9 + 0.1 * max(0.0, min(1.0, strength))
 
 
 def _sampling(wf: dict, tag: str, positive: list, latent: list, width: int, height: int, run_steps: int, seed: int) -> list:
@@ -255,7 +257,8 @@ async def run_img2img(
         ref_name = None
         if ref_bytes:
             ref = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
-            ref = ref.resize(fit_size(*ref.size, 0.6), Image.LANCZOS)
+            # референс — эталон окружения: больше пикселей → точнее небо, листва и свет
+            ref = ref.resize(fit_size(*ref.size, REF_MEGAPIXELS), Image.LANCZOS)
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
 
         workflow = build_workflow(
