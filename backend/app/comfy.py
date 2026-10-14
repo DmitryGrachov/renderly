@@ -4,13 +4,16 @@
   1. исходник подаётся как ReferenceLatent (image 1) — klein редактирует его, а не рисует с нуля;
   2. генерация стартует с латента исходника (частичный denoise по «силе»), а не с шума;
   3. кадр генерируется в тех же пропорциях, результат приводится к размеру исходника.
-Референс света подаётся вторым ReferenceLatent (image 2) — только для колористики и атмосферы.
+Референс подаётся вторым ReferenceLatent (image 2) — эталон неба, света, атмосферы и растительности.
 
-«Сохранить небо / фон / окружение» — два прохода:
+«Сохранить небо / фон / окружение» — сохраняется расклад зоны (где газон, дорога, деревья, облака),
+а сама зона перерисовывается фотореально в стилистике референса:
   1. полный рендер по референсу (как без галочек) — из него берётся целевой свет и цвет каждой зоны;
   2. InegoKeepZones (SegFormer + SAM + глубина) размечает зоны, InegoZoneRestyle ставит в сохраняемые зоны
-     исходник (те же объекты, дороги, облака) в цвете и свете рендера;
-  3. лёгкий проход гармонизации (HARMONIZE) по склейке — свет ложится естественно, ничего не дорисовывается.
+     исходник (те же объекты, дороги, облака) в цвете и свете рендера — это стартовая склейка;
+  3. перерисовка только по маске зон (ZONE_RESTYLE шагов, Differential Diffusion по мягкой маске):
+     формы и расположение — со склейки, фактура — как на референсе: зелёная плоскость становится газоном,
+     условные деревья — настоящими. Здание вне маски не трогается.
 """
 
 import asyncio
@@ -23,17 +26,18 @@ from PIL import Image
 
 from .config import (
     COMFY_TIMEOUT,
-    HARMONIZE,
     LOCAL_LIGHT,
     COMFYUI_URL,
     DEFAULT_MODEL,
     FLUX_MODELS,
     FLUX_VAE,
     RENDER_MEGAPIXELS,
+    ZONE_DETAIL,
+    ZONE_RESTYLE,
     log,
 )
 from .presets import reference_image
-from .prompting import build_prompt
+from .prompting import build_prompt, zone_instruction
 
 REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
@@ -69,13 +73,16 @@ def denoise_for(strength: float) -> float:
     return 0.9 + 0.1 * max(0.0, min(1.0, strength))
 
 
-def _sampling(wf: dict, tag: str, positive: list, latent: list, width: int, height: int, run_steps: int, seed: int) -> list:
+def _sampling(
+    wf: dict, tag: str, positive: list, latent: list, width: int, height: int, run_steps: int, seed: int,
+    model: list | None = None,
+) -> list:
     """Сэмплинг FLUX.2 klein (cfg 1, euler) хвостом из run_steps шагов полного расписания. Возвращает выход VAEDecode."""
     wf |= {
         f"negative{tag}": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": positive}},
         f"guider{tag}": {
             "class_type": "CFGGuider",
-            "inputs": {"model": ["unet", 0], "positive": positive, "negative": [f"negative{tag}", 0], "cfg": 1.0},
+            "inputs": {"model": model or ["unet", 0], "positive": positive, "negative": [f"negative{tag}", 0], "cfg": 1.0},
         },
         f"sched{tag}": {"class_type": "Flux2Scheduler", "inputs": {"steps": TOTAL_STEPS, "width": width, "height": height}},
         f"split{tag}": {"class_type": "SplitSigmas", "inputs": {"sigmas": [f"sched{tag}", 0], "step": TOTAL_STEPS - run_steps}},
@@ -95,9 +102,9 @@ def _sampling(wf: dict, tag: str, positive: list, latent: list, width: int, heig
     return [f"decode{tag}", 0]
 
 
-def _conditioning(wf: dict, tag: str, image_latent: list, reference: str | None) -> list:
+def _conditioning(wf: dict, tag: str, image_latent: list, reference: str | None, text: str = "text") -> list:
     """Текст + image 1 (что редактируем) + image 2 (референс света)."""
-    wf[f"cond{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text", 0], "latent": image_latent}}
+    wf[f"cond{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": [text, 0], "latent": image_latent}}
     positive = [f"cond{tag}", 0]
     if reference:
         wf[f"cond_ref{tag}"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["ref_lat", 0]}}
@@ -118,6 +125,7 @@ def build_workflow(
     keep_sur: bool = False,
     building_box: list[float] | None = None,
     model: str = DEFAULT_MODEL,
+    zone_prompt: str = "",
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
     files = FLUX_MODELS[model]
@@ -147,7 +155,7 @@ def build_workflow(
                 "keep_background": keep_bg,
                 "keep_surroundings": keep_sur,
                 "grow": 0.006,
-                "feather": 0.003,
+                "feather": 0.006,
                 "building_box": ",".join(f"{v:.4f}" for v in building_box) if building_box else "",
             },
         }
@@ -161,14 +169,23 @@ def build_workflow(
                 "surroundings": ["zones", 2],
                 "local_light": LOCAL_LIGHT,
                 "light_radius": 0.04,
+                "detail": ZONE_DETAIL,
             },
         }
         wf["mask_img"] = {"class_type": "MaskToImage", "inputs": {"mask": ["zones", 3]}}
         wf["save_mask"] = {"class_type": "SaveImage", "inputs": {"images": ["mask_img", 0], "filename_prefix": "inego/mask"}}
-        # проход 2 — гармонизация склейки: склейка — image 1, старт с её латента, только хвост расписания
+        # проход 2 — перерисовка только сохраняемых зон: склейка — стартовый латент, шум только под маской
+        # (мягкий край через Differential Diffusion), здание вне маски не меняется. image 1 — исходник, а не склейка:
+        # модель редактирования воспроизводит image 1, и со склейкой заглушки (пятна, прозрачные блоки) оставались
         wf["comp_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["restyle", 0], "vae": ["vae", 0]}}
-        positive = _conditioning(wf, "_h", ["comp_lat", 0], reference)
-        image = _sampling(wf, "_h", positive, ["comp_lat", 0], width, height, max(1, round(TOTAL_STEPS * HARMONIZE)), seed + 1)
+        wf["zone_lat"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["comp_lat", 0], "mask": ["zones", 3]}}
+        wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["unet", 0], "strength": 1.0}}
+        wf["text_z"] = {"class_type": "CLIPTextEncode", "inputs": {"text": zone_prompt or prompt, "clip": ["clip", 0]}}
+        positive = _conditioning(wf, "_z", ["src_lat", 0], reference, text="text_z")
+        image = _sampling(
+            wf, "_z", positive, ["zone_lat", 0], width, height,
+            max(1, round(TOTAL_STEPS * ZONE_RESTYLE)), seed + 1, model=["diffdiff", 0],
+        )
 
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": "inego/img2img"}}
     return wf
@@ -244,6 +261,9 @@ async def run_img2img(
 
     ref_bytes = reference if preset == "custom" else reference_image(scene, preset)
     prompt, box = await build_prompt(image, scene, preset, ref_bytes, materials, keep_sky, keep_bg, keep_sur)
+    zone_prompt = await zone_instruction(ref_bytes, keep_sky, keep_bg, keep_sur) if (keep_sky or keep_bg or keep_sur) else ""
+    if zone_prompt:
+        log.info("Перерисовка зон:\n%s", zone_prompt)
     denoise = denoise_for(strength)
     log.info(
         "img2img %s %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
@@ -262,7 +282,7 @@ async def run_img2img(
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
 
         workflow = build_workflow(
-            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model
+            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model, zone_prompt
         )
         out = await _run(client, workflow)
 

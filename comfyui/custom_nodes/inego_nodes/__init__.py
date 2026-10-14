@@ -256,6 +256,9 @@ class InegoKeepZones:
             surroundings if keep_surroundings else zero,
         ]
         f = min(h, w) * feather
+        # медианный фильтр убирает точечную рябь сегментации (стекло, отражения) — иначе в зонах пятна
+        k = max(3, round(min(h, w) * 0.01) | 1)
+        zones = [ndimage.median_filter(z.astype(np.uint8), size=k).astype(bool) if z.any() else z for z in zones]
         out = [torch.from_numpy(_feather(z & ~band, f))[None] for z in zones]
         keep = torch.clamp(out[0] + out[1] + out[2], 0, 1)
         return (*out, keep)
@@ -276,14 +279,20 @@ class InegoZoneRestyle:
                 # доля локального (низкочастотного) света рендера: градиенты неба, тени, засветки
                 "local_light": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "light_radius": ("FLOAT", {"default": 0.04, "min": 0.005, "max": 0.2, "step": 0.005}),
-            }
+            },
+            "optional": {
+                # доля мелкой фактуры рендера (травинки, листва, асфальт) в фоне и окружении:
+                # плоские заливки исходника получают настоящую текстуру, крупный расклад остаётся с исходника
+                "detail": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.5, "step": 0.05}),
+                "detail_radius": ("FLOAT", {"default": 0.006, "min": 0.001, "max": 0.05, "step": 0.001}),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "run"
     CATEGORY = "inego"
 
-    def run(self, source, render, sky, background, surroundings, local_light, light_radius):
+    def run(self, source, render, sky, background, surroundings, local_light, light_radius, detail=0.0, detail_radius=0.006):
         import kornia
 
         src = source[0].permute(2, 0, 1)[None].float()
@@ -295,9 +304,16 @@ class InegoZoneRestyle:
         sigma = max(1.0, min(h, w) * light_radius)
         k = int(sigma * 3) * 2 + 1
 
+        # высокочастотная фактура рендера (рендер минус его размытие)
+        high = None
+        if detail:
+            ds = max(1.0, min(h, w) * detail_radius)
+            dk = int(ds * 3) * 2 + 1
+            high = ren_lab - kornia.filters.gaussian_blur2d(ren_lab, (dk, dk), (ds, ds))
+
         out = ren_lab.clone()
         weight_total = torch.zeros((1, 1, h, w))
-        for zone in (sky, background, surroundings):
+        for idx, zone in enumerate((sky, background, surroundings)):
             m = zone[0][None, None].float()
             if m.shape[-2:] != (h, w):
                 m = F.interpolate(m, size=(h, w), mode="bilinear", align_corners=False)
@@ -315,6 +331,12 @@ class InegoZoneRestyle:
                 denom = blur(m) + 1e-4
                 low_r, low_s = blur(ren_lab * m) / denom, blur(styled * m) / denom
                 styled = styled + local_light * (low_r - low_s)
+            # 3) фактура: в фоне и окружении (не в небе — иначе облака задвоятся) плоские заливки исходника
+            #    получают мелкую текстуру рендера; дальше её дорисовывает перерисовка зон
+            if high is not None and idx > 0:
+                src_flat = kornia.filters.gaussian_blur2d(src_lab, (dk, dk), (ds, ds))
+                src_high = src_lab - src_flat
+                styled = styled - src_high * 0.5 + detail * high
             out = out * (1 - m) + styled * m
             weight_total += m
 

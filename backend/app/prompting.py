@@ -62,19 +62,25 @@ REF_RULE = (
     "Vegetation from image 2 grows only on the ground and in the background areas that are open in image 1; it never "
     "stands in front of the main building, never covers its facade and never changes its silhouette."
 )
+# «Сохранить зону» = сохранить её расклад и суть, но перерисовать фотореально в стилистике референса
 KEEP_SKY = (
-    "Keep the sky of image 1: the same clouds with the same shapes and positions, no new clouds or objects; "
-    "only restyle its colour, light and atmosphere to match image 2."
+    "Sky: keep the cloud layout of image 1, the same clouds with the same shapes, sizes and positions and nothing "
+    "added, but render it as a real photographed sky with the cloud texture, colours, light and atmosphere of image 2."
 )
 KEEP_BG = (
-    "Keep the background behind the main building as in image 1: the same neighbouring and distant buildings, "
-    "trees and skyline with the same shapes, sizes and positions; only restyle their light, colour and atmosphere "
-    "to match image 2. Nothing new in the background and in the sky: no added buildings, trees or objects."
+    "Background behind the main building: keep its layout from image 1, the same neighbouring and distant buildings, "
+    "tree masses and skyline with the same shapes, sizes and positions, nothing added or removed, but re-render it "
+    "as real photographed surroundings in the style of image 2: flat, translucent or schematic placeholder volumes "
+    "become real buildings with plain, unobtrusive facades, blob or low-detail trees become real trees of the "
+    "image 2 species and season, all in the light, haze and colours of image 2."
 )
 KEEP_SUR = (
-    "Keep the surroundings in front of and around the main building as in image 1: the same ground, road and "
-    "paving layout, lawn, landscaping, trees, cars and people with the same shapes, sizes and positions; do not "
-    "add, remove or move anything, only restyle their light, colour, season and atmosphere to match image 2."
+    "Surroundings in front of and around the main building: keep their layout from image 1, the same lawn areas, "
+    "paths, roads, paving, planting beds, trees, cars and people with the same shapes, sizes and positions, nothing "
+    "added or removed, but re-render them as real photographed surroundings in the style of image 2: a flat green "
+    "plane becomes real lawn grass like in image 2, simple or low-poly trees and shrubs become real ones of the "
+    "image 2 species and season, flat grey areas become real asphalt or paving, placeholder cars and people become "
+    "real ones, all in the light, shadows and colours of image 2."
 )
 PHOTOREAL = (
     "Absolute photorealism: physically correct light falloff, bounce light and contact shadows, real glass "
@@ -149,12 +155,15 @@ Rules:
 {sur_rule}- 120-180 words, plain English, no lists, no quotes, no negative prompt.
 {box_rule}Answer with JSON: {json_shape}"""
 
-SUR_KEEP_RULE = """- The surroundings of image 1 keep their content and layout: do not add or move plants, only give the existing
-  ones the season, colours and light of image 2.
+SUR_KEEP_RULE = """- The surroundings of image 1 keep their layout: nothing is added, removed or moved. Go through what is there
+  and say how each element becomes real in the style of image 2 at the same place, e.g. "the flat green area in the
+  foreground becomes dense lawn like in image 2", "the simple round trees on the right become <image 2 species>".
 """
-SKY_KEEP_RULE = """- The sky of image 1 keeps its clouds and composition: describe only its new colour and light from image 2.
+SKY_KEEP_RULE = """- The sky of image 1 keeps its cloud layout: describe the same clouds rendered with the texture, colours and
+  light of image 2, nothing new.
 """
-BG_KEEP_RULE = """- The background behind the building keeps its content: describe only its new light and colour, nothing new.
+BG_KEEP_RULE = """- The background behind the building keeps its layout: describe how each background element (neighbouring
+  volumes, tree masses, skyline) becomes real in the style of image 2 at the same place, nothing new.
 """
 
 BOX_RULE = """- Also locate the MAIN building: the subject of the visualisation, usually the largest and most central one,
@@ -251,7 +260,7 @@ def reference_block(analysis: dict, keep_sky: bool, keep_bg: bool, keep_sur: boo
         parts.append(f"Time and weather as in image 2: {a['time_and_weather']}")
     if a.get("sky"):
         parts.append(
-            f"Sky colour and light as in image 2, the clouds of image 1 stay: {a['sky']}" if keep_sky
+            f"Sky colours, light and cloud texture as in image 2, cloud layout as in image 1: {a['sky']}" if keep_sky
             else f"Replace the sky with the sky of image 2: {a['sky']}"
         )
     if a.get("sun_and_shadows"):
@@ -260,7 +269,7 @@ def reference_block(analysis: dict, keep_sky: bool, keep_bg: bool, keep_sur: boo
         parts.append(f"Light rays and atmosphere as in image 2: {a['light_rays_and_atmosphere']}")
     if a.get("vegetation"):
         if keep_sur:
-            parts.append(f"Existing plants take the season and colours of image 2: {a['vegetation']}")
+            parts.append(f"Existing plants keep their places and sizes and become the species, season and colours of image 2: {a['vegetation']}")
         else:
             parts.append(f"Grass, trees and shrubs exactly like in image 2: {a['vegetation']}")
     if a.get("ground_and_water"):
@@ -299,6 +308,65 @@ def assemble(
         parts.append(KEEP_SUR)
     parts += [ref_text, body.strip(), PHOTOREAL, FINAL_LOCK]
     return " ".join(p for p in parts if p)
+
+
+# ---------------- перерисовка сохраняемых зон (второй проход, только по маске) ----------------
+# Короткая прямая команда: модель редактирования при длинном промпте «сохрани как в image 1»
+# копирует заглушки исходника (пятна краски, прозрачные блоки) вместо того, чтобы сделать их настоящими.
+ZONE_INTRO = (
+    "Edit only the {zones}; the building stays exactly as it is. Keep the layout: every element stays at the same "
+    "place with the same shape and size, nothing is added or removed. Replace every schematic, flat, painted or "
+    "translucent placeholder with its real photographed counterpart: translucent, glass-like, white or blank "
+    "volumes are neighbouring buildings and become real opaque buildings of the same shape with plain, unobtrusive "
+    "facades;"
+)
+ZONE_SKY = "a flat, painted or CG sky becomes a real photographed sky with the same cloud layout"
+ZONE_BG = (
+    "translucent, blank or untextured volumes become real buildings with plain, unobtrusive facades; blob or "
+    "low-detail trees become real trees"
+)
+ZONE_SUR = (
+    "flat or painted green areas become dense real lawn grass with individual blades; flat grey areas become real "
+    "asphalt or paving; simple trees and shrubs become real ones; placeholder cars and people become real ones"
+)
+ZONE_OUTRO = (
+    "Everything must look like an unretouched real photograph, seamlessly blended with the building and the rest "
+    "of the image."
+)
+
+
+async def zone_instruction(reference: bytes | None, keep_sky: bool, keep_bg: bool, keep_sur: bool) -> str:
+    """Команда для второго прохода: заглушки в сохраняемых зонах → настоящие объекты в стилистике референса."""
+    names, rules = [], []
+    if keep_sky:
+        names.append("sky")
+        rules.append(ZONE_SKY)
+    if keep_bg:
+        names.append("background behind the building")
+        rules.append(ZONE_BG)
+    if keep_sur:
+        names.append("ground and surroundings in front of and around the building")
+        rules.append(ZONE_SUR)
+    parts = [ZONE_INTRO.format(zones=", ".join(names)), "; ".join(rules) + "."]
+
+    a = {}
+    if reference is not None and DEEPSEEK_API_KEY:
+        try:
+            a = await analyze_reference(reference)  # из кэша: тот же разбор, что и для первого прохода
+        except Exception as e:  # noqa: BLE001
+            log.warning("Разбор референса для зон недоступен: %s", e)
+    style = []
+    if (keep_bg or keep_sur) and a.get("vegetation"):
+        style.append(f"Grass, trees and shrubs exactly like in image 2: {a['vegetation']}")
+    if keep_sky and a.get("sky"):
+        style.append(f"Sky colours, light and cloud texture like in image 2: {a['sky']}")
+    for k, label in (("sun_and_shadows", "Light and shadows"), ("light_rays_and_atmosphere", "Atmosphere"),
+                     ("colour_grade", "Colour grading")):
+        if a.get(k):
+            style.append(f"{label} like in image 2: {a[k]}")
+    if not style and reference is not None:
+        style.append("Match the vegetation, sky, light and colour grading of image 2.")
+    return " ".join(parts + style + [ZONE_OUTRO])
 
 
 def _box(raw) -> list[float] | None:
@@ -345,7 +413,7 @@ async def build_prompt(
 
     h = hashlib.sha256(image)
     h.update(hashlib.sha256(reference or b"").digest())
-    h.update(json.dumps([scene, preset, materials, keep, "v2"]).encode())
+    h.update(json.dumps([scene, preset, materials, keep, "v3"]).encode())
     key = h.hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
