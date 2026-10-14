@@ -91,7 +91,11 @@ FINAL_LOCK = "The building itself stays exactly as in image 1: only the world ar
 
 # ---------------- разбор референса ----------------
 ANALYSIS_FIELDS = {
-    "time_and_weather": "time of day, season, weather, cloud cover in okta",
+    "time_and_weather": "time of day, season, weather",
+    "cloud_cover": (
+        "cloud cover in okta (0-8) and percent of the sky covered, cloud types, their size and where they are; "
+        "for a cloudless sky write exactly 'clear sky, 0 okta, no clouds'"
+    ),
     "sky": (
         "colours from zenith to horizon with hex codes, gradient shape, cloud types, their size, density, "
         "position in the frame and how they are lit, sun visible or not and where"
@@ -132,6 +136,8 @@ ANALYSIS_SYSTEM = (
     "mention people, cars, animals or other objects. If a section does not apply, its value is exactly \"none\". "
     "English. Answer with JSON with exactly these keys, each value 25-60 words:\n"
     + "\n".join(f'- "{k}": {v}' for k, v in ANALYSIS_FIELDS.items())
+    + '\n- "sky_box": [x1, y1, x2, y2] normalised to 0..1000 of the image width and height: the largest rectangle '
+    "that contains ONLY sky (no buildings, trees, poles or wires); [0, 0, 0, 0] if no clean sky is visible"
 )
 
 # ---------------- описательная часть под конкретное здание ----------------
@@ -229,6 +235,8 @@ async def analyze_reference(reference: bytes) -> dict:
     )
     data = json.loads(raw)
     result = {k: c for k in ANALYSIS_FIELDS if (c := _clean(data.get(k)))}
+    if box := _box(data.get("sky_box")):
+        result["_sky_box"] = box  # рамка чистого неба на референсе — для прохода замены неба
     log.info("Разбор референса %s:\n%s", key[:10], json.dumps(result, ensure_ascii=False, indent=1))
     _analysis[key] = result
     if len(_analysis) > ANALYSIS_CACHE_SIZE:
@@ -252,6 +260,40 @@ async def warm_preset_analyses() -> None:
             await asyncio.sleep(0)
 
 
+def is_clear_sky(cloud_cover: str) -> bool:
+    c = cloud_cover.lower()
+    return any(x in c for x in ("0 okta", "no clouds", "cloudless", "clear sky"))
+
+
+def clouds_text(cloud_cover: str, image: str = "image 2") -> str:
+    """Облачность — отдельной фразой: модель охотно оставляет облака черновика."""
+    if is_clear_sky(cloud_cover):
+        return f"Cloud cover exactly as in {image}: a completely clear, cloudless sky, not a single cloud anywhere."
+    return f"Cloud cover exactly as in {image}, the same amount and density of clouds, no more and no fewer: {cloud_cover}"
+
+
+SKY_INSTRUCTION = (
+    "Replace only the sky with a real photographed sky exactly like the sky in image 1: the same colours and "
+    "gradient from the zenith to the horizon, the same light, the same cloud types, amount and density. "
+    "Everything outside the sky stays exactly as it is; the sky meets the rooftops, trees and horizon naturally, "
+    "with the haze and glow of image 1 near the horizon."
+)
+
+
+def sky_instruction(analysis: dict) -> str:
+    """Команда для прохода замены неба (image 1 — вырезанное небо референса)."""
+    a = analysis
+    parts = [SKY_INSTRUCTION]
+    if a.get("cloud_cover"):
+        parts.append(clouds_text(a["cloud_cover"], "image 1"))
+    if a.get("sky"):
+        parts.append(f"Sky: {a['sky']}")
+    if a.get("light_rays_and_atmosphere"):
+        parts.append(f"Atmosphere: {a['light_rays_and_atmosphere']}")
+    parts.append("It must look like an unretouched real photograph of the sky.")
+    return " ".join(parts)
+
+
 def reference_block(analysis: dict, keep_sky: bool, keep_bg: bool, keep_sur: bool) -> str:
     """Блок переноса окружения и света с референса — идёт в промпт целиком, без пересказа."""
     a = analysis
@@ -263,6 +305,8 @@ def reference_block(analysis: dict, keep_sky: bool, keep_bg: bool, keep_sur: boo
             f"Sky colours, light and cloud texture as in image 2, cloud layout as in image 1: {a['sky']}" if keep_sky
             else f"Replace the sky with the sky of image 2: {a['sky']}"
         )
+    if a.get("cloud_cover") and not keep_sky:
+        parts.append(clouds_text(a["cloud_cover"]))
     if a.get("sun_and_shadows"):
         parts.append(f"Sunlight and shadows exactly as in image 2: {a['sun_and_shadows']}")
     if a.get("light_rays_and_atmosphere"):
@@ -413,7 +457,7 @@ async def build_prompt(
 
     h = hashlib.sha256(image)
     h.update(hashlib.sha256(reference or b"").digest())
-    h.update(json.dumps([scene, preset, materials, keep, "v3"]).encode())
+    h.update(json.dumps([scene, preset, materials, keep, "v4"]).encode())
     key = h.hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
@@ -437,7 +481,8 @@ async def build_prompt(
             json_shape=json.dumps(shape),
         )
         text = "Analysis of image 2 (environment and light reference):\n" + (
-            json.dumps(analysis, ensure_ascii=False, indent=1) if analysis else look
+            json.dumps({k: v for k, v in analysis.items() if not k.startswith("_")}, ensure_ascii=False, indent=1)
+            if analysis else look
         )
         if materials:
             text += f"\nArchitect's material specification: {materials}"

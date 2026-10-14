@@ -194,6 +194,25 @@ def _feather(m: np.ndarray, sigma: float) -> np.ndarray:
     return ndimage.gaussian_filter(m, sigma=sigma) if sigma else m
 
 
+def _refine(mask: np.ndarray, rgb: np.ndarray, radius: float = 0.006, eps: float = 1e-3) -> np.ndarray:
+    """Край маски по настоящему контуру картинки (guided filter).
+
+    SegFormer размечает в 512 px и растягивает — край грубый: у здания остаётся полоска старого неба
+    («обводка»). Маску чуть расширяем, а guided filter прижимает её к реальной границе по цвету и яркости.
+    """
+    import kornia
+
+    h, w = mask.shape
+    r = max(2, round(min(h, w) * radius))
+    grown = ndimage.binary_dilation(mask, iterations=max(1, r // 2)) if mask.dtype == bool else mask
+    guide = torch.from_numpy(rgb).float().permute(2, 0, 1)[None] / 255.0
+    m = torch.from_numpy(grown.astype(np.float32))[None, None]
+    out = kornia.filters.guided_blur(guide, m, 2 * r + 1, eps)[0, 0].clamp(0, 1).numpy()
+    # подтянуть переход: guided filter оставляет полупрозрачную кромку
+    out = np.clip((out - 0.5) * 1.6 + 0.5, 0, 1)
+    return out.astype(np.float32)
+
+
 class InegoKeepZones:
     @classmethod
     def INPUT_TYPES(cls):
@@ -209,6 +228,8 @@ class InegoKeepZones:
             "optional": {
                 # рамка главного здания "x1,y1,x2,y2" в долях кадра; пусто — ищем по SegFormer
                 "building_box": ("STRING", {"default": ""}),
+                # край маски по контуру картинки (guided filter) вместо размытия — для замены неба
+                "refine": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -217,7 +238,7 @@ class InegoKeepZones:
     FUNCTION = "run"
     CATEGORY = "inego"
 
-    def run(self, image, keep_sky, keep_background, keep_surroundings, grow, feather, building_box=""):
+    def run(self, image, keep_sky, keep_background, keep_surroundings, grow, feather, building_box="", refine=False):
         h, w = image.shape[1:3]
         empty = torch.zeros((1, h, w))
         if not (keep_sky or keep_background or keep_surroundings):
@@ -259,7 +280,10 @@ class InegoKeepZones:
         # медианный фильтр убирает точечную рябь сегментации (стекло, отражения) — иначе в зонах пятна
         k = max(3, round(min(h, w) * 0.01) | 1)
         zones = [ndimage.median_filter(z.astype(np.uint8), size=k).astype(bool) if z.any() else z for z in zones]
-        out = [torch.from_numpy(_feather(z & ~band, f))[None] for z in zones]
+        if refine:
+            out = [torch.from_numpy(_refine(z & ~band, rgb) if z.any() else z.astype(np.float32))[None] for z in zones]
+        else:
+            out = [torch.from_numpy(_feather(z & ~band, f))[None] for z in zones]
         keep = torch.clamp(out[0] + out[1] + out[2], 0, 1)
         return (*out, keep)
 
@@ -345,8 +369,105 @@ class InegoZoneRestyle:
         return (rgb[0].permute(1, 2, 0)[None],)
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle}
+def _sky_mask(rgb: np.ndarray) -> np.ndarray:
+    """Небо SegFormer без здания и без точечной ряби."""
+    labels, names = _segment(rgb)
+    sky = np.isin(labels, [i for i, n in names.items() if n in SKY])
+    if sky.any():
+        k = max(3, round(min(sky.shape) * 0.01) | 1)
+        sky = ndimage.median_filter(sky.astype(np.uint8), size=k).astype(bool)
+    return sky
+
+
+class InegoSkyMatch:
+    """Цвет неба результата — как у неба референса: градиент от зенита к горизонту по полосам высоты (LAB).
+
+    Облака и их расклад не трогаются — меняются только тон, цвет и яркость неба, чтобы попасть в референс.
+    """
+
+    BANDS = 6
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "reference": ("IMAGE",),
+                "strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "feather": ("FLOAT", {"default": 0.006, "min": 0.0, "max": 0.05, "step": 0.001}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    @classmethod
+    def _profile(cls, lab: torch.Tensor, sky: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        """Средний LAB по полосам высоты неба (сверху вниз) и общий разброс."""
+        rows = np.where(sky.any(1))[0]
+        if sky.sum() < 0.02 * sky.size or rows.size < cls.BANDS:
+            return None
+        top, bottom = rows.min(), rows.max() + 1
+        edges = np.linspace(top, bottom, cls.BANDS + 1).astype(int)
+        means = []
+        for a, b in zip(edges[:-1], edges[1:]):
+            m = np.zeros_like(sky)
+            m[a:b] = sky[a:b]
+            if m.sum() < 32:
+                means.append(None)
+                continue
+            sel = lab[:, torch.from_numpy(m)]
+            means.append(sel.mean(-1).numpy())
+        valid = [x for x in means if x is not None]
+        if not valid:
+            return None
+        means = [x if x is not None else valid[0] for x in means]
+        std = lab[:, torch.from_numpy(sky)].std(-1).numpy() + 1e-3
+        return np.stack(means), std
+
+    def run(self, image, reference, strength, feather):
+        import kornia
+
+        img = image[0].permute(2, 0, 1)[None].float().clamp(0, 1)
+        ref = reference[0].permute(2, 0, 1)[None].float().clamp(0, 1)
+        sky_i = _sky_mask(_to_uint8(image[0]))
+        sky_r = _sky_mask(_to_uint8(reference[0]))
+        lab_i = kornia.color.rgb_to_lab(img)[0]
+        lab_r = kornia.color.rgb_to_lab(ref)[0]
+        prof_i, prof_r = self._profile(lab_i, sky_i), self._profile(lab_r, sky_r)
+        if prof_i is None or prof_r is None:
+            log.info("INEGO sky match: неба мало (результат %.1f%%, референс %.1f%%) — пропуск",
+                     100 * sky_i.mean(), 100 * sky_r.mean())
+            return (image,)
+
+        (mi, si), (mr, sr) = prof_i, prof_r
+        h, w = sky_i.shape
+        rows = np.where(sky_i.any(1))[0]
+        top, bottom = rows.min(), rows.max() + 1
+        # поправка для каждой строки: интерполяция средних полос по относительной высоте в небе
+        centers = (np.arange(self.BANDS) + 0.5) / self.BANDS
+        rel = np.clip((np.arange(h) - top) / max(1, bottom - top), 0, 1)
+        mean_i_row = np.stack([np.interp(rel, centers, mi[:, c]) for c in range(3)])
+        mean_r_row = np.stack([np.interp(rel, centers, mr[:, c]) for c in range(3)])
+        scale = torch.from_numpy(sr / si).float()[:, None, None].clamp(0.5, 2.0)
+        mi_t = torch.from_numpy(mean_i_row).float()[:, :, None]
+        mr_t = torch.from_numpy(mean_r_row).float()[:, :, None]
+        matched = (lab_i - mi_t) * scale + mr_t
+
+        # край — по настоящему контуру, иначе у здания остаётся полоска неба старого цвета
+        m = _refine(sky_i, _to_uint8(image[0])) if feather else sky_i.astype(np.float32)
+        m = torch.from_numpy(m).float()[None] * strength
+        out = lab_i * (1 - m) + matched * m
+        rgb = kornia.color.lab_to_rgb(out[None]).clamp(0, 1)[0]
+        log.info("INEGO sky match: небо %.1f%% кадра, L %.0f→%.0f (верх) / %.0f→%.0f (низ)",
+                 100 * sky_i.mean(), mi[0, 0], mr[0, 0], mi[-1, 0], mr[-1, 0])
+        return (rgb.permute(1, 2, 0)[None],)
+
+
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
     "InegoZoneRestyle": "INEGO Zone Restyle (source content, render light)",
+    "InegoSkyMatch": "INEGO Sky Match (sky colour from reference)",
 }

@@ -6,6 +6,12 @@
   3. кадр генерируется в тех же пропорциях, результат приводится к размеру исходника.
 Референс подаётся вторым ReferenceLatent (image 2) — эталон неба, света, атмосферы и растительности.
 
+Небо (экстерьер с референсом):
+  - без «Сохранить небо» небо полного рендера перерисовывается целиком по маске неба, а образец — только
+    вырезанное небо референса (рамку чистого неба даёт DeepSeek): так переносятся облачность, её плотность и цвет,
+    а облака черновика не просачиваются;
+  - в конце InegoSkyMatch подгоняет цвет неба к небу референса по полосам от зенита к горизонту.
+
 «Сохранить небо / фон / окружение» — сохраняется расклад зоны (где газон, дорога, деревья, облака),
 а сама зона перерисовывается фотореально в стилистике референса:
   1. полный рендер по референсу (как без галочек) — из него берётся целевой свет и цвет каждой зоны;
@@ -32,12 +38,13 @@ from .config import (
     FLUX_MODELS,
     FLUX_VAE,
     RENDER_MEGAPIXELS,
+    SKY_MATCH,
     ZONE_DETAIL,
     ZONE_RESTYLE,
     log,
 )
 from .presets import reference_image
-from .prompting import build_prompt, zone_instruction
+from .prompting import analyze_reference, build_prompt, sky_instruction, zone_instruction
 
 REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
@@ -61,6 +68,13 @@ def to_png(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
+
+
+def _crop_sky(ref: Image.Image, box: list[float]) -> Image.Image:
+    """Вырезает чистое небо референса (рамка в долях кадра) и приводит к ~0.5 Мп."""
+    w, h = ref.size
+    crop = ref.crop((round(box[0] * w), round(box[1] * h), round(box[2] * w), round(box[3] * h)))
+    return crop.resize(fit_size(*crop.size, 0.5), Image.LANCZOS)
 
 
 def denoise_for(strength: float) -> float:
@@ -126,6 +140,9 @@ def build_workflow(
     building_box: list[float] | None = None,
     model: str = DEFAULT_MODEL,
     zone_prompt: str = "",
+    sky_ref: str | None = None,
+    sky_prompt: str = "",
+    sky_match: bool = False,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
     files = FLUX_MODELS[model]
@@ -145,6 +162,26 @@ def build_workflow(
     # проход 1 — полный рендер
     positive = _conditioning(wf, "", ["src_lat", 0], reference)
     image = _sampling(wf, "", positive, ["src_lat", 0], width, height, max(1, round(TOTAL_STEPS * denoise)), seed)
+    # Differential Diffusion — мягкий край для всех проходов по маске
+    wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["unet", 0], "strength": 1.0}}
+
+    if sky_ref and not keep_sky:
+        # замена неба: маска неба полного рендера, шум только под ней, образец — небо референса как image 1
+        # (не черновик: иначе модель воспроизводит его облака)
+        wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
+        wf["sky_ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["sky_ref_img", 0], "vae": ["vae", 0]}}
+        wf["sky_zones"] = {
+            "class_type": "InegoKeepZones",
+            "inputs": {
+                "image": image, "keep_sky": True, "keep_background": False, "keep_surroundings": False,
+                "grow": 0.0, "feather": 0.006, "building_box": "", "refine": True,
+            },
+        }
+        wf["sky_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": image, "vae": ["vae", 0]}}
+        wf["sky_masked"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["sky_lat", 0], "mask": ["sky_zones", 0]}}
+        wf["text_s"] = {"class_type": "CLIPTextEncode", "inputs": {"text": sky_prompt, "clip": ["clip", 0]}}
+        wf["cond_s"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text_s", 0], "latent": ["sky_ref_lat", 0]}}
+        image = _sampling(wf, "_s", ["cond_s", 0], ["sky_masked", 0], width, height, TOTAL_STEPS, seed + 2, model=["diffdiff", 0])
 
     if keep_sky or keep_bg or keep_sur:
         wf["zones"] = {
@@ -154,9 +191,10 @@ def build_workflow(
                 "keep_sky": keep_sky,
                 "keep_background": keep_bg,
                 "keep_surroundings": keep_sur,
-                "grow": 0.006,
+                "grow": 0.002,
                 "feather": 0.006,
                 "building_box": ",".join(f"{v:.4f}" for v in building_box) if building_box else "",
+                "refine": True,  # край зон по контуру картинки — без светлой «обводки» у здания
             },
         }
         wf["restyle"] = {
@@ -179,13 +217,20 @@ def build_workflow(
         # модель редактирования воспроизводит image 1, и со склейкой заглушки (пятна, прозрачные блоки) оставались
         wf["comp_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["restyle", 0], "vae": ["vae", 0]}}
         wf["zone_lat"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["comp_lat", 0], "mask": ["zones", 3]}}
-        wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["unet", 0], "strength": 1.0}}
         wf["text_z"] = {"class_type": "CLIPTextEncode", "inputs": {"text": zone_prompt or prompt, "clip": ["clip", 0]}}
         positive = _conditioning(wf, "_z", ["src_lat", 0], reference, text="text_z")
         image = _sampling(
             wf, "_z", positive, ["zone_lat", 0], width, height,
             max(1, round(TOTAL_STEPS * ZONE_RESTYLE)), seed + 1, model=["diffdiff", 0],
         )
+
+    if sky_match and reference:
+        # цвет неба — как на референсе (облака и их расклад не трогаются)
+        wf["sky_match"] = {
+            "class_type": "InegoSkyMatch",
+            "inputs": {"image": image, "reference": ["ref_img", 0], "strength": SKY_MATCH, "feather": 0.006},
+        }
+        image = ["sky_match", 0]
 
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": "inego/img2img"}}
     return wf
@@ -264,6 +309,18 @@ async def run_img2img(
     zone_prompt = await zone_instruction(ref_bytes, keep_sky, keep_bg, keep_sur) if (keep_sky or keep_bg or keep_sur) else ""
     if zone_prompt:
         log.info("Перерисовка зон:\n%s", zone_prompt)
+    # небо референса: рамка чистого неба из разбора DeepSeek (из кэша) — для замены неба в экстерьере
+    sky_box, sky_prompt = None, ""
+    exterior = scene == "exterior"
+    if ref_bytes and exterior and not keep_sky:
+        try:
+            analysis = await analyze_reference(ref_bytes)
+            sky_box = analysis.get("_sky_box")
+            sky_prompt = sky_instruction(analysis) if sky_box else ""
+        except Exception as e:  # noqa: BLE001 — без замены неба генерация всё равно идёт
+            log.warning("Разбор референса для неба недоступен: %s", e)
+    if sky_prompt:
+        log.info("Замена неба, рамка %s:\n%s", sky_box, sky_prompt)
     denoise = denoise_for(strength)
     log.info(
         "img2img %s %s/%s %dx%d denoise=%.2f seed=%d keep sky=%s bg=%s sur=%s box=%s\n%s",
@@ -274,15 +331,18 @@ async def run_img2img(
         await _check_model(client, model)
         src_fit = src.resize((width, height), Image.LANCZOS)
         source_name = await _upload(client, to_png(src_fit), f"{uuid.uuid4().hex}.png")
-        ref_name = None
+        ref_name = sky_name = None
         if ref_bytes:
             ref = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
             # референс — эталон окружения: больше пикселей → точнее небо, листва и свет
             ref = ref.resize(fit_size(*ref.size, REF_MEGAPIXELS), Image.LANCZOS)
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
+            if sky_box:
+                sky_name = await _upload(client, to_png(_crop_sky(ref, sky_box)), f"{uuid.uuid4().hex}.png")
 
         workflow = build_workflow(
-            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model, zone_prompt
+            source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model,
+            zone_prompt, sky_name, sky_prompt, sky_match=exterior,
         )
         out = await _run(client, workflow)
 
