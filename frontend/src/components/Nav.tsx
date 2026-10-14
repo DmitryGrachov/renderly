@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Building2, LogOut, Sofa } from 'lucide-react'
+import { Building2, Coins, LogOut, Sofa, UserRound } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { ThemeMenu } from './ThemeMenu'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
+import { fmt, useAccount } from '../lib/account'
 
-export type Tab = 'img2img' | 'inpainting'
+export type Tab = 'img2img' | 'inpainting' | 'account'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'img2img', label: 'Img to Img' },
@@ -38,7 +39,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
                 role="tab"
                 aria-selected={active}
                 onClick={() => onChange(t.id)}
-                className={`relative z-10 rounded-full px-4 py-1.5 text-[13px] font-medium transition-colors duration-300 sm:px-5 ${
+                className={`relative z-10 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[13px] font-medium transition-colors duration-300 sm:px-5 ${
                   active ? 'text-ink' : 'text-mute hover:text-ink'
                 }`}
               >
@@ -58,11 +59,12 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
           })}
         </nav>
 
-        <div className="flex items-center gap-3 sm:gap-4">
+        <div className="flex items-center gap-1.5 sm:gap-4">
           <SceneSwitch />
-          <div className="flex items-center gap-2">
+          <TokenChip active={tab === 'account'} onClick={() => onChange('account')} />
+          <div className="flex items-center gap-1 sm:gap-2">
             <ThemeMenu />
-            <UserMenu />
+            <UserMenu onAccount={() => onChange('account')} />
           </div>
         </div>
       </div>
@@ -125,7 +127,23 @@ function SceneSwitch() {
   )
 }
 
-function UserMenu() {
+function TokenChip({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const { balance } = useAccount()
+  return (
+    <button
+      onClick={onClick}
+      title="Баланс токенов"
+      className={`hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-semibold tabular-nums transition-colors duration-300 sm:flex ${
+        active ? 'bg-ink text-on-ink' : 'bg-fg/[0.05] text-ink hover:bg-fg/[0.08]'
+      }`}
+    >
+      <Coins className="size-[15px] text-[#ff8a3d]" strokeWidth={2} />
+      {fmt(balance)}
+    </button>
+  )
+}
+
+function UserMenu({ onAccount }: { onAccount: () => void }) {
   const { user, logout } = useAuth()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -172,8 +190,14 @@ function UserMenu() {
             </div>
             <div className="mx-2 h-px bg-fg/[0.07]" />
             <button
-              onClick={() => { setOpen(false); logout() }}
+              onClick={() => { setOpen(false); onAccount() }}
               className="mt-1 flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[14px] text-ink-2 transition-colors hover:bg-fg/[0.05] hover:text-ink"
+            >
+              <UserRound className="size-4" /> Личный кабинет
+            </button>
+            <button
+              onClick={() => { setOpen(false); logout() }}
+              className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[14px] text-ink-2 transition-colors hover:bg-fg/[0.05] hover:text-ink"
             >
               <LogOut className="size-4" /> Выйти
             </button>

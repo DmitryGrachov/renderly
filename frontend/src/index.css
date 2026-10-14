@@ -82,6 +82,11 @@
   --checker-a: #fafafa;
   --checker-b: #f0f0f2;
   --logo-bg: #1d1d1f;
+
+  /* серии моделей на графиках (проверено на CVD отдельно для каждой темы) */
+  --color-m-klein: #5b4bff;
+  --color-m-dev: #e8336a;
+  --color-m-pro: #d97706;
 }
 :root[data-theme="dark"] {
   --glass-bg: rgb(44 44 46 / 0.72);
@@ -89,6 +94,10 @@
   --checker-a: #121213;
   --checker-b: #19191b;
   --logo-bg: #2c2c2e;
+
+  --color-m-klein: #8b80ff;
+  --color-m-dev: #f0467a;
+  --color-m-pro: #c87510;
 }
 
 /* плавная смена темы — класс вешается на <html> на время переключения */

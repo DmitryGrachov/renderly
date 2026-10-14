@@ -4,11 +4,12 @@ import { CheckCircle2 } from 'lucide-react'
 import { Logo, Nav, type Tab } from './components/Nav'
 import { ImgToImg } from './pages/ImgToImg'
 import { Inpainting } from './pages/Inpainting'
+import { Account } from './pages/Account'
 import type { StudioImage } from './lib/types'
 import { AuthPage } from './pages/Auth'
 import { useAuth } from './lib/auth'
 
-const readTab = (): Tab => (location.hash === '#/inpainting' ? 'inpainting' : 'img2img')
+const readTab = (): Tab => (location.hash === '#/inpainting' ? 'inpainting' : location.hash === '#/account' ? 'account' : 'img2img')
 
 export default function App() {
   const { status } = useAuth()
@@ -73,6 +74,7 @@ function Studio() {
         <div hidden={tab !== 'inpainting'}>
           {tab === 'inpainting' && <Inpainting image={inpaintImage} onImage={setInpaintImage} onBack={() => go('img2img')} />}
         </div>
+        {tab === 'account' && <Account onToast={setToast} />}
       </main>
 
       <footer className="border-t border-fg/[0.06]">

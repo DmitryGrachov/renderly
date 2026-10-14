@@ -8,6 +8,7 @@ import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
+import { useAccount } from '../lib/account'
 import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
 
 type Status = 'idle' | 'running' | 'done' | 'error'
@@ -25,6 +26,7 @@ const SUBTITLE: Record<Scene, string> = {
 
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
+  const { charge } = useAccount()
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
@@ -80,6 +82,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
         ctrl.signal,
       )
       setResult({ url: res.url, preset, scene, seed: res.seed })
+      charge('render', `Img to Img · ${presetById(preset, scene).title}`)
       if (!seedLocked) setSeed(String(res.seed))
       setView('compare')
       setStatus('done')

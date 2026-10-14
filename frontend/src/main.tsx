@@ -4,15 +4,18 @@ import App from './App'
 import { SceneProvider } from './lib/scene'
 import { AuthProvider } from './lib/auth'
 import { ThemeProvider } from './lib/theme'
+import { AccountProvider } from './lib/account'
 import './index.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
       <AuthProvider>
-        <SceneProvider>
-          <App />
-        </SceneProvider>
+        <AccountProvider>
+          <SceneProvider>
+            <App />
+          </SceneProvider>
+        </AccountProvider>
       </AuthProvider>
     </ThemeProvider>
   </StrictMode>,
