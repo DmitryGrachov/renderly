@@ -115,11 +115,14 @@ async def inpaint(
         raise HTTPException(400, f"Unknown model: {model}")
     if mode not in ("edit", "remove"):
         raise HTTPException(400, f"Unknown mode: {mode}")
-    if mode == "edit":
-        raise HTTPException(501, "Режим «Добавить / изменить» пока в разработке — доступно удаление")
+    if mode == "edit" and not (prompt and prompt.strip()):
+        raise HTTPException(400, "Опишите, что должно появиться в области")
 
     try:
-        result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)
+        if mode == "edit":
+            result, used_seed = await inpainting.run_edit(await image.read(), await mask.read(), prompt, seed, model)
+        else:
+            result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)
     except inpainting.EmptyMask as e:
         raise HTTPException(400, str(e)) from e
     except comfy.ModelUnavailable as e:

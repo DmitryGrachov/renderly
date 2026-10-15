@@ -69,6 +69,40 @@ REMOVE_FALLBACK = {
     "background": "the surfaces and scenery that surround it",
 }
 
+EDIT_SYSTEM = (
+    "You prepare an instruction for an image editing model that must change one area of an architectural photo "
+    "or render. The user highlighted the area with a red overlay and outline (image 2); image 1 is the same crop "
+    "without the highlight. The user's request (it may be in Russian) says what must appear or change there. "
+    "Write in English what exactly that area shows after the edit: objects, materials, colours, their size "
+    "relative to things around them, orientation following the scene perspective, lit from the same direction "
+    "as the scene with matching shadows. If the request changes something already there (material, colour, "
+    "type), say what it becomes and that its shape and position stay. Fit the request to the size of the area: "
+    "the new thing fills it naturally, not a tiny object in the middle, and all of it, including its top (crown, "
+    "foliage, lamp head, roof), stays inside the area: scale it down rather than let it be cut off. Do not add "
+    "anything the user did not ask "
+    "for. Answer with JSON: "
+    '{"instruction": "<20-60 words: what the area shows after the edit>", '
+    '"location": "<5-20 words: where the area is, by landmarks of image 1>", '
+    '"scene": "<10-25 words: photo or render, light direction, time of day, style>"}'
+)
+EDIT_PROMPT = (
+    "Edit only the area {location}: {instruction}. It must belong to the scene ({scene}): match the perspective, "
+    "scale, light direction, shadow softness, colour grading, sharpness and grain of image 1, with natural "
+    "contact shadows. Everything else stays exactly as in image 1."
+)
+# область правки подсвечена на image 1 — модель видит, где рисовать, и не путает место по словам
+MARK_RULE = (
+    " In image 1 the area to edit is marked with a translucent red overlay and outline; in the result it is "
+    "completely replaced and no red tint or outline remains."
+)
+EDIT_MARK = True
+EDIT_MARK_OPACITY = 0.45
+EDIT_GROW = 0.05  # запас по контуру: объект у края маски не обрезается и не растворяется в фоне
+# край маски правки (доля короткой стороны кропа): жёстче, чем у удаления — иначе по мягкому краю
+# Differential Diffusion оставляет исходник, и низ нового объекта растворяется в мощении
+EDIT_EDGE = 1 / 480
+REMOVE_EDGE = 1 / 160
+
 _described: OrderedDict[str, dict] = OrderedDict()
 CACHE_SIZE = 128
 
@@ -115,10 +149,10 @@ def _context_box(bbox: tuple[int, int, int, int], w: int, h: int) -> tuple[int, 
     return left, top, left + cw, top + ch
 
 
-def _highlight(crop: Image.Image, mask: Image.Image) -> bytes:
-    """Кроп с красной подсветкой и контуром выделенной области — для DeepSeek."""
+def _highlight(crop: Image.Image, mask: Image.Image, opacity: float = 0.45) -> bytes:
+    """Кроп с красной подсветкой и контуром выделенной области — для DeepSeek и как image 1 правки."""
     tint = Image.new("RGB", crop.size, (255, 40, 60))
-    out = Image.composite(Image.blend(crop, tint, 0.45), crop, mask)
+    out = Image.composite(Image.blend(crop, tint, opacity), crop, mask)
     edge = ImageChops.subtract(_grow(mask, max(2, min(crop.size) // 200)), mask)
     ImageDraw.Draw(out).bitmap((0, 0), edge, fill=(255, 0, 40))
     buf = io.BytesIO()
@@ -175,7 +209,10 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
     return result
 
 
-def build_remove_workflow(crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str) -> dict:
+def build_workflow(
+    crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str, reference: str | None = None
+) -> dict:
+    """Перерисовка кропа только под маской. image 1 — сам кроп или (reference) его копия с подсвеченной областью."""
     files = FLUX_MODELS[model]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
@@ -186,14 +223,69 @@ def build_remove_workflow(crop: str, mask: str, width: int, height: int, prompt:
         "src_img": {"class_type": "LoadImage", "inputs": {"image": crop}},
         "mask": {"class_type": "LoadImageMask", "inputs": {"image": mask, "channel": "red"}},
         "src_lat": {"class_type": "VAEEncode", "inputs": {"pixels": ["src_img", 0], "vae": ["vae", 0]}},
+        # вне маски латент остаётся исходным, шум — только под маской
         "noise_lat": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["src_lat", 0], "mask": ["mask", 0]}},
         "text": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
-        # image 1 — кроп как есть: модель видит объект и по инструкции убирает его, а не дорисовывает «дыру»
-        "cond": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text", 0], "latent": ["src_lat", 0]}},
     }
+    ref_lat = ["src_lat", 0]
+    if reference:
+        wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
+        wf["ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["ref_img", 0], "vae": ["vae", 0]}}
+        ref_lat = ["ref_lat", 0]
+    # удаление: image 1 — кроп как есть, модель видит объект и по инструкции убирает его, а не дорисовывает «дыру»
+    wf["cond"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text", 0], "latent": ref_lat}}
     image = _sampling(wf, "", ["cond", 0], ["noise_lat", 0], width, height, TOTAL_STEPS, seed, model=["diffdiff", 0])
-    wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": "inego/remove"}}
+    wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": f"inego/{prefix}"}}
     return wf
+
+
+class _Region:
+    """Исходник, маска (расширенная) и кроп с контекстом вокруг неё."""
+
+    def __init__(self, image: bytes, mask: bytes, grow_frac: float, shadow_down: float = 0.0):
+        self.src = Image.open(io.BytesIO(image)).convert("RGB")
+        w, h = self.src.size
+        m = _binary(Image.open(io.BytesIO(mask)), self.src.size)
+        bbox = m.getbbox()
+        if not bbox:
+            raise EmptyMask("Маска пуста — выделите область")
+        # запас по контуру: пользовательская маска приблизительна
+        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        self.grow = max(4, round(grow_frac * max(bw, bh)), round(0.004 * max(w, h)))
+        if shadow_down:
+            m = _extend_down(m, round(shadow_down * bh), self.grow)
+        grown = _grow(m, self.grow)
+        self.box = _context_box(grown.getbbox(), w, h)
+        self.crop, self.mask = self.src.crop(self.box), grown.crop(self.box)
+        self.gen_size = fit_size(*self.crop.size, INPAINT_MEGAPIXELS)
+
+    async def generate(
+        self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None
+    ) -> bytes:
+        """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении."""
+        gw, gh = self.gen_size
+        # мягкий край маски: Differential Diffusion плавно сводит новое со старым
+        soft = self.mask.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
+        async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+            await _check_model(client, model)
+            crop_name = await _upload(client, to_png(self.crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+            mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
+            ref_name = None
+            if reference is not None:
+                ref_name = await _upload(client, to_png(reference.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+            out = await _run(client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, prefix, ref_name))
+        if "save" not in out:
+            raise ComfyError("ComfyUI не вернул результат")
+
+        # вклейка: только расширенная маска с растушёвкой наружу — шов ложится на уже перерисованную кромку
+        patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(self.crop.size, Image.LANCZOS)
+        feather = max(2, self.grow // 2)
+        alpha = ImageChops.lighter(_grow(self.mask, feather).filter(ImageFilter.GaussianBlur(feather / 2)), self.mask)
+        result = self.src.copy()
+        result.paste(patch, self.box[:2], alpha)
+        buf = io.BytesIO()
+        result.save(buf, "JPEG", quality=95)
+        return buf.getvalue()
 
 
 async def run_remove(
@@ -205,51 +297,72 @@ async def run_remove(
     """
     if seed is None:
         seed = random.randrange(2**48)
-    src = Image.open(io.BytesIO(image)).convert("RGB")
-    w, h = src.size
-    m = _binary(Image.open(io.BytesIO(mask)), src.size)
-    bbox = m.getbbox()
-    if not bbox:
-        raise EmptyMask("Маска пуста — выделите объект")
+    # маска протягивается вниз — под контактную тень у ног, колёс и основания
+    r = _Region(image, mask, 0.04, SHADOW_DOWN)
+    cw, ch = r.crop.size
 
-    # запас по контуру: пользовательская маска приблизительна, край объекта и контактная тень — снаружи неё
-    bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    grow = max(4, round(0.04 * max(bw, bh)), round(0.004 * max(w, h)))
-    grown = _grow(_extend_down(m, round(SHADOW_DOWN * bh), grow), grow)
-    box = _context_box(grown.getbbox(), w, h)
-    crop, crop_mask = src.crop(box), grown.crop(box)
-    cw, ch = crop.size
-    gw, gh = fit_size(cw, ch, INPAINT_MEGAPIXELS)
-
-    what = await describe_removal(to_png(crop), _highlight(crop, crop_mask), (hint or "").strip())
+    what = await describe_removal(to_png(r.crop), _highlight(r.crop, r.mask), (hint or "").strip())
     prompt = REMOVE_PROMPT.format(**what) + (KEEP_PROMPT.format(keep=what["keep"]) if what.get("keep") else "")
     if shadow := what.get("shadow"):
         # тень объекта за пределами выделения — эллипс по рамке DeepSeek, иначе останется «тень без хозяина»
-        crop_mask = crop_mask.copy()
-        ImageDraw.Draw(crop_mask).ellipse(
+        r.mask = r.mask.copy()
+        ImageDraw.Draw(r.mask).ellipse(
             (round(shadow[0] * cw), round(shadow[1] * ch), round(shadow[2] * cw), round(shadow[3] * ch)), fill=255
         )
     log.info(
-        "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s", model, w, h, box, gw, gh, seed, what.get("shadow"), prompt
+        "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
+        model, *r.src.size, r.box, *r.gen_size, seed, what.get("shadow"), prompt,
     )
+    return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE), seed
 
-    # мягкий край маски: Differential Diffusion плавно сводит новое со старым
-    soft = crop_mask.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(2, min(gw, gh) // 160)))
-    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
-        await _check_model(client, model)
-        crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-        mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
-        out = await _run(client, build_remove_workflow(crop_name, mask_name, gw, gh, prompt, seed, model))
-    if "save" not in out:
-        raise ComfyError("ComfyUI не вернул результат")
 
-    # вклейка: только расширенная маска с растушёвкой наружу — шов ложится на уже перерисованную кромку
-    patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((cw, ch), Image.LANCZOS)
-    feather = max(2, grow // 2)
-    alpha = _grow(crop_mask, feather).filter(ImageFilter.GaussianBlur(feather / 2))
-    alpha = ImageChops.lighter(alpha, crop_mask)
-    result = src.copy()
-    result.paste(patch, box[:2], alpha)
-    buf = io.BytesIO()
-    result.save(buf, "JPEG", quality=95)
-    return buf.getvalue(), seed
+async def describe_edit(crop: bytes, highlighted: bytes, request: str) -> dict:
+    """Инструкция правки на английском (что появится в области, где она, какая сцена); без DeepSeek — запрос как есть."""
+    fallback = {"instruction": request, "location": "in the middle of the image", "scene": "the same scene as image 1"}
+    if not DEEPSEEK_API_KEY:
+        return fallback
+    key = hashlib.sha256(highlighted + b"edit" + request.encode()).hexdigest()
+    if key in _described:
+        _described.move_to_end(key)
+        return _described[key]
+    try:
+        raw = await _chat(
+            [
+                {"role": "system", "content": EDIT_SYSTEM},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"User request: «{request}»"},
+                        {"type": "text", "text": "Image 1 (crop):"},
+                        {"type": "image_url", "image_url": {"url": _data_url(crop, 1024)}},
+                        {"type": "text", "text": "Image 2 (area to edit highlighted in red):"},
+                        {"type": "image_url", "image_url": {"url": _data_url(highlighted, 1024)}},
+                    ],
+                },
+            ],
+            json_mode=True,
+        )
+        data = json.loads(raw)
+        result = {k: " ".join(str(data.get(k) or "").split()).rstrip(".") or fallback[k] for k in fallback}
+    except Exception as e:  # noqa: BLE001 — правка не должна падать из-за LLM
+        log.warning("DeepSeek недоступен, запрос правки как есть: %s", e)
+        return fallback
+    _described[key] = result
+    if len(_described) > CACHE_SIZE:
+        _described.popitem(last=False)
+    return result
+
+
+async def run_edit(
+    image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL
+) -> tuple[bytes, int]:
+    """JPEG исходника в полном разрешении, где под маской нарисовано то, что попросил пользователь, и сид."""
+    if seed is None:
+        seed = random.randrange(2**48)
+    r = _Region(image, mask, EDIT_GROW)
+    highlighted = _highlight(r.crop, r.mask)
+    what = await describe_edit(to_png(r.crop), highlighted, request.strip())
+    prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if EDIT_MARK else "")
+    log.info("edit %s %dx%d кроп %s → %dx%d seed=%d «%s»\n%s", model, *r.src.size, r.box, *r.gen_size, seed, request, prompt)
+    reference = Image.open(io.BytesIO(_highlight(r.crop, r.mask, EDIT_MARK_OPACITY))).convert("RGB") if EDIT_MARK else None
+    return await r.generate(prompt, seed, model, "edit", EDIT_EDGE, reference), seed
