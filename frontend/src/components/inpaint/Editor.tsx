@@ -94,6 +94,8 @@ export function Editor({ image, onClose }: Props) {
   }, [maskW, maskH])
 
   useEffect(() => recolor(mode), [mode, recolor])
+  // подсказка удаления и описание правки — разные вещи, при смене режима поле очищается
+  useEffect(() => setPrompt(''), [mode])
 
   const computeBox = useCallback((): Box | null => {
     const d = ctx().getImageData(0, 0, maskW, maskH).data
@@ -242,12 +244,13 @@ export function Editor({ image, onClose }: Props) {
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, scene, model, mask: maskRef.current!, mode, prompt: mode === 'edit' ? text : undefined },
+        { imageUrl: versions[current].url, scene, model, mask: maskRef.current!, mode, prompt: text || undefined },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )
-      charge('inpaint', mode === 'remove' ? 'Inpainting · удаление' : `Inpainting · ${text}`)
-      setVersions((v) => [...v.slice(0, current + 1), { url, mode, label: mode === 'remove' ? 'Удаление' : text }])
+      const label = mode === 'remove' ? (text ? `Удаление · ${text}` : 'Удаление') : text
+      charge('inpaint', `Inpainting · ${label.toLowerCase()}`)
+      setVersions((v) => [...v.slice(0, current + 1), { url, mode, label }])
       setCurrent((c) => c + 1)
       clearMask(false)
       undoStack.current = []
@@ -302,7 +305,7 @@ export function Editor({ image, onClose }: Props) {
     const by = top + bbox.y / k
     const bw = bbox.w / k
     const bh = bbox.h / k
-    const est = mode === 'edit' ? 250 : 150
+    const est = mode === 'edit' ? 250 : 230
     let placement: 'top' | 'bottom' = 'bottom'
     let y = by + bh + 14
     if (y + est > stage.h - 8) {

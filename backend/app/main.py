@@ -104,7 +104,8 @@ async def inpaint(
     mask: UploadFile = File(...),
     scene: str = Form("exterior"),
     mode: str = Form(...),
-    prompt: str | None = Form(None),
+    # edit — что нарисовать; remove — необязательное уточнение, что именно удалить («люди», «машина»)
+    prompt: str | None = Form(None, max_length=300),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     _user: User = Depends(current_user),
@@ -118,7 +119,7 @@ async def inpaint(
         raise HTTPException(501, "Режим «Добавить / изменить» пока в разработке — доступно удаление")
 
     try:
-        result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model)
+        result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)
     except inpainting.EmptyMask as e:
         raise HTTPException(400, str(e)) from e
     except comfy.ModelUnavailable as e:

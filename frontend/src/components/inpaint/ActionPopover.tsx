@@ -10,6 +10,12 @@ const SUGGESTIONS: Record<Scene, string[]> = {
   interior: ['Комнатные растения', 'Диван', 'Картина на стене', 'Ковёр', 'Светильник', 'Декор на полке'],
 }
 
+// уточнение для удаления: что именно убрать внутри выделения, остальное остаётся
+const REMOVE_SUGGESTIONS: Record<Scene, string[]> = {
+  exterior: ['Люди', 'Машины', 'Деревья', 'Столбы и провода', 'Знаки', 'Мусор'],
+  interior: ['Люди', 'Мебель', 'Декор', 'Растения', 'Провода', 'Светильник'],
+}
+
 const PLACEHOLDER: Record<Scene, string> = {
   exterior: 'Например: деревянная терраса с шезлонгами',
   interior: 'Например: мягкий диван из бежевого букле',
@@ -32,6 +38,7 @@ export const POPOVER_WIDTH = 340
 export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y, placement }: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
   const { scene } = useScene()
+  const suggestions = mode === 'edit' ? SUGGESTIONS[scene] : REMOVE_SUGGESTIONS[scene]
   useEffect(() => {
     if (mode === 'edit') input.current?.focus({ preventScroll: true })
   }, [mode])
@@ -71,36 +78,40 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         <div className="min-w-0 pt-0.5">
           <div className="text-[15px] font-semibold tracking-[-0.01em]">{mode === 'edit' ? 'Что сделать с областью?' : 'Удалить выделенное?'}</div>
           <div className="text-[12.5px] leading-snug text-mute">
-            {mode === 'edit' ? 'Опишите, что должно появиться или измениться' : 'Объект и его тень заменит окружающий фон'}
+            {mode === 'edit'
+              ? 'Опишите, что должно появиться или измениться'
+              : prompt.trim()
+                ? 'Удалится только это — остальное в выделении останется'
+                : 'Всё выделенное и его тень заменит окружающий фон'}
           </div>
         </div>
       </div>
 
-      {mode === 'edit' && (
-        <>
-          <textarea
-            ref={input}
-            value={prompt}
-            onChange={(e) => onPrompt(e.target.value)}
-            rows={2}
-            placeholder={PLACEHOLDER[scene]}
-            className="mt-3.5 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2"
-          />
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {SUGGESTIONS[scene].map((s) => (
-              <button
-                key={s}
-                onClick={() => onPrompt(s)}
-                className={`rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                  prompt === s ? 'bg-ink text-on-ink' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.09]'
-                }`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </>
+      {mode === 'remove' && (
+        <div className="mt-3.5 text-[12px] font-medium text-faint">Что именно удалить? Необязательно</div>
       )}
+      <textarea
+        ref={input}
+        value={prompt}
+        onChange={(e) => onPrompt(e.target.value)}
+        rows={mode === 'edit' ? 2 : 1}
+        maxLength={300}
+        placeholder={mode === 'edit' ? PLACEHOLDER[scene] : 'Например: люди — без уточнения удалится всё'}
+        className={`${mode === 'edit' ? 'mt-3.5' : 'mt-1.5'} w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2`}
+      />
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {suggestions.map((s) => (
+          <button
+            key={s}
+            onClick={() => onPrompt(mode === 'remove' && prompt === s ? '' : s)}
+            className={`rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors ${
+              prompt === s ? 'bg-ink text-on-ink' : 'bg-fg/[0.05] text-ink-2 hover:bg-fg/[0.09]'
+            }`}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
 
       <div className="mt-4 flex items-center justify-between gap-2">
         <button onClick={onReset} className="rounded-full px-3.5 py-2 text-[13px] font-medium text-mute transition-colors hover:bg-fg/[0.05] hover:text-ink">

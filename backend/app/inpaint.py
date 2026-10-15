@@ -38,14 +38,23 @@ REMOVE_SYSTEM = (
     "is the same crop without the highlight. Identify what is inside the highlighted area and what should be "
     "visible there once it is gone: the surfaces, materials and structures that continue from around it "
     "(e.g. 'the brick facade with its window grid', 'lawn grass and the paved path edge'). Describe only what "
-    "is really visible around the area, do not invent patterns or details. If the highlight covers only part "
-    "of an object, describe just the highlighted part. Look carefully for the shadow the object casts on the "
+    "is really visible around the area, do not invent patterns or details. If several objects are highlighted, "
+    "name all of them. If the highlight covers only part of an object, describe just the highlighted part. Look carefully for the shadow the object casts on the "
     "ground or a wall: if any part of it, even a faint soft shadow next to the feet, wheels or base, extends "
     "beyond the red outline, give the bounding box of the whole shadow in image 1 coordinates from 0 to 1000; "
     "if the object casts no shadow or it is fully inside the outline, null. English, concrete, no style words. Answer with JSON: "
     '{"object": "<3-12 words: what to remove>", '
     '"background": "<10-35 words: what is behind it and must fill the area>", '
+    '"keep": "<objects inside the highlight that must stay>" or null, '
     '"shadow": [x1, y1, x2, y2] or null}'
+)
+# подсказка пользователя: что именно удалить внутри выделения (может быть по-русски)
+HINT_RULE = (
+    "The user specified what to remove: «{hint}». Remove only that: every instance of it inside the highlight, "
+    "translated into a precise English 'object'. Anything else inside the highlight that is not it (benches, "
+    "trees, lamps, paving, facade parts...) stays and goes to 'keep'; 'background' describes only what is "
+    "behind the removed thing. If the user names something that is not in the highlight, remove what is "
+    "closest to their words."
 )
 
 REMOVE_PROMPT = (
@@ -54,6 +63,7 @@ REMOVE_PROMPT = (
     "and lighting with correct perspective, as if it had never been there. Do not add any new object, person, "
     "plant, sign or text. Everything else stays exactly as in image 1: same colours, light, sharpness and grain."
 )
+KEEP_PROMPT = " Keep {keep} exactly as they are in image 1, only the removed thing disappears."
 REMOVE_FALLBACK = {
     "object": "the object in the middle of the image",
     "background": "the surfaces and scenery that surround it",
@@ -116,18 +126,23 @@ def _highlight(crop: Image.Image, mask: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-async def describe_removal(crop: bytes, highlighted: bytes) -> dict:
-    """Что удалить и что должно быть на его месте (DeepSeek); при ошибке — общая формулировка."""
+async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> dict:
+    """Что удалить, что должно быть на его месте, что в выделении оставить и рамка тени вне маски (DeepSeek).
+
+    hint — уточнение пользователя («люди», «машина»): удаляется только это, остальное в выделении остаётся.
+    Без DeepSeek или при ошибке — общая формулировка (с подсказкой — она и есть объект).
+    """
+    fallback = REMOVE_FALLBACK | ({"object": hint} if hint else {})
     if not DEEPSEEK_API_KEY:
-        return REMOVE_FALLBACK
-    key = hashlib.sha256(highlighted).hexdigest()
+        return fallback
+    key = hashlib.sha256(highlighted + hint.encode()).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
     try:
         raw = await _chat(
             [
-                {"role": "system", "content": REMOVE_SYSTEM},
+                {"role": "system", "content": REMOVE_SYSTEM + (" " + HINT_RULE.format(hint=hint) if hint else "")},
                 {
                     "role": "user",
                     "content": [
@@ -142,15 +157,18 @@ async def describe_removal(crop: bytes, highlighted: bytes) -> dict:
         )
         data = json.loads(raw)
         result = {
-            k: " ".join(str(data.get(k) or "").split()).rstrip(".") or REMOVE_FALLBACK[k] for k in REMOVE_FALLBACK
+            k: " ".join(str(data.get(k) or "").split()).rstrip(".") or fallback[k] for k in fallback
         }
+        keep = " ".join(str(data.get("keep") or "").split()).rstrip(".")
+        if hint and keep and keep.lower() not in ("null", "none", "nothing"):
+            result["keep"] = keep
         # тень вне выделения — рамка в долях кропа; слишком большая рамка — скорее ошибка, чем тень
         shadow = _box(data.get("shadow"))
         if shadow and (shadow[2] - shadow[0]) * (shadow[3] - shadow[1]) < MAX_SHADOW:
             result["shadow"] = shadow
     except Exception as e:  # noqa: BLE001 — удаление не должно падать из-за LLM
         log.warning("DeepSeek недоступен, общая формулировка удаления: %s", e)
-        return REMOVE_FALLBACK
+        return fallback
     _described[key] = result
     if len(_described) > CACHE_SIZE:
         _described.popitem(last=False)
@@ -178,8 +196,13 @@ def build_remove_workflow(crop: str, mask: str, width: int, height: int, prompt:
     return wf
 
 
-async def run_remove(image: bytes, mask: bytes, seed: int | None = None, model: str = DEFAULT_MODEL) -> tuple[bytes, int]:
-    """JPEG исходника в полном разрешении, где под маской объект удалён, и использованный сид."""
+async def run_remove(
+    image: bytes, mask: bytes, seed: int | None = None, model: str = DEFAULT_MODEL, hint: str | None = None
+) -> tuple[bytes, int]:
+    """JPEG исходника в полном разрешении, где под маской объект удалён, и использованный сид.
+
+    hint — необязательное уточнение, что именно удалить в выделении; пусто — удаляется всё выделенное.
+    """
     if seed is None:
         seed = random.randrange(2**48)
     src = Image.open(io.BytesIO(image)).convert("RGB")
@@ -198,8 +221,8 @@ async def run_remove(image: bytes, mask: bytes, seed: int | None = None, model: 
     cw, ch = crop.size
     gw, gh = fit_size(cw, ch, INPAINT_MEGAPIXELS)
 
-    what = await describe_removal(to_png(crop), _highlight(crop, crop_mask))
-    prompt = REMOVE_PROMPT.format(**what)
+    what = await describe_removal(to_png(crop), _highlight(crop, crop_mask), (hint or "").strip())
+    prompt = REMOVE_PROMPT.format(**what) + (KEEP_PROMPT.format(keep=what["keep"]) if what.get("keep") else "")
     if shadow := what.get("shadow"):
         # тень объекта за пределами выделения — эллипс по рамке DeepSeek, иначе останется «тень без хозяина»
         crop_mask = crop_mask.copy()
