@@ -71,7 +71,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         <div className="min-w-0 pt-0.5">
           <div className="text-[15px] font-semibold tracking-[-0.01em]">{mode === 'edit' ? 'Что сделать с областью?' : 'Удалить выделенное?'}</div>
           <div className="text-[12.5px] leading-snug text-mute">
-            {mode === 'edit' ? 'Опишите, что должно появиться или измениться' : 'Объект будет заменён окружающим фоном'}
+            {mode === 'edit' ? 'Опишите, что должно появиться или измениться' : 'Объект и его тень заменит окружающий фон'}
           </div>
         </div>
       </div>

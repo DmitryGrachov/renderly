@@ -342,9 +342,3 @@ async def run_img2img(
     result.save(buf, "JPEG", quality=95)
     return buf.getvalue(), seed
 
-
-async def run_inpaint(image: bytes, mask: bytes, scene: str, mode: str, prompt: str | None = None) -> bytes:
-    # mode: "edit" — перерисовать область по prompt, "remove" — удалить объект (заполнить фоном).
-    # mask: PNG, белое — область для перерисовки.
-    _ = (COMFYUI_URL, scene, mask, mode, prompt)
-    return image

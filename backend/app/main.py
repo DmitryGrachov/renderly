@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from . import comfy
+from . import inpaint as inpainting
 from .auth import current_user
 from .auth import router as auth_router
 from .config import CORS_ORIGINS, DEFAULT_MODEL, FLUX_MODELS, log
@@ -104,13 +105,25 @@ async def inpaint(
     scene: str = Form("exterior"),
     mode: str = Form(...),
     prompt: str | None = Form(None),
+    seed: int | None = Form(None, ge=0, lt=2**48),
+    model: str = Form(DEFAULT_MODEL),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
+    if model not in FLUX_MODELS:
+        raise HTTPException(400, f"Unknown model: {model}")
     if mode not in ("edit", "remove"):
         raise HTTPException(400, f"Unknown mode: {mode}")
-    if mode == "edit" and not (prompt and prompt.strip()):
-        raise HTTPException(400, "Edit mode requires a prompt")
+    if mode == "edit":
+        raise HTTPException(501, "Режим «Добавить / изменить» пока в разработке — доступно удаление")
 
-    result = await comfy.run_inpaint(await image.read(), await mask.read(), scene, mode, prompt)
-    return Response(content=result, media_type=image.content_type or "image/png")
+    try:
+        result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model)
+    except inpainting.EmptyMask as e:
+        raise HTTPException(400, str(e)) from e
+    except comfy.ModelUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    except (comfy.ComfyError, httpx.HTTPError) as e:
+        log.exception("inpaint failed")
+        raise HTTPException(502, f"Генерация не удалась: {e}") from e
+    return Response(content=result, media_type="image/jpeg", headers={"X-Seed": str(used_seed)})

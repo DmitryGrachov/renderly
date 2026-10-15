@@ -6,6 +6,7 @@ import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
 import { inpaint, type InpaintMode } from '../../lib/inpaint'
 import type { StudioImage } from '../../lib/types'
 import { useScene } from '../../lib/scene'
+import { useAccount } from '../../lib/account'
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
@@ -25,6 +26,7 @@ interface Props {
 
 export function Editor({ image, onClose }: Props) {
   const { scene } = useScene()
+  const { model, charge } = useAccount()
   const stageRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const maskRef = useRef<HTMLCanvasElement>(null)
@@ -32,7 +34,7 @@ export function Editor({ image, onClose }: Props) {
 
   const [stage, setStage] = useState({ w: 0, h: 0 })
   const [tool, setTool] = useState<Tool>('lasso')
-  const [mode, setMode] = useState<InpaintMode>('edit')
+  const [mode, setMode] = useState<InpaintMode>('remove')
   const [shape, setShape] = useState<Shape>('circle')
   const [size, setSize] = useState(48)
   const [bbox, setBbox] = useState<Box | null>(null)
@@ -240,10 +242,11 @@ export function Editor({ image, onClose }: Props) {
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, scene, mask: maskRef.current!, mode, prompt: mode === 'edit' ? text : undefined },
+        { imageUrl: versions[current].url, scene, model, mask: maskRef.current!, mode, prompt: mode === 'edit' ? text : undefined },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )
+      charge('inpaint', mode === 'remove' ? 'Inpainting · удаление' : `Inpainting · ${text}`)
       setVersions((v) => [...v.slice(0, current + 1), { url, mode, label: mode === 'remove' ? 'Удаление' : text }])
       setCurrent((c) => c + 1)
       clearMask(false)

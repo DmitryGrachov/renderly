@@ -12,6 +12,8 @@ export interface InpaintRequest {
   mask: HTMLCanvasElement
   mode: InpaintMode
   prompt?: string
+  /** Модель на бэкенде: klein-4b | klein-9b */
+  model?: string
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -51,13 +53,29 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   body.append('scene', req.scene)
   body.append('mode', req.mode)
   if (req.prompt) body.append('prompt', req.prompt)
+  if (req.model) body.append('model', req.model)
 
-  onProgress(0.05, stages[0])
-  const res = await fetch('/api/inpaint', { method: 'POST', body, signal })
-  if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
-  if (!res.ok) throw new Error(`Сервер ответил ${res.status}`)
-  onProgress(1, stages[stages.length - 1])
-  return URL.createObjectURL(await res.blob())
+  // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления
+  const expected = 12000
+  const start = performance.now()
+  const timer = setInterval(() => {
+    const t = (performance.now() - start) / expected
+    const p = 0.95 * (1 - Math.exp(-2.2 * t))
+    onProgress(p, stages[Math.min(stages.length - 1, Math.floor((p / 0.95) * stages.length))])
+  }, 200)
+  try {
+    const res = await fetch('/api/inpaint', { method: 'POST', body, signal })
+    if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
+    if (!res.ok) {
+      const detail = await res.json().then((j) => j.detail as string).catch(() => '')
+      throw new Error(detail || `Сервер ответил ${res.status}`)
+    }
+    const blob = await res.blob()
+    onProgress(1, stages[stages.length - 1])
+    return URL.createObjectURL(blob)
+  } finally {
+    clearInterval(timer)
+  }
 }
 
 /* ------------------------------------------------------------------ */
