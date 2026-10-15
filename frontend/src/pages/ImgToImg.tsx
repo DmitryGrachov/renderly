@@ -10,7 +10,6 @@ import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/pre
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
 import { fmt, modelById, useAccount } from '../lib/account'
-import { ModelSelect } from '../components/ModelSelect'
 import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
 
 type Status = 'idle' | 'running' | 'done' | 'error'
@@ -28,7 +27,7 @@ const SUBTITLE: Record<Scene, string> = {
 
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
-  const { charge, model, setModel } = useAccount()
+  const { charge, model } = useAccount()
   const activeModel = modelById(model)
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
@@ -183,7 +182,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
       >
         {/* Canvas */}
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="relative aspect-[4/3] min-h-[400px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/10] sm:min-h-0">
+          <div className="relative h-[400px] sm:h-auto overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/10] sm:min-h-0">
             <AnimatePresence mode="wait" initial={false}>
               {!source ? (
                 <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
@@ -394,12 +393,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
         {/* Control panel */}
         <aside className="lg:sticky lg:top-20 lg:self-start">
           <div className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
-            <Step n={1} title="Модель" hint="Скорость против детализации" />
-            <ModelSelect value={model} onChange={setModel} disabled={running} />
-
-            <div className="my-6 h-px bg-line" />
-
-            <Step n={2} title="Освещение" hint="Выберите сценарий света" />
+            <Step n={1} title="Освещение" hint="Выберите сценарий света" />
             <div className="mt-4 grid grid-cols-2 gap-2.5">
               {presetsFor(scene).map((p) => (
                 <PresetCard key={`${scene}-${p.id}`} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
@@ -453,7 +447,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
             <div className="my-6 h-px bg-line" />
 
-            <Step n={3} title="Сила эффекта" hint="Насколько сильно менять сцену" />
+            <Step n={2} title="Сила эффекта" hint="Насколько сильно менять сцену" />
             <div className="mt-4">
               <div className="mb-3 flex items-baseline justify-between">
                 <span className="text-[13px] text-mute">{strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>

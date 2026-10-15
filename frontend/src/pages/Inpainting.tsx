@@ -50,7 +50,7 @@ export function Inpainting({ image, onImage, onBack }: Props) {
         {image ? (
           <Editor key={image.url} image={image} onClose={() => onImage(null)} />
         ) : (
-          <div className="relative aspect-[4/3] min-h-[400px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/9] sm:min-h-0">
+          <div className="relative h-[400px] sm:h-auto overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/9] sm:min-h-0">
             <Dropzone onFile={async (f) => onImage(await toStudioImage(f))} listenPaste />
             <button
               onClick={onBack}

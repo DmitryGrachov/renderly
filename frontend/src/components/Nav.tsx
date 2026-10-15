@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth'
 import { ThemeMenu } from './ThemeMenu'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { fmt, useAccount } from '../lib/account'
+import { ModelSelect } from './ModelSelect'
 
 export type Tab = 'img2img' | 'inpainting' | 'account'
 
@@ -22,7 +23,8 @@ interface Props {
 export function Nav({ tab, onChange, inpaintBadge }: Props) {
   return (
     <header className="glass-nav sticky top-0 z-50 border-b border-fg/[0.06]">
-      <div className="mx-auto flex h-14 max-w-[1280px] items-center justify-between px-5 sm:px-8">
+      {/* на телефоне вкладки — второй строкой: в одну строку с моделью, сценой и аккаунтом не помещаются */}
+      <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-y-2 px-5 py-2 sm:h-14 sm:flex-nowrap sm:px-8 sm:py-0">
         <a href="#/img2img" className="group flex items-center gap-2.5" aria-label="INEGO.dev">
           <Logo />
           <span className="hidden text-[17px] font-semibold tracking-[-0.02em] sm:inline">
@@ -30,7 +32,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
           </span>
         </a>
 
-        <nav className="relative flex rounded-full bg-fg/[0.05] p-1" role="tablist">
+        <nav className="relative order-last mx-auto flex rounded-full bg-fg/[0.05] p-1 sm:order-none sm:mx-0" role="tablist">
           {TABS.map((t) => {
             const active = t.id === tab
             return (
@@ -61,6 +63,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
 
         <div className="flex items-center gap-1.5 sm:gap-4">
           <SceneSwitch />
+          <ModelMenu />
           <TokenChip active={tab === 'account'} onClick={() => onChange('account')} />
           <div className="flex items-center gap-1 sm:gap-2">
             <ThemeMenu />
@@ -125,6 +128,12 @@ function SceneSwitch() {
       })}
     </div>
   )
+}
+
+/** Модель генерации — общая для Img to Img и Inpainting */
+function ModelMenu() {
+  const { model, setModel } = useAccount()
+  return <ModelSelect value={model} onChange={setModel} compact />
 }
 
 function TokenChip({ active, onClick }: { active: boolean; onClick: () => void }) {

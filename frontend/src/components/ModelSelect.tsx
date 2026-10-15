@@ -7,6 +7,8 @@ interface Props {
   value: ModelId
   onChange: (m: ModelId) => void
   disabled?: boolean
+  /** Компактная кнопка для шапки; список раскрывается под ней, по правому краю */
+  compact?: boolean
 }
 
 function ModelIcon({ id, size = 36 }: { id: ModelId; size?: number }) {
@@ -36,7 +38,7 @@ function Pips({ value }: { value: number }) {
 }
 
 /** Выпадающий выбор модели генерации. */
-export function ModelSelect({ value, onChange, disabled }: Props) {
+export function ModelSelect({ value, onChange, disabled, compact }: Props) {
   const [open, setOpen] = useState(false)
   const [focus, setFocus] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
@@ -73,7 +75,27 @@ export function ModelSelect({ value, onChange, disabled }: Props) {
   }
 
   return (
-    <div ref={ref} className="relative mt-4" onKeyDown={onKey}>
+    <div ref={ref} className={`relative ${compact ? '' : 'mt-4'}`} onKeyDown={onKey}>
+      {compact ? (
+        <button
+          type="button"
+          onClick={toggle}
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          title={`Модель: ${current.name} · ${current.time} · ${fmt(current.cost)} ток.`}
+          className={`flex items-center gap-1.5 rounded-full py-1 pl-1 pr-2 text-[13px] font-semibold transition-colors duration-300 disabled:opacity-60 sm:pr-2.5 ${
+            open ? 'bg-fg/[0.1]' : 'bg-fg/[0.05] hover:bg-fg/[0.08]'
+          }`}
+        >
+          <ModelIcon id={current.id} size={24} />
+          <span className="hidden whitespace-nowrap lg:inline">{current.name.replace('FLUX.2 ', '')}</span>
+          <span className="whitespace-nowrap lg:hidden">{current.id.replace('klein-', '').toUpperCase()}</span>
+          <motion.span animate={{ rotate: open ? 180 : 0 }} transition={{ type: 'spring', stiffness: 400, damping: 30 }} className="text-mute">
+            <ChevronDown className="size-3.5" />
+          </motion.span>
+        </button>
+      ) : (
       <button
         type="button"
         onClick={toggle}
@@ -109,6 +131,7 @@ export function ModelSelect({ value, onChange, disabled }: Props) {
           <ChevronDown className="size-[18px]" />
         </motion.span>
       </button>
+      )}
 
       <AnimatePresence>
         {open && (
@@ -119,8 +142,8 @@ export function ModelSelect({ value, onChange, disabled }: Props) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.12 } }}
             transition={{ type: 'spring', stiffness: 460, damping: 32 }}
-            style={{ transformOrigin: 'top center' }}
-            className="absolute inset-x-0 top-full z-40 mt-2 rounded-[20px] bg-surface/[0.94] p-1.5 shadow-float ring-1 ring-fg/[0.06] backdrop-blur-2xl"
+            style={{ transformOrigin: compact ? 'top right' : 'top center' }}
+            className={`absolute top-full z-40 rounded-[20px] ${compact ? 'right-0 mt-2.5 w-[min(360px,calc(100vw-24px))]' : 'inset-x-0 mt-2'} bg-surface/[0.94] p-1.5 shadow-float ring-1 ring-fg/[0.06] backdrop-blur-2xl`}
           >
             {MODELS.map((m, i) => {
               const active = m.id === value
