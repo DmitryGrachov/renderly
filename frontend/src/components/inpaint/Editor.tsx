@@ -527,7 +527,8 @@ export function Editor({ image, onClose }: Props) {
       {/* история версий */}
       <div className="flex flex-col gap-3 rounded-[22px] bg-surface p-3 shadow-card ring-1 ring-fg/[0.04] sm:flex-row sm:items-center sm:pl-4">
         <div className="text-[13px] font-semibold text-ink-2 sm:w-16">История</div>
-        <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-0.5">
+        {/* отступ под рамку выбранной версии (ring + offset = 4px): иначе прокрутка её обрезает */}
+        <div className="-m-1 flex min-w-0 flex-1 gap-2 overflow-x-auto p-1 pb-1.5">
           {versions.map((v, i) => (
             <button
               key={v.url}
