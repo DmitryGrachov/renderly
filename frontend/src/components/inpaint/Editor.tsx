@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Download, Eye, X } from 'lucide-react'
+import { Columns2, Download, Eye, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
+import { CompareSlider } from '../CompareSlider'
 import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
 import { inpaint, type InpaintMode } from '../../lib/inpaint'
 import type { StudioImage } from '../../lib/types'
@@ -49,6 +50,8 @@ export function Editor({ image, onClose }: Props) {
   const [versions, setVersions] = useState<Version[]>([{ url: image.url, label: 'Исходник' }])
   const [current, setCurrent] = useState(0)
   const [peek, setPeek] = useState(false)
+  // шторка «до / после»: исходник против текущей версии
+  const [compareOn, setCompareOn] = useState(false)
   const [hist, setHist] = useState({ undo: 0, redo: 0 })
 
   const undoStack = useRef<ImageData[]>([])
@@ -70,11 +73,19 @@ export function Editor({ image, onClose }: Props) {
   const fit = Math.min(availW / image.width, availH / image.height)
   const baseW = image.width * fit
   const baseH = image.height * fit
+  // шторка доступна, когда есть с чем сравнивать и ничего не генерируется
+  const compare = compareOn && current > 0 && !busy
+  // инструмент рисования выключает шторку — на ней левая кнопка двигает границу
+  const chooseTool = (t: Tool) => {
+    setTool(t)
+    if (t !== 'hand') setCompareOn(false)
+  }
+
   // масштаб и перемещение: изображение растёт от вписанного размера, сдвиг — от центра рабочей области
   const { view, zoomIn, zoomOut, zoomFit, panning, panTool, spaceHeld, panHandlers } = useZoomPan(
     stageRef,
     { baseW, baseH, availW, availH, cx: stage.w / 2, cy: PAD_TOP + availH / 2 },
-    { panWithLeft: tool === 'hand' },
+    { panWithLeft: tool === 'hand' && !compareOn },
   )
   const dispW = baseW * view.zoom
   const dispH = baseH * view.zoom
@@ -284,8 +295,8 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- shortcuts ---------------- */
 
-  const handlers = useRef({ undo, redo, clearMask, setSize })
-  handlers.current = { undo, redo, clearMask, setSize }
+  const handlers = useRef({ undo, redo, clearMask, setSize, chooseTool })
+  handlers.current = { undo, redo, clearMask, setSize, chooseTool }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -296,10 +307,10 @@ export function Editor({ image, onClose }: Props) {
       if (mod && e.code === 'KeyZ') { e.preventDefault(); e.shiftKey ? h.redo() : h.undo(); return }
       if (mod && e.code === 'KeyY') { e.preventDefault(); h.redo(); return }
       if (mod) return
-      if (e.code === 'KeyL') setTool('lasso')
-      else if (e.code === 'KeyB') setTool('brush')
-      else if (e.code === 'KeyE') setTool('eraser')
-      else if (e.code === 'KeyH') setTool('hand')
+      if (e.code === 'KeyL') h.chooseTool('lasso')
+      else if (e.code === 'KeyB') h.chooseTool('brush')
+      else if (e.code === 'KeyE') h.chooseTool('eraser')
+      else if (e.code === 'KeyH') h.chooseTool('hand')
       else if (e.code === 'BracketLeft') h.setSize((s) => Math.max(BRUSH_MIN, s - 6))
       else if (e.code === 'BracketRight') h.setSize((s) => Math.min(BRUSH_MAX, s + 6))
       else if (e.key === 'Escape') h.clearMask()
@@ -310,7 +321,7 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- popover placement ---------------- */
 
-  const showPopover = !!bbox && !drawing && !busy && !peek && !panning
+  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare
   let pop = { x: 0, y: 0, placement: 'bottom' as 'top' | 'bottom' }
   if (bbox) {
     const bx = left + bbox.x / k
@@ -334,7 +345,7 @@ export function Editor({ image, onClose }: Props) {
   }
 
   const shown = peek && current > 0 ? versions[current - 1] : versions[current]
-  const brushLike = (tool === 'brush' || tool === 'eraser') && !spaceHeld
+  const brushLike = (tool === 'brush' || tool === 'eraser') && !spaceHeld && !compare
   const color = MODE_COLOR[mode]
 
   return (
@@ -363,7 +374,7 @@ export function Editor({ image, onClose }: Props) {
           </AnimatePresence>
 
           <div
-            className={`absolute inset-0 transition-opacity duration-300 ${peek ? 'opacity-0' : ''}`}
+            className={`absolute inset-0 transition-opacity duration-300 ${peek || compare ? 'opacity-0' : ''}`}
             style={{ filter: drawing ? undefined : `drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 0 10px ${color})` }}
           >
             <canvas
@@ -423,6 +434,20 @@ export function Editor({ image, onClose }: Props) {
           </div>
         </div>
 
+        {compare && (
+          <div className="absolute inset-0">
+            <CompareSlider
+              before={versions[0].url}
+              after={versions[current].url}
+              beforeLabel={versions[0].label}
+              afterLabel={versions[current].label}
+              labelsAt="bottom"
+              // картинки — ровно в рамке изображения сцены (с масштабом и сдвигом), граница — в координатах экрана
+              imageStyle={{ inset: 'auto', left, top, width: dispW, height: dispH }}
+            />
+          </div>
+        )}
+
         {/* верх: режим / прогресс */}
         <div className="absolute inset-x-0 top-4 flex flex-col items-center gap-2 px-16">
           <AnimatePresence mode="wait" initial={false}>
@@ -450,7 +475,7 @@ export function Editor({ image, onClose }: Props) {
             )}
           </AnimatePresence>
           <AnimatePresence>
-            {!bbox && !busy && !drawing && (
+            {!bbox && !busy && !drawing && !compare && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                 className="glass rounded-full px-3.5 py-1.5 text-[12.5px] text-ink-2 shadow-soft ring-1 ring-fg/5"
@@ -467,7 +492,7 @@ export function Editor({ image, onClose }: Props) {
         <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
           <Toolbar
             tool={tool}
-            onTool={setTool}
+            onTool={chooseTool}
             canUndo={hist.undo > 0}
             canRedo={hist.redo > 0}
             hasMask={!!bbox}
@@ -561,6 +586,17 @@ export function Editor({ image, onClose }: Props) {
             title="Удерживайте, чтобы увидеть предыдущую версию"
           >
             <Eye className="size-4" /> {peek ? 'Предыдущая' : 'Удерживайте'}
+          </button>
+          <button
+            disabled={current === 0 || !!busy}
+            onClick={() => setCompareOn((v) => !v)}
+            aria-pressed={compare}
+            className={`flex flex-1 select-none items-center justify-center gap-2 rounded-full px-4 py-2.5 text-[13.5px] font-medium transition-colors disabled:opacity-40 sm:flex-none ${
+              compare ? 'bg-ink text-on-ink hover:bg-ink-hover' : 'bg-fg/[0.05] hover:bg-fg/[0.08] active:bg-fg/[0.12]'
+            }`}
+            title="Шторка: исходник и текущая версия"
+          >
+            <Columns2 className="size-4" /> До / после
           </button>
           <button
             onClick={download}

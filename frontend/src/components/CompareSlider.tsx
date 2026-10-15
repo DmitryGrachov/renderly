@@ -6,9 +6,13 @@ interface Props {
   after: string
   /** Масштаб и сдвиг обеих картинок (ZoomView); ползунок остаётся в координатах экрана */
   imageStyle?: CSSProperties
+  beforeLabel?: string
+  afterLabel?: string
+  /** Где подписи «до / после»: сверху мешают панели поверх сцены (Inpainting) */
+  labelsAt?: 'top' | 'bottom'
 }
 
-export function CompareSlider({ before, after, imageStyle }: Props) {
+export function CompareSlider({ before, after, imageStyle, beforeLabel = 'До', afterLabel = 'После', labelsAt = 'top' }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState(50)
   const [dragging, setDragging] = useState(false)
@@ -43,8 +47,8 @@ export function CompareSlider({ before, after, imageStyle }: Props) {
         <img src={before} alt="До" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
       </div>
 
-      <Label className="left-4">До</Label>
-      <Label className="right-4">После</Label>
+      <Label className={`left-4 ${labelsAt === 'top' ? 'top-4' : 'bottom-4'}`}>{beforeLabel}</Label>
+      <Label className={`right-4 ${labelsAt === 'top' ? 'top-4' : 'bottom-4'}`}>{afterLabel}</Label>
 
       <div className="pointer-events-none absolute inset-y-0" style={{ left: `${pos}%` }}>
         <div className="absolute inset-y-0 -translate-x-1/2 w-[2px] bg-white shadow-[0_0_12px_rgba(0,0,0,0.25)]" />
@@ -62,7 +66,7 @@ export function CompareSlider({ before, after, imageStyle }: Props) {
 
 function Label({ children, className }: { children: React.ReactNode; className: string }) {
   return (
-    <span className={`glass pointer-events-none absolute top-4 rounded-full px-3 py-1 text-[12px] font-medium text-ink shadow-soft ${className}`}>
+    <span className={`glass pointer-events-none absolute max-w-[40%] truncate rounded-full px-3 py-1 text-[12px] font-medium text-ink shadow-soft ${className}`}>
       {children}
     </span>
   )
