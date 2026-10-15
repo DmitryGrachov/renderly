@@ -4,6 +4,7 @@ import { ArrowRight, Dices, Download, Lock, LockOpen, RotateCcw, Sparkles, X, Re
 import { Dropzone } from '../components/Dropzone'
 import { PresetCard } from '../components/PresetCard'
 import { CompareSlider } from '../components/CompareSlider'
+import { ZoomView } from '../components/ZoomView'
 import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
@@ -195,15 +196,20 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                   initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
                   transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
                 >
-                  {result && status !== 'running' ? (
-                    view === 'compare' ? (
-                      <CompareSlider before={source.url} after={result.url} />
-                    ) : (
-                      <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" />
-                    )
-                  ) : (
-                    <img src={source.url} alt={source.name} className="absolute inset-0 size-full object-contain" />
-                  )}
+                  {/* масштаб сохраняется при переключении «Сравнить / Результат» — удобно смотреть одну деталь */}
+                  <ZoomView aspect={source.width / source.height} panWithLeft={!(result && view === 'compare')}>
+                    {(imageStyle) =>
+                      result && status !== 'running' ? (
+                        view === 'compare' ? (
+                          <CompareSlider before={source.url} after={result.url} imageStyle={imageStyle} />
+                        ) : (
+                          <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                        )
+                      ) : (
+                        <img src={source.url} alt={source.name} className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                      )
+                    }
+                  </ZoomView>
 
                   <AnimatePresence>
                     {running && (

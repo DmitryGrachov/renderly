@@ -1,5 +1,6 @@
 import { motion } from 'motion/react'
-import { Brush, Eraser, Hand, Lasso, Minus, Plus, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { Brush, Eraser, Hand, Lasso, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { ToolButton } from '../ToolButton'
 import type { InpaintMode } from '../../lib/inpaint'
 
 export type Tool = 'lasso' | 'brush' | 'eraser' | 'hand'
@@ -54,33 +55,6 @@ export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRed
         <Trash2 className="size-[18px]" strokeWidth={1.75} />
       </ToolButton>
     </div>
-  )
-}
-
-function ToolButton({
-  children, label, shortcut, onClick, active, disabled, side = 'right',
-}: {
-  children: React.ReactNode; label: string; shortcut: string; onClick: () => void; active?: boolean; disabled?: boolean
-  /** с какой стороны кнопки показывать подсказку */
-  side?: 'left' | 'right'
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      className={`group relative isolate grid size-10 place-items-center rounded-xl transition-colors duration-200 disabled:opacity-35 ${
-        active ? 'text-on-ink' : 'text-ink-2 hover:bg-fg/[0.06] hover:text-ink'
-      }`}
-    >
-      {children}
-      <span className={`pointer-events-none absolute top-1/2 z-20 flex -translate-y-1/2 ${
-        side === 'right' ? 'left-full ml-3 -translate-x-1' : 'right-full mr-3 translate-x-1'
-      } items-center gap-2 whitespace-nowrap rounded-lg bg-ink px-2.5 py-1.5 text-[12px] font-medium text-on-ink opacity-0 shadow-lg transition-all duration-200 ease-apple group-hover:translate-x-0 group-hover:opacity-100 group-disabled:hidden`}>
-        {label}
-        <span className="text-on-ink/50">{shortcut}</span>
-      </span>
-    </button>
   )
 }
 
@@ -152,32 +126,6 @@ export function BrushOptions({ shape, onShape, size, onSize, min, max }: BrushOp
         aria-label="Размер кисти"
       />
       <span className="w-9 text-right text-[13px] font-semibold tabular-nums">{size}</span>
-    </div>
-  )
-}
-
-interface ZoomControlsProps {
-  zoom: number
-  min: number
-  max: number
-  onZoomIn: () => void
-  onZoomOut: () => void
-  onFit: () => void
-}
-
-/** Масштаб канваса: +, текущий процент (клик — вписать), − */
-export function ZoomControls({ zoom, min, max, onZoomIn, onZoomOut, onFit }: ZoomControlsProps) {
-  return (
-    <div className="glass flex flex-col items-center gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5">
-      <ToolButton label="Приблизить" shortcut="= · колесо" onClick={onZoomIn} disabled={zoom >= max} side="left">
-        <Plus className="size-[18px]" strokeWidth={1.75} />
-      </ToolButton>
-      <ToolButton label="Вписать" shortcut="0" onClick={onFit} side="left">
-        <span className="text-[11px] font-semibold tabular-nums">{Math.round(zoom * 100)}%</span>
-      </ToolButton>
-      <ToolButton label="Отдалить" shortcut="−" onClick={onZoomOut} disabled={zoom <= min} side="left">
-        <Minus className="size-[18px]" strokeWidth={1.75} />
-      </ToolButton>
     </div>
   )
 }

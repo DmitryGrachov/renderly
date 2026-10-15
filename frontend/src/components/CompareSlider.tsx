@@ -1,12 +1,14 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef, useState, type CSSProperties } from 'react'
 import { ChevronsLeftRight } from 'lucide-react'
 
 interface Props {
   before: string
   after: string
+  /** Масштаб и сдвиг обеих картинок (ZoomView); ползунок остаётся в координатах экрана */
+  imageStyle?: CSSProperties
 }
 
-export function CompareSlider({ before, after }: Props) {
+export function CompareSlider({ before, after, imageStyle }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState(50)
   const [dragging, setDragging] = useState(false)
@@ -35,14 +37,11 @@ export function CompareSlider({ before, after }: Props) {
       aria-valuemin={0}
       aria-valuemax={100}
     >
-      <img src={after} alt="После" className="absolute inset-0 size-full object-contain" draggable={false} />
-      <img
-        src={before}
-        alt="До"
-        className="absolute inset-0 size-full object-contain"
-        style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
-        draggable={false}
-      />
+      <img src={after} alt="После" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+      {/* обрезка — снаружи масштаба: граница «до / после» совпадает с ползунком при любом приближении */}
+      <div className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}>
+        <img src={before} alt="До" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+      </div>
 
       <Label className="left-4">До</Label>
       <Label className="right-4">После</Label>

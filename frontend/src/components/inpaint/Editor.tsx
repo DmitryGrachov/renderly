@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Download, Eye, X } from 'lucide-react'
-import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, ZoomControls, type Shape, type Tool } from './Toolbar'
+import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
+import { ZoomControls } from '../ZoomControls'
 import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
 import { inpaint, type InpaintMode } from '../../lib/inpaint'
 import type { StudioImage } from '../../lib/types'
 import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
+import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
 interface Version { url: string; label: string; mode?: InpaintMode }
-/** Масштаб и сдвиг изображения относительно вписанного положения (экранные px) */
-interface View { zoom: number; x: number; y: number }
 
 const MASK_MAX = 2048
 const UNDO_LIMIT = 12
@@ -20,10 +20,6 @@ const PAD_TOP = 72
 const PAD_BOTTOM = 76
 const BRUSH_MIN = 4
 const BRUSH_MAX = 200
-const ZOOM_MIN = 1
-const ZOOM_MAX = 8
-// шаги кнопок и клавиш; колесо масштабирует плавно
-const ZOOM_STEPS = [1, 1.5, 2, 3, 4, 6, 8]
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
 
 interface Props {
@@ -54,9 +50,6 @@ export function Editor({ image, onClose }: Props) {
   const [current, setCurrent] = useState(0)
   const [peek, setPeek] = useState(false)
   const [hist, setHist] = useState({ undo: 0, redo: 0 })
-  const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 })
-  const [panning, setPanning] = useState(false)
-  const [spaceHeld, setSpaceHeld] = useState(false)
 
   const undoStack = useRef<ImageData[]>([])
   const redoStack = useRef<ImageData[]>([])
@@ -64,7 +57,6 @@ export function Editor({ image, onClose }: Props) {
   const lastPt = useRef<Pt | null>(null)
   const lassoPts = useRef<Pt[]>([])
   const abortRef = useRef<AbortController | null>(null)
-  const panRef = useRef<{ x: number; y: number } | null>(null)
 
   // размеры маски — в пикселях исходника (с ограничением)
   const ms = Math.min(1, MASK_MAX / Math.max(image.width, image.height))
@@ -78,93 +70,17 @@ export function Editor({ image, onClose }: Props) {
   const fit = Math.min(availW / image.width, availH / image.height)
   const baseW = image.width * fit
   const baseH = image.height * fit
-  // масштаб: изображение растёт от вписанного размера, сдвиг — от центра области
+  // масштаб и перемещение: изображение растёт от вписанного размера, сдвиг — от центра рабочей области
+  const { view, zoomIn, zoomOut, zoomFit, panning, panTool, spaceHeld, panHandlers } = useZoomPan(
+    stageRef,
+    { baseW, baseH, availW, availH, cx: stage.w / 2, cy: PAD_TOP + availH / 2 },
+    { panWithLeft: tool === 'hand' },
+  )
   const dispW = baseW * view.zoom
   const dispH = baseH * view.zoom
   const left = (stage.w - dispW) / 2 + view.x
   const top = PAD_TOP + (availH - dispH) / 2 + view.y
   const k = maskW / Math.max(1, dispW) // экранные px → px маски (кисть — постоянного экранного размера)
-
-  const geo = useRef({ baseW, baseH, availW, availH, stageW: stage.w })
-  geo.current = { baseW, baseH, availW, availH, stageW: stage.w }
-
-  /** Сдвиг не даёт увести изображение: в рабочей области остаётся не меньше половины его (или её) ширины и высоты.
-   *  Свободнее, чем «край к краю»: иначе масштаб у края кадра не держит точку под курсором. На 100% — по центру. */
-  const clampView = (v: View): View => {
-    if (v.zoom <= ZOOM_MIN) return { zoom: ZOOM_MIN, x: 0, y: 0 }
-    const g = geo.current
-    const w = g.baseW * v.zoom
-    const h = g.baseH * v.zoom
-    const mx = (w + g.availW) / 2 - Math.min(w, g.availW) / 2
-    const my = (h + g.availH) / 2 - Math.min(h, g.availH) / 2
-    return { zoom: v.zoom, x: clamp(v.x, -mx, mx), y: clamp(v.y, -my, my) }
-  }
-
-  /** Масштаб вокруг точки сцены (по умолчанию — центр): точка изображения под ней остаётся на месте */
-  const zoomWith = useCallback((next: (z: number) => number, at?: Pt) => {
-    setView((v) => {
-      const g = geo.current
-      const z = clamp(next(v.zoom), ZOOM_MIN, ZOOM_MAX)
-      if (z === v.zoom) return v
-      const cx = at?.x ?? g.stageW / 2
-      const cy = at?.y ?? PAD_TOP + g.availH / 2
-      const l = (g.stageW - g.baseW * v.zoom) / 2 + v.x
-      const t = PAD_TOP + (g.availH - g.baseH * v.zoom) / 2 + v.y
-      const r = z / v.zoom
-      const nl = cx - (cx - l) * r
-      const nt = cy - (cy - t) * r
-      return clampView({ zoom: z, x: nl - (g.stageW - g.baseW * z) / 2, y: nt - PAD_TOP - (g.availH - g.baseH * z) / 2 })
-    })
-  }, [])
-  const zoomIn = () => zoomWith((z) => ZOOM_STEPS.find((s) => s > z + 0.01) ?? ZOOM_MAX)
-  const zoomOut = () => zoomWith((z) => [...ZOOM_STEPS].reverse().find((s) => s < z - 0.01) ?? ZOOM_MIN)
-  const zoomFit = () => setView({ zoom: 1, x: 0, y: 0 })
-
-  // колесо / пинч тачпада — плавный масштаб под курсором (нативный слушатель: React вешает wheel пассивным)
-  useEffect(() => {
-    const el = stageRef.current
-    if (!el) return
-    const onWheel = (e: WheelEvent) => {
-      if ((e.target as HTMLElement).closest('textarea, [data-no-zoom]')) return
-      e.preventDefault()
-      const r = el.getBoundingClientRect()
-      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
-      const f = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002))
-      zoomWith((z) => z * f, { x: e.clientX - r.left, y: e.clientY - r.top })
-    }
-    el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [zoomWith])
-
-  // при смене размера сцены сдвиг остаётся в допустимых границах
-  useEffect(() => setView((v) => clampView(v)), [stage.w, stage.h]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* ---------------- pan ---------------- */
-
-  const panTool = tool === 'hand' || spaceHeld
-
-  const onPanDown = (e: React.PointerEvent) => {
-    if (!(e.button === 1 || (e.button === 0 && panTool))) return
-    if ((e.target as HTMLElement).closest('button, textarea, input, [data-no-zoom]')) return
-    e.preventDefault()
-    e.stopPropagation() // не рисуем
-    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* синтетические события */ }
-    panRef.current = { x: e.clientX, y: e.clientY }
-    setPanning(true)
-  }
-  const onPanMove = (e: React.PointerEvent) => {
-    const p = panRef.current
-    if (!p) return
-    const dx = e.clientX - p.x
-    const dy = e.clientY - p.y
-    panRef.current = { x: e.clientX, y: e.clientY }
-    setView((v) => clampView({ ...v, x: v.x + dx, y: v.y + dy }))
-  }
-  const onPanUp = () => {
-    if (!panRef.current) return
-    panRef.current = null
-    setPanning(false)
-  }
 
   useLayoutEffect(() => {
     const el = stageRef.current
@@ -368,8 +284,8 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- shortcuts ---------------- */
 
-  const handlers = useRef({ undo, redo, clearMask, setSize, zoomIn, zoomOut, zoomFit })
-  handlers.current = { undo, redo, clearMask, setSize, zoomIn, zoomOut, zoomFit }
+  const handlers = useRef({ undo, redo, clearMask, setSize })
+  handlers.current = { undo, redo, clearMask, setSize }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -384,24 +300,12 @@ export function Editor({ image, onClose }: Props) {
       else if (e.code === 'KeyB') setTool('brush')
       else if (e.code === 'KeyE') setTool('eraser')
       else if (e.code === 'KeyH') setTool('hand')
-      else if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) setSpaceHeld(true) }
-      else if (e.code === 'Equal' || e.code === 'NumpadAdd') h.zoomIn()
-      else if (e.code === 'Minus' || e.code === 'NumpadSubtract') h.zoomOut()
-      else if (e.code === 'Digit0' || e.code === 'Numpad0') h.zoomFit()
       else if (e.code === 'BracketLeft') h.setSize((s) => Math.max(BRUSH_MIN, s - 6))
       else if (e.code === 'BracketRight') h.setSize((s) => Math.min(BRUSH_MAX, s + 6))
       else if (e.key === 'Escape') h.clearMask()
     }
-    const onKeyUp = (e: KeyboardEvent) => e.code === 'Space' && setSpaceHeld(false)
-    const onBlur = () => setSpaceHeld(false)
     window.addEventListener('keydown', onKey)
-    window.addEventListener('keyup', onKeyUp)
-    window.addEventListener('blur', onBlur)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      window.removeEventListener('keyup', onKeyUp)
-      window.removeEventListener('blur', onBlur)
-    }
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   /* ---------------- popover placement ---------------- */
@@ -440,11 +344,7 @@ export function Editor({ image, onClose }: Props) {
         className={`checker relative h-[min(78vh,760px)] min-h-[480px] touch-none select-none overflow-hidden rounded-[28px] shadow-card ring-1 ring-fg/[0.04] ${
           panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : ''
         }`}
-        onPointerDownCapture={onPanDown}
-        onPointerMove={onPanMove}
-        onPointerUp={onPanUp}
-        onPointerCancel={onPanUp}
-        onMouseDown={(e) => e.button === 1 && e.preventDefault()} // без автопрокрутки средней кнопкой
+        {...panHandlers}
       >
         {/* изображение + маска */}
         <div className="absolute" style={{ left, top, width: dispW, height: dispH }}>
