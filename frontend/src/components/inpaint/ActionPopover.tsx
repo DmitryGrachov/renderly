@@ -59,6 +59,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         translateY: placement === 'top' ? '-100%' : '0%',
         transformOrigin: placement === 'top' ? 'bottom center' : 'top center',
       }}
+      data-no-zoom
       className="absolute z-30 rounded-[22px] bg-surface/[0.88] p-4 backdrop-blur-2xl backdrop-saturate-150 shadow-float ring-1 ring-fg/[0.06]"
       onPointerDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
