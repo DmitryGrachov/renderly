@@ -70,38 +70,56 @@ REMOVE_FALLBACK = {
 }
 
 EDIT_SYSTEM = (
-    "You prepare an instruction for an image editing model that must change one area of an architectural photo "
-    "or render. The user highlighted the area with a red overlay and outline (image 2); image 1 is the same crop "
-    "without the highlight. The user's request (it may be in Russian) says what must appear or change there. "
-    "Write in English what exactly that area shows after the edit: objects, materials, colours, their size "
-    "relative to things around them, orientation following the scene perspective, lit from the same direction "
-    "as the scene with matching shadows. If the request changes something already there (material, colour, "
-    "type), say what it becomes and that its shape and position stay. Fit the request to the size of the area: "
-    "the new thing fills it naturally, not a tiny object in the middle, and all of it, including its top (crown, "
-    "foliage, lamp head, roof), stays inside the area: scale it down rather than let it be cut off. Do not add "
-    "anything the user did not ask "
-    "for. Answer with JSON: "
-    '{"instruction": "<20-60 words: what the area shows after the edit>", '
-    '"location": "<5-20 words: where the area is, by landmarks of image 1>", '
-    '"scene": "<10-25 words: photo or render, light direction, time of day, style>"}'
+    "You plan an edit of an architectural photo or render so that the new element looks native, as if it was "
+    "photographed in the same shot. Image 1 is the whole frame with the user's area highlighted in red; image 2 "
+    "is a close-up of that area. The user's request (it may be in Russian) says what must appear or change there. "
+    "The red area marks WHERE, not how big: the element gets its true real-world size at that spot, even if that "
+    "is much bigger or smaller than the highlight. Work it out from the whole frame: 1) find scale references near "
+    "the spot (door about 2.1 m, storey about 3 m, person about 1.7 m, car about 4.5 m long and 1.4 m high, bench, "
+    "bin, paving slabs, kerb) and the ground plane and perspective (horizon height, direction of nearby edges such "
+    "as the kerb, facade lines); 2) estimate the element's real size and its size in this frame at that spot; "
+    "3) give the bounding box of the whole element in image 1, standing on the ground at the highlighted spot "
+    "(bottom of the box where it touches the ground) at true scale. If the request changes something already "
+    "there (material, colour, species), the box is that thing's extent and its shape and position stay. Measure "
+    "the look of the whole frame: light direction and colour, shadow hardness and direction, ambient and sky "
+    "colour, white balance, contrast, saturation, haze, depth of field, grain. Do not add anything the user did not "
+    "ask for. English. Answer with JSON: "
+    '{"instruction": "<30-80 words: what appears, its real size compared with named neighbours, orientation along '
+    'the scene perspective (e.g. parallel to the kerb, receding to the right), materials and colours as they look '
+    'under this light>", '
+    '"location": "<5-20 words: where it stands, by landmarks of image 1>", '
+    '"look": "<25-60 words: the measured light, shadows, colour grading, atmosphere and optics of the frame>", '
+    '"kind": "add" if a new element appears, "change" if something already there changes material, colour or type, '
+    '"box": [x1, y1, x2, y2] in image 1, x as thousandths of its width and y as thousandths of its height}'
 )
 EDIT_PROMPT = (
-    "Edit only the area {location}: {instruction}. It must belong to the scene ({scene}): match the perspective, "
-    "scale, light direction, shadow softness, colour grading, sharpness and grain of image 1, with natural "
-    "contact shadows. Everything else stays exactly as in image 1."
+    "Edit only {location}: {instruction}. Integrate it as if it was photographed in the same shot: {look}. "
+    "Match the camera perspective, lens and horizon of image 1; light it from the same direction and with the "
+    "same colour as everything around it, with contact shadows and cast shadows of the same direction and "
+    "softness as the other objects, reflections of the surrounding scene on glossy surfaces, the same colour "
+    "grading, haze, sharpness, depth of field and grain. It is shown whole at its real size, never cut off. "
+    "Everything else stays exactly as in image 1."
 )
-# область правки подсвечена на image 1 — модель видит, где рисовать, и не путает место по словам
+# область правки подсвечена на image 1 — модель видит, где и какого размера рисовать, и не путает место по словам
 MARK_RULE = (
-    " In image 1 the area to edit is marked with a translucent red overlay and outline; in the result it is "
-    "completely replaced and no red tint or outline remains."
+    " In image 1 the spot is marked with a translucent red overlay and the size of the new element with a thin red "
+    "outline; in the result no red tint or outline remains and the ground and surroundings keep their own colours."
 )
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
-EDIT_GROW = 0.05  # запас по контуру: объект у края маски не обрезается и не растворяется в фоне
-# край маски правки (доля короткой стороны кропа): жёстче, чем у удаления — иначе по мягкому краю
-# Differential Diffusion оставляет исходник, и низ нового объекта растворяется в мощении
+EDIT_GROW = 0.05  # запас по контуру выделения пользователя
+# запас вокруг размеченной области (доля её размера): объекту есть куда выйти за рамку, а не обрезаться о край маски
+EDIT_ROOM = 0.08
+# изменение того, что уже есть (материал, цвет, порода): форма и размер прежние — запас минимальный,
+# иначе модель «разращивает» объект (сакура больше дерева, которое заменяла)
+EDIT_ROOM_CHANGE = 0.03
+# край маски правки (доля короткой стороны кропа): жёсткий — иначе по мягкому краю Differential Diffusion
+# оставляет исходник, и край нового объекта растворяется в фоне
 EDIT_EDGE = 1 / 480
 REMOVE_EDGE = 1 / 160
+# порог изменения (0..255 по сглаженной картинке): во вклейку идёт только то, что модель действительно поменяла
+CHANGE_THRESHOLD = 22
+MAX_BOX_AREA = 0.6  # рамка объекта от DeepSeek — не больше этой доли кадра
 
 _described: OrderedDict[str, dict] = OrderedDict()
 CACHE_SIZE = 128
@@ -239,24 +257,84 @@ def build_workflow(
     return wf
 
 
-class _Region:
-    """Исходник, маска (расширенная) и кроп с контекстом вокруг неё."""
+def _load(image: bytes, mask: bytes, grow_frac: float, shadow_down: float = 0.0) -> tuple[Image.Image, Image.Image, int]:
+    """Исходник, расширенная маска пользователя (в размере исходника) и величина запаса в пикселях."""
+    src = Image.open(io.BytesIO(image)).convert("RGB")
+    w, h = src.size
+    m = _binary(Image.open(io.BytesIO(mask)), src.size)
+    bbox = m.getbbox()
+    if not bbox:
+        raise EmptyMask("Маска пуста — выделите область")
+    # запас по контуру: пользовательская маска приблизительна
+    bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    grow = max(4, round(grow_frac * max(bw, bh)), round(0.004 * max(w, h)))
+    if shadow_down:
+        m = _extend_down(m, round(shadow_down * bh), grow)
+    return src, _grow(m, grow), grow
 
-    def __init__(self, image: bytes, mask: bytes, grow_frac: float, shadow_down: float = 0.0):
-        self.src = Image.open(io.BytesIO(image)).convert("RGB")
-        w, h = self.src.size
-        m = _binary(Image.open(io.BytesIO(mask)), self.src.size)
-        bbox = m.getbbox()
-        if not bbox:
-            raise EmptyMask("Маска пуста — выделите область")
-        # запас по контуру: пользовательская маска приблизительна
-        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        self.grow = max(4, round(grow_frac * max(bw, bh)), round(0.004 * max(w, h)))
-        if shadow_down:
-            m = _extend_down(m, round(shadow_down * bh), self.grow)
-        grown = _grow(m, self.grow)
-        self.box = _context_box(grown.getbbox(), w, h)
-        self.crop, self.mask = self.src.crop(self.box), grown.crop(self.box)
+
+def _reconstruct(seed: "np.ndarray", allowed: "np.ndarray") -> "np.ndarray":
+    """Часть allowed, связная с seed (морфологическая реконструкция)."""
+    region = seed & allowed
+    while True:
+        grown = region.copy()
+        grown[1:] |= region[:-1]
+        grown[:-1] |= region[1:]
+        grown[:, 1:] |= region[:, :-1]
+        grown[:, :-1] |= region[:, 1:]
+        grown &= allowed
+        if (grown == region).all():
+            return region
+        region = grown
+
+
+def _changed(orig: Image.Image, patch: Image.Image, seed: Image.Image, allowed: Image.Image) -> Image.Image:
+    """Маска вклейки: размеченная область + всё, что модель заметно изменила и что с ней связано (без дыр).
+
+    Так в результат попадает и часть объекта, вышедшая за разметку (капот машины, крона), а перерисованный
+    запас без изменений остаётся пикселями исходника.
+    """
+    import numpy as np
+
+    size = patch.size
+    small = fit_size(*size, 0.25) if size[0] * size[1] > 250_000 else size
+    blur = ImageFilter.GaussianBlur(1.5)
+    a = np.asarray(orig.resize(small, Image.BILINEAR).filter(blur), dtype=np.int16)
+    b = np.asarray(patch.resize(small, Image.BILINEAR).filter(blur), dtype=np.int16)
+    diff = np.abs(a - b).max(-1) > CHANGE_THRESHOLD
+    core = np.asarray(seed.resize(small, Image.BILINEAR)) > 127
+    room = np.asarray(allowed.resize(small, Image.BILINEAR)) > 127
+    region = _reconstruct(core, (diff & room) | core)
+    # дыры внутри объекта (где его цвет совпал с фоном) — тоже объект
+    border = np.zeros_like(region)
+    border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+    outside = _reconstruct(border & ~region, ~region)
+    region |= ~outside
+    log.info("вклейка: разметка %.1f%%, с изменениями вокруг %.1f%% кропа", 100 * core.mean(), 100 * region.mean())
+    return Image.fromarray((region * 255).astype(np.uint8)).resize(size, Image.BILINEAR).point(lambda v: 255 if v > 127 else 0)
+
+
+class _Region:
+    """Исходник, маска и кроп с контекстом вокруг неё.
+
+    mask — что вклеивается всегда (и что подсвечивается для модели); с room модель перерисовывает ещё и запас
+    вокруг, а во вклейку из запаса попадает только связное с маской изменение.
+    """
+
+    def __init__(self, src: Image.Image, mask: Image.Image, grow: int, extra: Image.Image | None = None, room: float = 0.0):
+        w, h = src.size
+        self.src, self.grow = src, grow
+        mark = ImageChops.lighter(mask, extra) if extra is not None else mask
+        gen = mark
+        if room:
+            x1, y1, x2, y2 = mark.getbbox()
+            gen = _grow(mark, max(grow, round(room * max(x2 - x1, y2 - y1))))
+        self.box = _context_box(gen.getbbox(), w, h)
+        self.crop, self.mask, self.gen = src.crop(self.box), mark.crop(self.box), gen.crop(self.box)
+        # выделение пользователя и рамка объекта по отдельности — для подсветки на image 1
+        self.core = mask.crop(self.box)
+        self.extra = extra.crop(self.box) if extra is not None else None
+        self.room = bool(room)
         self.gen_size = fit_size(*self.crop.size, INPAINT_MEGAPIXELS)
 
     async def generate(
@@ -265,7 +343,7 @@ class _Region:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении."""
         gw, gh = self.gen_size
         # мягкий край маски: Differential Diffusion плавно сводит новое со старым
-        soft = self.mask.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
+        soft = self.gen.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
         async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
             await _check_model(client, model)
             crop_name = await _upload(client, to_png(self.crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
@@ -277,10 +355,12 @@ class _Region:
         if "save" not in out:
             raise ComfyError("ComfyUI не вернул результат")
 
-        # вклейка: только расширенная маска с растушёвкой наружу — шов ложится на уже перерисованную кромку
+        # вклейка: маска (а с запасом — и связные с ней изменения) с растушёвкой наружу — шов ложится на уже
+        # перерисованную кромку
         patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(self.crop.size, Image.LANCZOS)
+        keep = _changed(self.crop, patch, self.mask, self.gen) if self.room else self.mask
         feather = max(2, self.grow // 2)
-        alpha = ImageChops.lighter(_grow(self.mask, feather).filter(ImageFilter.GaussianBlur(feather / 2)), self.mask)
+        alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
         result.paste(patch, self.box[:2], alpha)
         buf = io.BytesIO()
@@ -298,7 +378,8 @@ async def run_remove(
     if seed is None:
         seed = random.randrange(2**48)
     # маска протягивается вниз — под контактную тень у ног, колёс и основания
-    r = _Region(image, mask, 0.04, SHADOW_DOWN)
+    src, core, grow = _load(image, mask, 0.04, SHADOW_DOWN)
+    r = _Region(src, core, grow)
     cw, ch = r.crop.size
 
     what = await describe_removal(to_png(r.crop), _highlight(r.crop, r.mask), (hint or "").strip())
@@ -316,34 +397,87 @@ async def run_remove(
     return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE), seed
 
 
-async def describe_edit(crop: bytes, highlighted: bytes, request: str) -> dict:
-    """Инструкция правки на английском (что появится в области, где она, какая сцена); без DeepSeek — запрос как есть."""
-    fallback = {"instruction": request, "location": "in the middle of the image", "scene": "the same scene as image 1"}
+def _box_mask(box: list[float], src: Image.Image, core: Image.Image, kind: str) -> Image.Image | None:
+    """Рамка объекта от DeepSeek (доли кадра) → маска в натуральную величину.
+
+    Размер DeepSeek оценивает по соседним объектам надёжно, а положение рамки на вертикальных кадрах путает
+    (промах на сотни пикселей) — поэтому новый объект ставится сам: низом на нижний край выделения (точка касания
+    земли), по центру выделения. Для «изменить» рамка — сам меняемый объект: берётся как есть, если она у выделения.
+    """
+    w, h = src.size
+    bw, bh = round((box[2] - box[0]) * w), round((box[3] - box[1]) * h)
+    if bw < 8 or bh < 8 or bw * bh > MAX_BOX_AREA * w * h:
+        return None
+    cx1, cy1, cx2, cy2 = core.getbbox()
+    x1, y1 = round(box[0] * w), round(box[1] * h)
+    pad = max(cx2 - cx1, cy2 - cy1)
+    near = not (x1 + bw < cx1 - pad or x1 > cx2 + pad or y1 + bh < cy1 - pad or y1 > cy2 + pad)
+    if kind == "change":
+        if not near:
+            return None
+    else:
+        x1, y1 = round((cx1 + cx2 - bw) / 2), cy2 - bh
+    x1, y1 = max(0, min(x1, w - bw)), max(0, min(y1, h - bh))
+    m = Image.new("L", src.size, 0)
+    ImageDraw.Draw(m).rounded_rectangle((x1, y1, x1 + bw, y1 + bh), radius=round(0.12 * min(bw, bh)), fill=255)
+    return m
+
+
+def _mark(crop: Image.Image, core: Image.Image, extra: Image.Image | None) -> Image.Image:
+    """image 1 правки: выделение — полупрозрачной заливкой, рамка объекта — только контуром.
+
+    Заливка большой рамки «протекала» в результат (терракотовая плитка под машиной), контур такого не даёт,
+    а размер модель по нему держит.
+    """
+    out = Image.open(io.BytesIO(_highlight(crop, core, EDIT_MARK_OPACITY))).convert("RGB")
+    if extra is not None:
+        width = max(2, min(crop.size) // 250)
+        edge = ImageChops.subtract(_grow(extra, width), extra)
+        ImageDraw.Draw(out).bitmap((0, 0), edge, fill=(255, 0, 40))
+    return out
+
+
+async def describe_edit(frame: bytes, close: bytes, request: str) -> dict:
+    """План правки по всему кадру: что появится и какого реального размера, где, как выглядит кадр, рамка объекта.
+
+    Без DeepSeek или при ошибке — запрос как есть, без рамки (рисуется в выделении).
+    """
+    fallback = {
+        "instruction": request,
+        "location": "in the marked area",
+        "look": "the same light, shadows, colour grading and atmosphere as image 1",
+    }
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(highlighted + b"edit" + request.encode()).hexdigest()
+    key = hashlib.sha256(frame + b"edit" + request.encode()).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
-    try:
-        raw = await _chat(
-            [
-                {"role": "system", "content": EDIT_SYSTEM},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"User request: «{request}»"},
-                        {"type": "text", "text": "Image 1 (crop):"},
-                        {"type": "image_url", "image_url": {"url": _data_url(crop, 1024)}},
-                        {"type": "text", "text": "Image 2 (area to edit highlighted in red):"},
-                        {"type": "image_url", "image_url": {"url": _data_url(highlighted, 1024)}},
-                    ],
-                },
+    messages = [
+        {"role": "system", "content": EDIT_SYSTEM},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"User request: «{request}»"},
+                {"type": "text", "text": "Image 1 (whole frame, area highlighted in red):"},
+                {"type": "image_url", "image_url": {"url": _data_url(frame, 1536)}},
+                {"type": "text", "text": "Image 2 (close-up of the area):"},
+                {"type": "image_url", "image_url": {"url": _data_url(close, 1024)}},
             ],
-            json_mode=True,
-        )
-        data = json.loads(raw)
+        },
+    ]
+    try:
+        # рамка — это натуральный размер объекта; DeepSeek иногда её не присылает — тогда спрашиваем ещё раз,
+        # иначе объект рисуется размером с выделение
+        for attempt in range(2):
+            data = json.loads(await _chat(messages, json_mode=True))
+            if box := _box(data.get("box")):
+                break
+            log.warning("DeepSeek не дал рамку объекта (попытка %d): %s", attempt + 1, data.get("box"))
         result = {k: " ".join(str(data.get(k) or "").split()).rstrip(".") or fallback[k] for k in fallback}
+        if box:
+            result["box"] = box
+        result["kind"] = "change" if str(data.get("kind", "")).strip().lower() == "change" else "add"
     except Exception as e:  # noqa: BLE001 — правка не должна падать из-за LLM
         log.warning("DeepSeek недоступен, запрос правки как есть: %s", e)
         return fallback
@@ -356,13 +490,27 @@ async def describe_edit(crop: bytes, highlighted: bytes, request: str) -> dict:
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL
 ) -> tuple[bytes, int]:
-    """JPEG исходника в полном разрешении, где под маской нарисовано то, что попросил пользователь, и сид."""
+    """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
+
+    Выделение задаёт место, а не размер: DeepSeek по всему кадру (масштаб соседних объектов, перспектива)
+    даёт рамку объекта в натуральную величину; генерация идёт по выделению + рамке + запасу вокруг,
+    во вклейку попадает всё, что изменилось и связано с ними, — объект не обрезается о край маски.
+    """
     if seed is None:
         seed = random.randrange(2**48)
-    r = _Region(image, mask, EDIT_GROW)
-    highlighted = _highlight(r.crop, r.mask)
-    what = await describe_edit(to_png(r.crop), highlighted, request.strip())
+    src, core, grow = _load(image, mask, EDIT_GROW)
+    close_box = _context_box(core.getbbox(), *src.size)
+    what = await describe_edit(
+        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip()
+    )
+    extra = _box_mask(what["box"], src, core, what.get("kind", "add")) if what.get("box") else None
+    if what.get("box") and extra is None:
+        log.warning("Рамка объекта отброшена (вдали от выделения или во весь кадр): %s", what["box"])
+    r = _Region(src, core, grow, extra, EDIT_ROOM_CHANGE if what.get("kind") == "change" else EDIT_ROOM)
     prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if EDIT_MARK else "")
-    log.info("edit %s %dx%d кроп %s → %dx%d seed=%d «%s»\n%s", model, *r.src.size, r.box, *r.gen_size, seed, request, prompt)
-    reference = Image.open(io.BytesIO(_highlight(r.crop, r.mask, EDIT_MARK_OPACITY))).convert("RGB") if EDIT_MARK else None
+    log.info(
+        "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
+        model, *src.size, r.box, *r.gen_size, seed, what.get("kind"), what.get("box") if extra else None, request, prompt,
+    )
+    reference = _mark(r.crop, r.core, r.extra) if EDIT_MARK else None
     return await r.generate(prompt, seed, model, "edit", EDIT_EDGE, reference), seed
