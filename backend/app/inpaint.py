@@ -80,7 +80,10 @@ EDIT_SYSTEM = (
     "as the kerb, facade lines); 2) estimate the element's real size and its size in this frame at that spot; "
     "3) give the bounding box of the whole element in image 1, standing on the ground at the highlighted spot "
     "(bottom of the box where it touches the ground) at true scale. If the request changes something already "
-    "there (material, colour, species), the box is that thing's extent and its shape and position stay. Measure "
+    "there (material, colour, species, style of the same thing), its shape and position stay. If it turns into a "
+    "different kind of object (a person into a dog, a tree into a lamp post), the old thing disappears completely "
+    "with its shadow and the new one gets its own true size standing at the same spot; then the instruction starts "
+    "with what disappears. Measure "
     "the look of the whole frame: light direction and colour, shadow hardness and direction, ambient and sky "
     "colour, white balance, contrast, saturation, haze, depth of field, grain. Do not add anything the user did not "
     "ask for. English. Answer with JSON: "
@@ -89,7 +92,8 @@ EDIT_SYSTEM = (
     'under this light>", '
     '"location": "<5-20 words: where it stands, by landmarks of image 1>", '
     '"look": "<25-60 words: the measured light, shadows, colour grading, atmosphere and optics of the frame>", '
-    '"kind": "add" if a new element appears, "change" if something already there changes material, colour or type, '
+    '"kind": "add" if a new element appears, "change" if the same thing changes material, colour, species or '
+    'style, "replace" if it becomes a different kind of object, '
     '"box": [x1, y1, x2, y2] in image 1, x as thousandths of its width and y as thousandths of its height}'
 )
 EDIT_PROMPT = (
@@ -102,8 +106,16 @@ EDIT_PROMPT = (
 )
 # область правки подсвечена на image 1 — модель видит, где и какого размера рисовать, и не путает место по словам
 MARK_RULE = (
-    " In image 1 the spot is marked with a translucent red overlay and the size of the new element with a thin red "
-    "outline; in the result no red tint or outline remains and the ground and surroundings keep their own colours."
+    " Image 2 is image 1 with the area to edit marked by a translucent red overlay; it is only a guide to where the "
+    "edit goes. The result is based on the clean image 1: no red tint, the ground and surroundings keep their own "
+    "colours."
+)
+# с рамкой: модель держалась за маленькую заливку выделения и рисовала машину размером с собаку — размер говорим прямо
+MARK_BOX_RULE = (
+    " Image 2 is image 1 with a translucent red spot where the new element stands and a thin red outline of its full "
+    "size; it is only a guide: the new element fills that outline from edge to edge, it is not squeezed into the "
+    "small red spot. The result is based on the clean image 1: no red tint or outline anywhere, the ground and "
+    "surroundings keep their own colours."
 )
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
@@ -230,7 +242,7 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
 def build_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str, reference: str | None = None
 ) -> dict:
-    """Перерисовка кропа только под маской. image 1 — сам кроп или (reference) его копия с подсвеченной областью."""
+    """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
     files = FLUX_MODELS[model]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
@@ -245,14 +257,17 @@ def build_workflow(
         "noise_lat": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["src_lat", 0], "mask": ["mask", 0]}},
         "text": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
     }
-    ref_lat = ["src_lat", 0]
+    # image 1 — кроп как есть: при удалении модель видит объект и по инструкции убирает его, а не дорисовывает «дыру»
+    wf["cond"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text", 0], "latent": ["src_lat", 0]}}
+    positive = ["cond", 0]
     if reference:
+        # image 2 — тот же кроп с красной разметкой (где и какого размера), только подсказка: модель воспроизводит
+        # чистый image 1, и разметка не «протекает» в результат красным контуром на плитке
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
         wf["ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["ref_img", 0], "vae": ["vae", 0]}}
-        ref_lat = ["ref_lat", 0]
-    # удаление: image 1 — кроп как есть, модель видит объект и по инструкции убирает его, а не дорисовывает «дыру»
-    wf["cond"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["text", 0], "latent": ref_lat}}
-    image = _sampling(wf, "", ["cond", 0], ["noise_lat", 0], width, height, TOTAL_STEPS, seed, model=["diffdiff", 0])
+        wf["cond_ref"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["ref_lat", 0]}}
+        positive = ["cond_ref", 0]
+    image = _sampling(wf, "", positive, ["noise_lat", 0], width, height, TOTAL_STEPS, seed, model=["diffdiff", 0])
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": f"inego/{prefix}"}}
     return wf
 
@@ -358,7 +373,9 @@ class _Region:
         # вклейка: маска (а с запасом — и связные с ней изменения) с растушёвкой наружу — шов ложится на уже
         # перерисованную кромку
         patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(self.crop.size, Image.LANCZOS)
-        keep = _changed(self.crop, patch, self.mask, self.gen) if self.room else self.mask
+        # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
+        # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
+        keep = _changed(self.crop, patch, self.core, self.gen) if self.room else self.mask
         feather = max(2, self.grow // 2)
         alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
@@ -397,27 +414,20 @@ async def run_remove(
     return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE), seed
 
 
-def _box_mask(box: list[float], src: Image.Image, core: Image.Image, kind: str) -> Image.Image | None:
-    """Рамка объекта от DeepSeek (доли кадра) → маска в натуральную величину.
+def _box_mask(box: list[float], src: Image.Image, core: Image.Image) -> Image.Image | None:
+    """Рамка нового объекта в натуральную величину (размер — от DeepSeek, доли кадра).
 
     Размер DeepSeek оценивает по соседним объектам надёжно, а положение рамки на вертикальных кадрах путает
-    (промах на сотни пикселей) — поэтому новый объект ставится сам: низом на нижний край выделения (точка касания
-    земли), по центру выделения. Для «изменить» рамка — сам меняемый объект: берётся как есть, если она у выделения.
+    (промах на сотни пикселей) — поэтому объект ставится сам: низом на нижний край выделения (точка касания
+    земли), по центру выделения.
     """
     w, h = src.size
     bw, bh = round((box[2] - box[0]) * w), round((box[3] - box[1]) * h)
     if bw < 8 or bh < 8 or bw * bh > MAX_BOX_AREA * w * h:
         return None
-    cx1, cy1, cx2, cy2 = core.getbbox()
-    x1, y1 = round(box[0] * w), round(box[1] * h)
-    pad = max(cx2 - cx1, cy2 - cy1)
-    near = not (x1 + bw < cx1 - pad or x1 > cx2 + pad or y1 + bh < cy1 - pad or y1 > cy2 + pad)
-    if kind == "change":
-        if not near:
-            return None
-    else:
-        x1, y1 = round((cx1 + cx2 - bw) / 2), cy2 - bh
-    x1, y1 = max(0, min(x1, w - bw)), max(0, min(y1, h - bh))
+    cx1, _, cx2, cy2 = core.getbbox()
+    x1 = max(0, min(round((cx1 + cx2 - bw) / 2), w - bw))
+    y1 = max(0, min(cy2 - bh, h - bh))
     m = Image.new("L", src.size, 0)
     ImageDraw.Draw(m).rounded_rectangle((x1, y1, x1 + bw, y1 + bh), radius=round(0.12 * min(bw, bh)), fill=255)
     return m
@@ -437,7 +447,34 @@ def _mark(crop: Image.Image, core: Image.Image, extra: Image.Image | None) -> Im
     return out
 
 
-async def describe_edit(frame: bytes, close: bytes, request: str) -> dict:
+# слова-команды в начале запроса правки: задают тип явно, DeepSeek им не перечит
+ADD_WORDS = ("добавь", "добавить", "поставь", "поставить", "посади", "посадить", "размести", "разместить",
+             "нарисуй", "нарисовать", "установи", "установить", "add")
+CHANGE_WORDS = ("измени", "изменить", "замени", "заменить", "поменяй", "поменять", "перекрась", "перекрасить",
+                "сделай", "сделать", "change", "replace")
+KIND_RULE = {
+    "add": "The user explicitly asked to ADD a new element at the highlighted spot: kind is \"add\".",
+    "change": (
+        "The user asked to CHANGE what is already in the highlighted area: kind is \"change\" if the same thing only "
+        "changes material, colour, species or style (its position, size and shape stay), or \"replace\" if it becomes "
+        "a different kind of object (the old one disappears completely, the new one gets its own true size at the "
+        "same spot)."
+    ),
+}
+
+
+def parse_kind(request: str) -> str | None:
+    """«добавь …» → add, «измени / замени / перекрась …» → change, иначе None (решает DeepSeek)."""
+    words = request.strip().lower().replace("ё", "е").split(maxsplit=1)
+    first = words[0].strip(",.:;!") if words else ""
+    if first in ADD_WORDS:
+        return "add"
+    if first in CHANGE_WORDS:
+        return "change"
+    return None
+
+
+async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | None = None) -> dict:
     """План правки по всему кадру: что появится и какого реального размера, где, как выглядит кадр, рамка объекта.
 
     Без DeepSeek или при ошибке — запрос как есть, без рамки (рисуется в выделении).
@@ -446,10 +483,11 @@ async def describe_edit(frame: bytes, close: bytes, request: str) -> dict:
         "instruction": request,
         "location": "in the marked area",
         "look": "the same light, shadows, colour grading and atmosphere as image 1",
+        "kind": kind or "add",
     }
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(frame + b"edit" + request.encode()).hexdigest()
+    key = hashlib.sha256(frame + b"edit" + request.encode() + (kind or "").encode()).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
@@ -458,7 +496,7 @@ async def describe_edit(frame: bytes, close: bytes, request: str) -> dict:
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"User request: «{request}»"},
+                {"type": "text", "text": f"User request: «{request}»" + (f" {KIND_RULE[kind]}" if kind else "")},
                 {"type": "text", "text": "Image 1 (whole frame, area highlighted in red):"},
                 {"type": "image_url", "image_url": {"url": _data_url(frame, 1536)}},
                 {"type": "text", "text": "Image 2 (close-up of the area):"},
@@ -474,10 +512,19 @@ async def describe_edit(frame: bytes, close: bytes, request: str) -> dict:
             if box := _box(data.get("box")):
                 break
             log.warning("DeepSeek не дал рамку объекта (попытка %d): %s", attempt + 1, data.get("box"))
-        result = {k: " ".join(str(data.get(k) or "").split()).rstrip(".") or fallback[k] for k in fallback}
+        result = {
+            k: " ".join(str(data.get(k) or "").split()).rstrip(".") or fallback[k] for k in fallback if k != "kind"
+        }
         if box:
             result["box"] = box
-        result["kind"] = "change" if str(data.get("kind", "")).strip().lower() == "change" else "add"
+        said = str(data.get("kind", "")).strip().lower()
+        # «добавь» — только добавление; «измени / замени» — изменение или замена, это решает DeepSeek
+        if kind == "add":
+            result["kind"] = "add"
+        elif kind == "change":
+            result["kind"] = "replace" if said == "replace" else "change"
+        else:
+            result["kind"] = said if said in ("change", "replace") else "add"
     except Exception as e:  # noqa: BLE001 — правка не должна падать из-за LLM
         log.warning("DeepSeek недоступен, запрос правки как есть: %s", e)
         return fallback
@@ -500,14 +547,17 @@ async def run_edit(
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
     close_box = _context_box(core.getbbox(), *src.size)
+    kind = parse_kind(request)
     what = await describe_edit(
-        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip()
+        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(), kind
     )
-    extra = _box_mask(what["box"], src, core, what.get("kind", "add")) if what.get("box") else None
-    if what.get("box") and extra is None:
-        log.warning("Рамка объекта отброшена (вдали от выделения или во весь кадр): %s", what["box"])
-    r = _Region(src, core, grow, extra, EDIT_ROOM_CHANGE if what.get("kind") == "change" else EDIT_ROOM)
-    prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if EDIT_MARK else "")
+    # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
+    add = what.get("kind") != "change"
+    extra = _box_mask(what["box"], src, core) if add and what.get("box") else None
+    if add and what.get("box") and extra is None:
+        log.warning("Рамка объекта отброшена (слишком мала или во весь кадр): %s", what["box"])
+    r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
+    prompt = EDIT_PROMPT.format(**what) + ((MARK_BOX_RULE if extra is not None else MARK_RULE) if EDIT_MARK else "")
     log.info(
         "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
         model, *src.size, r.box, *r.gen_size, seed, what.get("kind"), what.get("box") if extra else None, request, prompt,

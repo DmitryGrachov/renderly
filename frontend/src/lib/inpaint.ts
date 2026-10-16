@@ -5,6 +5,18 @@ const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 
 export type InpaintMode = 'edit' | 'remove'
 
+/** Тип правки по первому слову запроса (как на бэкенде, backend/app/inpaint.py: parse_kind); null — решает DeepSeek */
+export type EditKind = 'add' | 'change'
+const ADD_WORDS = ['добавь', 'добавить', 'поставь', 'поставить', 'посади', 'посадить', 'размести', 'разместить', 'нарисуй', 'нарисовать', 'установи', 'установить', 'add']
+const CHANGE_WORDS = ['измени', 'изменить', 'замени', 'заменить', 'поменяй', 'поменять', 'перекрась', 'перекрасить', 'сделай', 'сделать', 'change', 'replace']
+
+export function editKind(prompt: string): EditKind | null {
+  const first = (prompt.trim().toLowerCase().replace(/ё/g, 'е').split(/\s+/)[0] ?? '').replace(/[,.:;!]+$/, '')
+  if (ADD_WORDS.includes(first)) return 'add'
+  if (CHANGE_WORDS.includes(first)) return 'change'
+  return null
+}
+
 export interface InpaintRequest {
   imageUrl: string
   scene: Scene

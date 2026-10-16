@@ -1,13 +1,14 @@
 import { useEffect, useRef } from 'react'
 import { motion } from 'motion/react'
 import { ArrowUp, Sparkles, Trash2 } from 'lucide-react'
-import type { InpaintMode } from '../../lib/inpaint'
+import { editKind, type InpaintMode } from '../../lib/inpaint'
 
 import { useScene, type Scene } from '../../lib/scene'
 
+// со словом-командой: «добавь» — новый объект в натуральную величину, «замени / перекрась» — меняется то, что есть
 const SUGGESTIONS: Record<Scene, string[]> = {
-  exterior: ['Зелёные растения', 'Деревянная терраса', 'Люди', 'Автомобиль', 'Уличный фонарь', 'Бассейн'],
-  interior: ['Комнатные растения', 'Диван', 'Картина на стене', 'Ковёр', 'Светильник', 'Декор на полке'],
+  exterior: ['Добавь растения', 'Добавь людей', 'Добавь автомобиль', 'Добавь фонарь', 'Замени на газон', 'Перекрась в белый'],
+  interior: ['Добавь растения', 'Добавь диван', 'Добавь картину', 'Добавь ковёр', 'Замени на паркет', 'Перекрась в белый'],
 }
 
 // уточнение для удаления: что именно убрать внутри выделения, остальное остаётся
@@ -16,9 +17,15 @@ const REMOVE_SUGGESTIONS: Record<Scene, string[]> = {
   interior: ['Люди', 'Мебель', 'Декор', 'Растения', 'Провода', 'Светильник'],
 }
 
+const EDIT_HINT = {
+  none: 'Начните с «добавь» или «измени» — так точнее',
+  add: 'Добавится новый объект в натуральную величину',
+  change: 'Изменится выделенное: материал и цвет — на месте, другой объект — в своём размере',
+}
+
 const PLACEHOLDER: Record<Scene, string> = {
-  exterior: 'Например: деревянная терраса с шезлонгами',
-  interior: 'Например: мягкий диван из бежевого букле',
+  exterior: 'Например: добавь деревянную террасу с шезлонгами',
+  interior: 'Например: добавь мягкий диван из бежевого букле',
 }
 
 interface Props {
@@ -80,7 +87,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
           <div className="text-[15px] font-semibold tracking-[-0.01em]">{mode === 'edit' ? 'Что сделать с областью?' : 'Удалить выделенное?'}</div>
           <div className="text-[12.5px] leading-snug text-mute">
             {mode === 'edit'
-              ? 'Опишите, что должно появиться или измениться'
+              ? EDIT_HINT[editKind(prompt) ?? 'none']
               : prompt.trim()
                 ? 'Удалится только это — остальное в выделении останется'
                 : 'Всё выделенное и его тень заменит окружающий фон'}
