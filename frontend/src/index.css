@@ -86,6 +86,8 @@
   /* серии моделей на графиках (проверено на CVD отдельно для каждой темы) */
   --color-m-klein-4b: #5b4bff;
   --color-m-klein-9b: #e8336a;
+  --color-m-qwen-edit-2511: #0f9d76;
+  --color-m-qwen-image-2\.1: #c27c0e;
 }
 :root[data-theme="dark"] {
   --glass-bg: rgb(44 44 46 / 0.72);
@@ -96,6 +98,8 @@
 
   --color-m-klein-4b: #8b80ff;
   --color-m-klein-9b: #f0467a;
+  --color-m-qwen-edit-2511: #2fc497;
+  --color-m-qwen-image-2\.1: #e8a33d;
 }
 
 /* плавная смена темы — класс вешается на <html> на время переключения */

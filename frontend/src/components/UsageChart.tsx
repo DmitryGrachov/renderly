@@ -36,7 +36,7 @@ export function UsageChart({ data, rangeKey }: { data: UsageDay[]; rangeKey: str
     return () => ro.disconnect()
   }, [])
 
-  const totals = data.map((d) => ORDER.reduce((s, m) => s + d.byModel[m], 0))
+  const totals = data.map((d) => ORDER.reduce((s, m) => s + (d.byModel[m] ?? 0), 0))
   const max = niceMax(Math.max(...totals))
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => t * max)
 
@@ -88,12 +88,12 @@ export function UsageChart({ data, rangeKey }: { data: UsageDay[]; rangeKey: str
             {data.map((d, i) => {
               const x = PAD.left + step * i + (step - bw) / 2
               let acc = 0
-              const segs = ORDER.filter((m) => d.byModel[m] > 0)
+              const segs = ORDER.filter((m) => (d.byModel[m] ?? 0) > 0)
               const dim = hover !== null && hover !== i
               return (
                 <g key={i} opacity={dim ? 0.38 : 1} style={{ transition: 'opacity .2s' }}>
                   {segs.map((m, k) => {
-                    const v = d.byModel[m]
+                    const v = (d.byModel[m] ?? 0)
                     const y0 = y(acc)
                     acc += v
                     const y1 = y(acc)
@@ -101,7 +101,7 @@ export function UsageChart({ data, rangeKey }: { data: UsageDay[]; rangeKey: str
                     const gap = k > 0 ? 2 : 0
                     const h = Math.max(0, y0 - y1 - gap)
                     const top = k === segs.length - 1
-                    const fill = `var(--color-m-${m})`
+                    const fill = `var(--color-m-${m.replace('.', '-')})`
                     return top ? (
                       <path key={m} d={topRounded(x, y1, bw, h, 4)} fill={fill} />
                     ) : (
@@ -152,15 +152,15 @@ export function UsageChart({ data, rangeKey }: { data: UsageDay[]; rangeKey: str
             >
             <div className="text-[12px] font-medium text-faint first-letter:uppercase">{longFmt.format(hv.date)}</div>
             <div className="mt-0.5 text-[20px] font-semibold tabular-nums tracking-[-0.02em]">
-              {fmt(ORDER.reduce((s, m) => s + hv.byModel[m], 0))}
+              {fmt(ORDER.reduce((s, m) => s + (hv.byModel[m] ?? 0), 0))}
               <span className="ml-1 text-[12px] font-medium text-mute">токенов</span>
             </div>
             <div className="mt-2 space-y-1">
               {[...ORDER].reverse().map((m) => (
                 <div key={m} className="flex items-center gap-2 text-[12.5px]">
-                  <span className="size-2 rounded-[3px]" style={{ background: `var(--color-m-${m})` }} />
+                  <span className="size-2 rounded-[3px]" style={{ background: `var(--color-m-${m.replace('.', '-')})` }} />
                   <span className="flex-1 text-ink-2">{MODELS.find((x) => x.id === m)!.name}</span>
-                  <span className="tabular-nums text-ink">{fmt(hv.byModel[m])}</span>
+                  <span className="tabular-nums text-ink">{fmt((hv.byModel[m] ?? 0))}</span>
                 </div>
               ))}
             </div>
@@ -177,7 +177,7 @@ export function UsageChart({ data, rangeKey }: { data: UsageDay[]; rangeKey: str
         </thead>
         <tbody>
           {data.map((d, i) => (
-            <tr key={i}><td>{dayFmt.format(d.date)}</td>{ORDER.map((m) => <td key={m}>{d.byModel[m]}</td>)}</tr>
+            <tr key={i}><td>{dayFmt.format(d.date)}</td>{ORDER.map((m) => <td key={m}>{(d.byModel[m] ?? 0)}</td>)}</tr>
           ))}
         </tbody>
       </table>

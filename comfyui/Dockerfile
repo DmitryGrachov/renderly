@@ -9,6 +9,9 @@ ARG COMFYUI_REF=master
 RUN git clone --depth 1 --branch ${COMFYUI_REF} https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
     && pip install -r /opt/ComfyUI/requirements.txt
 
+# ComfyUI-GGUF — загрузчик сжатых GGUF-моделей (Qwen-Image-Edit-2511 Q4_K_M помещается в 16 ГБ видеопамяти)
+RUN git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git /opt/ComfyUI/custom_nodes/ComfyUI-GGUF     && pip install -r /opt/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt
+
 COPY custom_nodes/inego_nodes /opt/ComfyUI/custom_nodes/inego_nodes
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh

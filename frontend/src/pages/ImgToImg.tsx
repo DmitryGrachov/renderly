@@ -9,7 +9,7 @@ import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
-import { fmt, modelById, useAccount } from '../lib/account'
+import { IMG2IMG_FALLBACK, fmt, modelById, useAccount } from '../lib/account'
 import { formatSize, toStudioImage, urlToStudioImage, type StudioImage } from '../lib/types'
 
 type Status = 'idle' | 'running' | 'done' | 'error'
@@ -27,7 +27,10 @@ const SUBTITLE: Record<Scene, string> = {
 
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
-  const { charge, model, llm } = useAccount()
+  const { charge, model: chosen, llm } = useAccount()
+  // модели «только Inpainting» (Qwen-Image-Edit) — рендер Img to Img идёт на запасной klein 9B
+  const fallback = !!modelById(chosen).inpaintOnly
+  const model = fallback ? IMG2IMG_FALLBACK : chosen
   const activeModel = modelById(model)
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
@@ -98,7 +101,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
         ctrl.signal,
       )
       setResult({ url: res.url, preset, scene, seed: res.seed })
-      charge('render', `Img to Img · ${presetById(preset, scene).title}`)
+      charge('render', `Img to Img · ${presetById(preset, scene).title}`, model)
       if (!seedLocked) setSeed(String(res.seed))
       setView('compare')
       setStatus('done')
@@ -488,7 +491,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                 ? 'Сначала загрузите изображение'
                 : preset === 'custom' && !reference
                   ? 'Добавьте референс для своего пресета'
-                  : `${activeModel.name} · ${activeModel.time} · ${fmt(activeModel.cost)} ток.`}
+                  : `${fallback ? `${modelById(chosen).name} — только Inpainting, рендер на ` : ''}${activeModel.name} · ${activeModel.time} · ${fmt(activeModel.cost)} ток.`}
             </p>
 
             <AnimatePresence>

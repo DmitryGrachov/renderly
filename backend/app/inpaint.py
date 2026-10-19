@@ -23,8 +23,12 @@ from collections import OrderedDict
 import httpx
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, fit_size, to_png
-from .config import COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, log
+from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, to_png
+from .comfy import fit_size as _fit16
+from .config import (
+    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN_EDIT,
+    QWEN_EDIT_MODEL, log,
+)
 from .prompting import DEEPSEEK_API_KEY, _box, _chat, _data_url, llm_model
 
 CONTEXT = 1.0  # контекст вокруг маски: столько же от её размера с каждой стороны
@@ -88,11 +92,13 @@ EDIT_SYSTEM = (
     "with what disappears. Measure "
     "the look of the whole frame: light direction and colour, shadow hardness and direction, ambient and sky "
     "colour, white balance, contrast, saturation, haze, depth of field, grain. Do not add anything the user did not "
-    "ask for. English. Answer with JSON: "
+    "ask for. The red highlight exists only for you: never mention it, a red area, ellipse or outline in any "
+    "field. English. Answer with JSON: "
     '{"instruction": "<30-80 words: what appears, its real size compared with named neighbours, orientation along '
     'the scene perspective (e.g. parallel to the kerb, receding to the right), materials and colours as they look '
     'under this light>", '
-    '"location": "<5-20 words: where it stands, by landmarks of image 1>", '
+    '"location": "<5-20 words: where it stands, by landmarks of image 1; never mention the red highlight, '
+    'ellipse, outline or any marking — the image model does not see it>", '
     '"look": "<25-60 words: the measured light, shadows, colour grading, atmosphere and optics of the frame>", '
     '"kind": "add" if a new element appears, "change" if the same thing changes material, colour, species or '
     'style, "replace" if it becomes a different kind of object, '
@@ -135,6 +141,49 @@ REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечи
 REFINE_PAD = 0.15  # поле вокруг объекта (доля его размера) — контекст для света и резкости
 # запас вверх для второго прогона (доля высоты объекта): если в первом не было головы, ей должно быть где появиться
 REFINE_HEADROOM = 0.15
+# Qwen-Image-2.1 — родной способ локальной правки (блог Qwen, сентябрь 2026): исходник и отдельная ч/б маска двумя
+# входами (<image1> — холст, <image2> — маска: белое — где править), модель перерисовывает кадр целиком и сама
+# сохраняет остальное — без заморозки латента по маске. Запрос — с действия, остальное — одной общей фразой
+Q21_EDIT_PROMPT = (
+    "Edit <image1> only inside the region marked white in the mask <image2> ({location}): {instruction}. "
+    "{size_rule}It must look photographed in the same shot: {look}. Same camera perspective, scale, light direction "
+    "and colour, contact and cast shadows, colour grading, sharpness and grain as <image1>. Everything outside the "
+    "marked region stays exactly as in <image1>. Do not draw the mask, any white shape or outline."
+)
+Q21_SIZE_ADD = (
+    "The marked region shows where it stands and its full size: it fills the region at its real size, standing at "
+    "the bottom of it, and is shown whole, never cut off. Only the new element and its own contact shadow are added: "
+    "the ground, grass, paving, walls and everything else behind and around it inside the marked region stay exactly "
+    "as in <image1>. "
+)
+Q21_REMOVE_PROMPT = (
+    "Remove {object} from <image1> completely, together with any shadow and reflection it casts; it lies in the "
+    "region marked white in the mask <image2>. Fill that region with {background}, seamlessly continuing the "
+    "surrounding surfaces, textures, lines and lighting with correct perspective, as if it had never been there. "
+    "Do not add any new object. Everything outside the marked region stays exactly as in <image1>. Do not draw the "
+    "mask or any white shape."
+)
+Q21_KEEP = " Keep {keep} exactly as they are."
+# Qwen-Image-Edit-2511 — родной способ: инструкция по Picture 1 + Picture 2 — тот же кадр с тонким красным контуром
+# области правки (2511 понимает пометки и вспомогательные линии; отдельную ч/б маску её не учили понимать)
+Q2511_EDIT_PROMPT = (
+    "Edit Picture 1 only inside the area outlined in red in Picture 2 ({location}): {instruction}. "
+    "{size_rule}It must look photographed in the same shot: {look}. Same camera perspective, scale, light direction "
+    "and colour, contact and cast shadows, colour grading, sharpness and grain as Picture 1. Picture 2 is only a "
+    "guide: the red outline is not part of the scene and must not appear anywhere. Everything outside the outlined "
+    "area stays exactly as in Picture 1."
+)
+Q2511_SIZE_ADD = (
+    "The outlined area shows where it stands and its full size: it fills the area at its real size, standing at "
+    "the bottom of it, and is shown whole, never cut off. "
+)
+Q2511_REMOVE_PROMPT = (
+    "Remove {object} from Picture 1 completely, together with any shadow and reflection it casts; it is inside the "
+    "area outlined in red in Picture 2. Fill that area with {background}, seamlessly continuing the surrounding "
+    "surfaces, textures, lines and lighting with correct perspective, as if it had never been there. Do not add any "
+    "new object. Picture 2 is only a guide: the red outline must not appear anywhere. Everything outside the "
+    "outlined area stays exactly as in Picture 1."
+)
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -167,6 +216,12 @@ MAX_BOX_AREA = 0.6  # рамка объекта от DeepSeek — не боль�
 
 _described: OrderedDict[str, dict] = OrderedDict()
 CACHE_SIZE = 128
+
+
+def fit_size(w: int, h: int, megapixels: float) -> tuple[int, int]:
+    """Размер генерации с пропорцией исходника, ~megapixels, стороны кратны 32 (Qwen-Image-2.1 требует 32)."""
+    gw, gh = _fit16(w, h, megapixels)
+    return max(256, round(gw / 32) * 32), max(256, round(gh / 32) * 32)
 
 
 class EmptyMask(ValueError):
@@ -273,11 +328,134 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
     return result
 
 
+def build_qwen_workflow(
+    crop: str, mask: str, width: int, height: int, prompt: str, seed: int, prefix: str,
+    reference: str | None = None, denoise: float = 1.0, native: bool = False,
+) -> dict:
+    """То же на Qwen-Image-Edit-2511: картинки подаются в TextEncodeQwenImageEditPlus (Picture 1 — кроп,
+    Picture 2 — подсказка), Lightning LoRA — 4 шага, cfg 1.
+
+    native — родной способ модели: латент кропа без заморозки по маске, модель перерисовывает кадр целиком по
+    инструкции и сама сохраняет остальное (вклейка берёт только область правки). Иначе — шум только под маской
+    (второй прогон с частичным шумом)."""
+    q = QWEN_EDIT
+    wf: dict = {
+        "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": q["unet"]}},
+        "lora": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["unet", 0], "lora_name": q["lora"], "strength_model": 1.0}},
+        "shift": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["lora", 0], "shift": q["shift"]}},
+        "cfgnorm": {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}},
+        "diffdiff": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cfgnorm", 0], "strength": 1.0}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": q["text_encoder"], "type": "qwen_image", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": q["vae"]}},
+        "src_img": {"class_type": "LoadImage", "inputs": {"image": crop}},
+        "mask": {"class_type": "LoadImageMask", "inputs": {"image": mask, "channel": "red"}},
+        "src_lat": {"class_type": "VAEEncode", "inputs": {"pixels": ["src_img", 0], "vae": ["vae", 0]}},
+        "noise_lat": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["src_lat", 0], "mask": ["mask", 0]}},
+    }
+    images = {"image1": ["src_img", 0]}
+    if reference:
+        wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
+        images["image2"] = ["ref_img", 0]
+    for tag, text in (("pos", prompt), ("neg", "")):
+        wf[f"text_{tag}"] = {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["clip", 0], "prompt": text, "vae": ["vae", 0], **images},
+        }
+        # GGUF не от Comfy-Org: способ подачи референсов задаём явно (как в шаблоне ComfyUI для 2511)
+        wf[f"ref_{tag}"] = {
+            "class_type": "FluxKontextMultiReferenceLatentMethod",
+            "inputs": {"conditioning": [f"text_{tag}", 0], "reference_latents_method": "index_timestep_zero"},
+        }
+    wf["sample"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": ["cfgnorm" if native else "diffdiff", 0], "positive": ["ref_pos", 0], "negative": ["ref_neg", 0],
+            "latent_image": ["src_lat" if native else "noise_lat", 0],
+            "seed": seed, "steps": q["steps"], "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": denoise,
+        },
+    }
+    wf["decode"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}}
+    wf["save"] = {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": f"inego/{prefix}"}}
+    if native:
+        for k in ("diffdiff", "noise_lat", "mask"):  # заморозка латента по маске родному режиму не нужна
+            wf.pop(k)
+    return wf
+
+
+def build_qwen21_workflow(
+    crop: str, mask: str, prompt: str, seed: int, prefix: str, reference: str | None = None, denoise: float = 1.0,
+    native: bool = False,
+) -> dict:
+    """То же на Qwen-Image-2.1 Turbo: картинки — в TextEncodeQwenImage21 (<image1> — кроп, <image2> — подсказка),
+    латент <image1> (кроп кратен 32 — размер сохраняется) с шумом только под маской, 8 шагов по расписанию Turbo.
+    denoise < 1 — хвост расписания (второй прогон)."""
+    q = QWEN21
+    sig = q["sigmas"]
+    if denoise < 1:
+        sig = sig[len(sig) - 1 - max(1, round((len(sig) - 1) * denoise)):]
+    # в 2.1 картинки в тексте адресуются как <image1>, <image2>
+    text = re.sub(r"\bimage ([12])\b", r"<image\1>", prompt)
+    wf: dict = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet"], "weight_dtype": "default"}},
+        # KV-кэш образов — в RAM: в 16 ГБ видеопамяти рядом с энкодером (~9 ГБ) и моделью (~7 ГБ) он не помещается (OOM)
+        "cache": {"class_type": "QwenImage21Cache", "inputs": {"model": ["unet", 0], "device": "cpu", "dtype": "default"}},
+        "diffdiff": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cache", 0], "strength": 1.0}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": q["text_encoder"], "type": "qwen_image", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": q["vae"]}},
+        "src_img": {"class_type": "LoadImage", "inputs": {"image": crop}},
+        "mask": {"class_type": "LoadImageMask", "inputs": {"image": mask, "channel": "red"}},
+        "src_lat": {"class_type": "VAEEncode", "inputs": {"pixels": ["src_img", 0], "vae": ["vae", 0]}},
+    }
+    images = {"images.image_1": ["src_img", 0]}
+    if native:
+        # родной режим: <image2> — ч/б маска (белое — где править); латент не замораживается, модель перерисовывает
+        # кадр целиком и сама сохраняет остальное, а вклейка берёт только область правки
+        wf["mask_img"] = {"class_type": "LoadImage", "inputs": {"image": mask}}
+        images["images.image_2"] = ["mask_img", 0]
+    elif reference:
+        wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
+        images["images.image_2"] = ["ref_img", 0]
+    wf["text"] = {
+        "class_type": "TextEncodeQwenImage21",
+        "inputs": {"clip": ["clip", 0], "prompt": text, "negative_prompt": "", "resolution": 0, "vae": ["vae", 0], **images},
+    }
+    wf |= {
+        # латент самой картинки (VAE 2.1): латент энкодера картинку не несёт — с частичным шумом из него
+        # выходила текстурная каша вместо объекта
+        "noise_lat": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["src_lat", 0], "mask": ["mask", 0]}},
+        "guider": {
+            "class_type": "CFGGuider",
+            "inputs": {"model": ["cache" if native else "diffdiff", 0], "positive": ["text", 0], "negative": ["text", 1], "cfg": 1.0},
+        },
+        "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": ", ".join(f"{v:g}" for v in sig)}},
+        "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "sample": {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {
+                "noise": ["noise", 0], "guider": ["guider", 0], "sampler": ["sampler", 0],
+                # родной режим — латент <image1> без заморозки по маске
+                "sigmas": ["sigmas", 0], "latent_image": ["text", 2] if native else ["noise_lat", 0],
+            },
+        },
+        "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae", 0]}},
+        "save": {"class_type": "SaveImage", "inputs": {"images": ["decode", 0], "filename_prefix": f"inego/{prefix}"}},
+    }
+    if native:
+        for k in ("diffdiff", "noise_lat", "mask", "src_lat"):  # заморозка латента по маске родному режиму не нужна
+            wf.pop(k)
+    return wf
+
+
 def build_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str,
-    reference: str | None = None, steps: int = TOTAL_STEPS,
+    reference: str | None = None, steps: int = TOTAL_STEPS, native: bool = False,
 ) -> dict:
     """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
+    if model == QWEN_EDIT_MODEL:
+        return build_qwen_workflow(crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
+    if model == QWEN21_MODEL:
+        return build_qwen21_workflow(crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
     files = FLUX_MODELS[model]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
@@ -572,12 +750,23 @@ class _Region:
 
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
-        unleak: bool = False, unveil: bool = False, refine: str | None = None,
+        unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
     ) -> bytes:
-        """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении."""
+        """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
+
+        native (Qwen-Image-2.1): маска уходит модели второй картинкой — чёткая ч/б область правки (self.mask:
+        выделение + рамка объекта), а не мягкая маска шума.
+        """
         gw, gh = self.gen_size
-        # мягкий край маски: Differential Diffusion плавно сводит новое со старым
-        soft = self.gen.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
+        if native and model == QWEN_EDIT_MODEL:
+            # 2511: Picture 2 — кроп с контуром области; маска модели не уходит, она нужна только вклейке
+            reference = _outline(self.crop, self.mask)
+            soft = self.mask.resize((gw, gh), Image.BILINEAR)
+        elif native:
+            soft = self.mask.resize((gw, gh), Image.BILINEAR).point(lambda v: 255 if v > 127 else 0)
+        else:
+            # мягкий край маски: Differential Diffusion плавно сводит новое со старым
+            soft = self.gen.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
         async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
             await _check_model(client, model)
             crop_name = await _upload(client, to_png(self.crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
@@ -585,7 +774,9 @@ class _Region:
             ref_name = None
             if reference is not None:
                 ref_name = await _upload(client, to_png(reference.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-            out = await _run(client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, prefix, ref_name))
+            out = await _run(
+                client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, prefix, ref_name, native=native)
+            )
         if "save" not in out:
             raise ComfyError("ComfyUI не вернул результат")
 
@@ -668,6 +859,8 @@ async def run_remove(
     # маска протягивается вниз — под контактную тень у ног, колёс и основания
     src, core, grow = _load(image, mask, 0.04, SHADOW_DOWN)
     r = _Region(src, core, grow)
+    if model == QWEN21_MODEL:
+        r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     cw, ch = r.crop.size
 
     what = await describe_removal(to_png(r.crop), _highlight(r.crop, r.mask), (hint or "").strip())
@@ -678,11 +871,17 @@ async def run_remove(
         ImageDraw.Draw(r.mask).ellipse(
             (round(shadow[0] * cw), round(shadow[1] * ch), round(shadow[2] * cw), round(shadow[3] * ch)), fill=255
         )
+    native = model in (QWEN21_MODEL, QWEN_EDIT_MODEL)
+    if native:
+        tpl = Q21_REMOVE_PROMPT if model == QWEN21_MODEL else Q2511_REMOVE_PROMPT
+        prompt = tpl.format(**what) + (Q21_KEEP.format(keep=what["keep"]) if what.get("keep") else "")
     log.info(
         "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
         model, *r.src.size, r.box, *r.gen_size, seed, what.get("shadow"), prompt,
     )
-    return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE), seed
+    # 2511 видит красный контур — зачистка, если он протечёт
+    unleak = model == QWEN_EDIT_MODEL
+    return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native), seed
 
 
 def _box_mask(box: list[float], src: Image.Image, core: Image.Image) -> Image.Image | None:
@@ -714,6 +913,14 @@ def _mark(crop: Image.Image, core: Image.Image, extra: Image.Image | None) -> Im
     feather = max(3, min(crop.size) // 80)
     soft = core.filter(ImageFilter.GaussianBlur(feather))
     return Image.composite(Image.blend(crop, Image.new("RGB", crop.size, MARK_COLOR), EDIT_MARK_OPACITY), crop, soft)
+
+
+def _outline(crop: Image.Image, area: Image.Image) -> Image.Image:
+    """Picture 2 для Qwen-Image-Edit-2511: кроп с тонким красным контуром области правки (без заливки)."""
+    out = crop.copy()
+    width = max(2, min(crop.size) // 220)
+    ImageDraw.Draw(out).bitmap((0, 0), ImageChops.subtract(_grow(area, width), area), fill=(255, 0, 40))
+    return out
 
 
 # слова-команды в начале запроса правки: задают тип явно, DeepSeek им не перечит
@@ -826,18 +1033,30 @@ async def run_edit(
     if add and what.get("box") and extra is None:
         log.warning("Рамка объекта отброшена (слишком мала или во весь кадр): %s", what["box"])
     r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
+    if model == QWEN21_MODEL:
+        r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
     # дорожки на земле); место задаёт область генерации — рамка в натуральную величину, размер — текст инструкции.
     # Разметка остаётся только для «изменить» и когда рамки нет: там она показывает, что именно меняется
-    mark = EDIT_MARK and extra is None
-    prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
+    native = model in (QWEN21_MODEL, QWEN_EDIT_MODEL)
+    mark = EDIT_MARK and extra is None and not native
+    if model == QWEN21_MODEL:
+        # 2.1: место и размер — ч/б маской вторым входом (выделение + рамка объекта), без красной подсказки
+        prompt = Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
+    elif native:
+        # 2511: место и размер — красным контуром на Picture 2
+        prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
+    else:
+        prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
     log.info(
         "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
         model, *src.size, r.box, *r.gen_size, seed, what.get("kind"), what.get("box") if extra else None, request, prompt,
     )
     reference = _mark(r.crop, r.core, r.extra) if mark else None
     # зачистка протёкшей разметки — если сам запрос не про красное (красная машина пострадала бы)
-    unleak = mark and not RED_WORDS.search(request.lower())
+    unleak = (mark or model == QWEN_EDIT_MODEL) and not RED_WORDS.search(request.lower())
     # снятие белёсой вуали — только при добавлении и замене; при «изменить» перекраска того же объекта и есть цель
     refine = REFINE_PROMPT.format(instruction=what["instruction"].rstrip(".")) if add else None
-    return await r.generate(prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine), seed
+    return await r.generate(
+        prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native
+    ), seed

@@ -36,6 +36,10 @@ from .config import (
     DEFAULT_MODEL,
     FLUX_MODELS,
     FLUX_VAE,
+    QWEN21,
+    QWEN21_MODEL,
+    QWEN_EDIT,
+    QWEN_EDIT_MODEL,
     RENDER_MEGAPIXELS,
     SKY_MATCH,
     ZONE_DETAIL,
@@ -226,13 +230,42 @@ def build_workflow(
     return wf
 
 
+_last_family: str | None = None
+
+
+async def _use_family(client: httpx.AsyncClient, family: str) -> None:
+    """При переключении между FLUX klein и Qwen выгружает прежние веса из видеопамяти и RAM.
+
+    Вместе они не помещаются (Qwen GGUF ~13 ГБ + энкодер ~9 ГБ, klein 9B ~17 ГБ при 25 ГБ RAM у Docker):
+    без выгрузки ComfyUI держит обе в кэше и упирается в память.
+    """
+    global _last_family
+    if _last_family and _last_family != family:
+        await client.post("/free", json={"unload_models": True, "free_memory": True})
+        log.info("ComfyUI: выгружены модели %s перед %s", _last_family, family)
+    _last_family = family
+
+
 async def _check_model(client: httpx.AsyncClient, model: str) -> None:
     """Понятная ошибка вместо «Value not in list», если веса модели ещё не скачаны в ComfyUI."""
-    files = FLUX_MODELS[model]
-    for folder, name in (("diffusion_models", files["unet"]), ("text_encoders", files["text_encoder"])):
+    if model == QWEN_EDIT_MODEL:
+        q = QWEN_EDIT
+        need = (("unet_gguf", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]), ("loras", q["lora"]))
+    elif model == QWEN21_MODEL:
+        q = QWEN21
+        need = (("diffusion_models", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]))
+    else:
+        files = FLUX_MODELS[model]
+        need = (("diffusion_models", files["unet"]), ("text_encoders", files["text_encoder"]))
+    for folder, name in need:
         r = await client.get(f"/models/{folder}")
-        if r.status_code == 200 and name not in r.json():
+        if r.status_code != 200:
+            if folder == "unet_gguf":
+                raise ModelUnavailable("В ComfyUI нет загрузчика GGUF (ComfyUI-GGUF) — пересоберите образ comfyui")
+            continue
+        if name not in r.json():
             raise ModelUnavailable(f"Модель {model} ещё не загружена в ComfyUI (нет {name})")
+    await _use_family(client, {QWEN_EDIT_MODEL: "qwen-2511", QWEN21_MODEL: "qwen-2.1"}.get(model, "flux"))
 
 
 async def _upload(client: httpx.AsyncClient, data: bytes, name: str) -> str:

@@ -18,7 +18,7 @@ function ModelIcon({ id, size = 36 }: { id: ModelId; size?: number }) {
       style={{
         width: size,
         height: size,
-        background: `linear-gradient(140deg, var(--color-m-${id}), color-mix(in oklab, var(--color-m-${id}) 55%, #000))`,
+        background: `linear-gradient(140deg, var(--color-m-${id.replace('.', '-')}), color-mix(in oklab, var(--color-m-${id.replace('.', '-')}) 55%, #000))`,
       }}
     >
       <Sparkles className="size-4" strokeWidth={1.9} />

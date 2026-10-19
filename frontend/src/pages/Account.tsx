@@ -32,8 +32,8 @@ export function Account({ onToast }: Props) {
   const stats = useMemo(() => {
     const sum = (arr: typeof usage) => arr.reduce((s, d) => s + dayTotal(d), 0)
     const renders = (arr: typeof usage) =>
-      arr.reduce((s, d) => s + MODELS.reduce((a, m) => a + d.byModel[m.id] / m.cost, 0), 0)
-    const byModel = Object.fromEntries(MODELS.map((m) => [m.id, slice.reduce((s, d) => s + d.byModel[m.id], 0)])) as Record<ModelId, number>
+      arr.reduce((s, d) => s + MODELS.reduce((a, m) => a + (d.byModel[m.id] ?? 0) / m.cost, 0), 0)
+    const byModel = Object.fromEntries(MODELS.map((m) => [m.id, slice.reduce((s, d) => s + (d.byModel[m.id] ?? 0), 0)])) as Record<ModelId, number>
     const spent = sum(slice)
     const spentPrev = sum(prev)
     const r = renders(slice)
@@ -110,7 +110,7 @@ export function Account({ onToast }: Props) {
         <div className="mt-6 flex flex-wrap gap-x-8 gap-y-3">
           {MODELS.map((m) => (
             <div key={m.id} className="flex items-center gap-2.5">
-              <span className="size-2.5 rounded-[4px]" style={{ background: `var(--color-m-${m.id})` }} />
+              <span className="size-2.5 rounded-[4px]" style={{ background: `var(--color-m-${m.id.replace('.', '-')})` }} />
               <span className="text-[13px] text-mute">{m.name}</span>
               <span className="text-[13px] font-semibold tabular-nums">{fmt(stats.byModel[m.id])}</span>
             </div>
@@ -320,7 +320,7 @@ function ModelCard({ id, active, onSelect }: { id: ModelId; active: boolean; onS
       <div className="flex items-start justify-between gap-3">
         <span
           className="grid size-11 place-items-center rounded-[14px] text-white shadow-soft"
-          style={{ background: `linear-gradient(140deg, var(--color-m-${id}), color-mix(in oklab, var(--color-m-${id}) 55%, #000))` }}
+          style={{ background: `linear-gradient(140deg, var(--color-m-${id.replace('.', '-')}), color-mix(in oklab, var(--color-m-${id.replace('.', '-')}) 55%, #000))` }}
         >
           <Sparkles className="size-5" strokeWidth={1.9} />
         </span>
@@ -417,7 +417,7 @@ function ActivityRow({ a }: { a: Activity }) {
           <div className="flex items-center gap-1.5 text-[12px] text-faint">
             {a.model && (
               <>
-                <span className="size-1.5 rounded-full" style={{ background: `var(--color-m-${a.model})` }} />
+                <span className="size-1.5 rounded-full" style={{ background: `var(--color-m-${a.model.replace('.', '-')})` }} />
                 {modelById(a.model).name} ·
               </>
             )}

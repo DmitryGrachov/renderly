@@ -7,7 +7,7 @@ import { useAuth } from './auth'
  * а расход за прошлые дни детерминированно генерируется из id пользователя.
  */
 
-export type ModelId = 'klein-4b' | 'klein-9b'
+export type ModelId = 'klein-4b' | 'klein-9b' | 'qwen-edit-2511' | 'qwen-image-2.1'
 
 export interface Model {
   id: ModelId
@@ -19,6 +19,8 @@ export interface Model {
   quality: number // 1..5
   time: string
   badge?: string
+  /** Модель есть только в Inpainting (в Img to Img рендер идёт на запасной) */
+  inpaintOnly?: boolean
 }
 
 // id совпадают с ключами моделей на бэкенде (поле model в /api/img2img)
@@ -44,12 +46,39 @@ export const MODELS: Model[] = [
     time: '≈ 20 с',
     badge: 'Детальнее',
   },
+  {
+    id: 'qwen-edit-2511',
+    name: 'Qwen-Image-Edit 2511',
+    tag: '20B · Lightning',
+    description: 'Редактор на 20B: точнее понимает запрос и вписывает объекты. Только Inpainting.',
+    cost: 6,
+    speed: 2,
+    quality: 5,
+    time: '≈ 40 с',
+    badge: 'Inpainting',
+    inpaintOnly: true,
+  },
+  {
+    id: 'qwen-image-2.1',
+    name: 'Qwen-Image 2.1 Turbo',
+    tag: '7B · 8 шагов',
+    description: 'Новейшая Qwen (сентябрь 2026): правка по маске, компактнее и быстрее 2511. Только Inpainting.',
+    cost: 5,
+    speed: 3,
+    quality: 5,
+    time: '≈ 30 с',
+    badge: 'Новая',
+    inpaintOnly: true,
+  },
 ]
 
-const ZERO: Record<ModelId, number> = { 'klein-4b': 0, 'klein-9b': 0 }
+/** В Img to Img модели «только Inpainting» заменяются этой */
+export const IMG2IMG_FALLBACK: ModelId = 'klein-9b'
+
+const ZERO: Record<ModelId, number> = { 'klein-4b': 0, 'klein-9b': 0, 'qwen-edit-2511': 0, 'qwen-image-2.1': 0 }
 
 /** Сумма токенов за день по всем моделям. */
-export const dayTotal = (d: UsageDay) => MODELS.reduce((s, m) => s + d.byModel[m.id], 0)
+export const dayTotal = (d: UsageDay) => MODELS.reduce((s, m) => s + (d.byModel[m.id] ?? 0), 0)
 
 export const modelById = (id: ModelId) => MODELS.find((m) => m.id === id) ?? MODELS[0]
 
@@ -123,6 +152,8 @@ function fakeUsage(seed: string): UsageDay[] {
       byModel: {
         'klein-4b': renders(16) * 2,
         'klein-9b': renders(6) * 4,
+        'qwen-edit-2511': 0,
+        'qwen-image-2.1': 0,
       },
     })
   }
@@ -181,7 +212,7 @@ interface AccountContextValue {
   /** Демо-пополнение без оплаты. */
   topUp: (pack: Pack) => void
   /** Списать стоимость рендера текущей модели. */
-  charge: (kind: 'render' | 'inpaint', title: string) => void
+  charge: (kind: 'render' | 'inpaint', title: string, used?: ModelId) => void
 }
 
 const AccountContext = createContext<AccountContextValue | null>(null)
@@ -190,7 +221,7 @@ const MODEL_KEY = 'inego.model'
 const readModel = (): ModelId => {
   try {
     const v = localStorage.getItem(MODEL_KEY)
-    if (v === 'klein-4b' || v === 'klein-9b') return v
+    if (MODELS.some((m) => m.id === v)) return v as ModelId
   } catch { /* storage недоступен */ }
   return 'klein-4b'
 }
@@ -258,7 +289,7 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     }
     return baseUsage.map((d, i) =>
       i === baseUsage.length - 1
-        ? { ...d, byModel: Object.fromEntries(MODELS.map((m) => [m.id, d.byModel[m.id] + extra[m.id]])) as Record<ModelId, number> }
+        ? { ...d, byModel: Object.fromEntries(MODELS.map((m) => [m.id, (d.byModel[m.id] ?? 0) + extra[m.id]])) as Record<ModelId, number> }
         : d,
     )
   }, [baseUsage, local.events])
@@ -273,11 +304,11 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     }))
   }, [persist])
 
-  const charge = useCallback((kind: 'render' | 'inpaint', title: string) => {
-    const cost = modelById(model).cost
+  const charge = useCallback((kind: 'render' | 'inpaint', title: string, used: ModelId = model) => {
+    const cost = modelById(used).cost
     persist((l) => ({
       balance: Math.max(0, l.balance - cost),
-      events: [{ id: crypto.randomUUID(), at: Date.now(), kind, title, model, amount: -cost }, ...l.events].slice(0, 50),
+      events: [{ id: crypto.randomUUID(), at: Date.now(), kind, title, model: used, amount: -cost }, ...l.events].slice(0, 50),
     }))
   }, [model, persist])
 

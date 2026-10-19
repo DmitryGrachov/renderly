@@ -39,6 +39,30 @@ FLUX_MODELS = {
     },
 }
 DEFAULT_MODEL = "klein-4b"
+# Qwen-Image-Edit-2511 (Apache 2.0, 20B) — только Inpainting: GGUF Q4_K_M + Lightning LoRA на 4 шага
+QWEN_EDIT_MODEL = "qwen-edit-2511"
+QWEN_EDIT = {
+    "unet": os.getenv("QWEN_EDIT_UNET", "qwen-image-edit-2511-Q4_K_M.gguf"),
+    "text_encoder": os.getenv("QWEN_EDIT_TEXT_ENCODER", "qwen_2.5_vl_7b_fp8_scaled.safetensors"),
+    "vae": os.getenv("QWEN_EDIT_VAE", "qwen_image_vae.safetensors"),
+    "lora": os.getenv("QWEN_EDIT_LORA", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"),
+    "steps": int(os.getenv("QWEN_EDIT_STEPS", "4")),
+    "shift": float(os.getenv("QWEN_EDIT_SHIFT", "3.1")),
+}
+# Qwen-Image-2.1 Turbo (Apache 2.0, 7B, сентябрь 2026) — только Inpainting: int8, 8 шагов по фиксированному расписанию
+QWEN21_MODEL = "qwen-image-2.1"
+QWEN21 = {
+    "unet": os.getenv("QWEN21_UNET", "qwen_image_2.1_turbo_int8_convrot.safetensors"),
+    "text_encoder": os.getenv("QWEN21_TEXT_ENCODER", "qwen3vl_8b_int8_convrot.safetensors"),
+    "vae": os.getenv("QWEN21_VAE", "qwen_image_2.1_vae_bf16.safetensors"),
+    # расписание Turbo из официального шаблона ComfyUI (8 шагов, cfg 1)
+    "sigmas": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0],
+}
+# площадь кропа для Qwen-Image-2.1 (Мп): модель родная для 2K — на ~1 Мп объект на большом рендере рисовался
+# вдвое мельче итогового и выходил «пластиковым»
+QWEN21_MEGAPIXELS = float(os.getenv("QWEN21_MEGAPIXELS", "2.0"))
+# модели генерации, доступные в Inpainting
+INPAINT_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, QWEN21_MODEL]
 FLUX_VAE = os.getenv("FLUX_VAE", "flux2-vae.safetensors")
 # Площадь кадра генерации в мегапикселях (пропорции исходника сохраняются)
 RENDER_MEGAPIXELS = float(os.getenv("RENDER_MEGAPIXELS", "1.5"))

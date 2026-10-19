@@ -60,9 +60,14 @@ services:
     # Первый старт докачивает ~12 ГБ моделей в volume comfy_models
     gpus: all
     environment:
-      COMFYUI_ARGS: ${COMFYUI_ARGS:-}
+      # резерв видеопамяти: на 16 ГБ без него Qwen-Image-2.1 падает с OOM на второй правке подряд
+      COMFYUI_ARGS: ${COMFYUI_ARGS:---reserve-vram 2}
       # нужен только для FLUX.2 klein 9B (gated-репозиторий BFL)
       HF_TOKEN: ${HF_TOKEN:-}
+      # Qwen-Image-Edit-2511 для Inpainting (~24 ГБ); false — не скачивать
+      QWEN_EDIT: ${QWEN_EDIT:-true}
+      # Qwen-Image-2.1 Turbo для Inpainting (~17 ГБ); false — не скачивать
+      QWEN21: ${QWEN21:-true}
     volumes:
       - comfy_models:/opt/ComfyUI/models
       - comfy_output:/opt/ComfyUI/output
