@@ -30,7 +30,7 @@ interface Props {
 
 export function Editor({ image, onClose }: Props) {
   const { scene } = useScene()
-  const { model, charge } = useAccount()
+  const { model, llm, charge } = useAccount()
   const stageRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const maskRef = useRef<HTMLCanvasElement>(null)
@@ -266,7 +266,7 @@ export function Editor({ image, onClose }: Props) {
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, scene, model, mask: maskRef.current!, mode, prompt: text || undefined },
+        { imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )

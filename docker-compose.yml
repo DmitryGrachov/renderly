@@ -28,6 +28,8 @@ services:
       # DeepSeek: описывает исходник и собирает промпт (без ключа — промпт из пресета)
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      # между какими моделями DeepSeek переключает шапка сайта (Flash / Pro)
+      DEEPSEEK_MODELS: ${DEEPSEEK_MODELS:-deepseek-flash,deepseek-v4-pro}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

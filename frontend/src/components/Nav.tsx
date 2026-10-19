@@ -4,7 +4,7 @@ import { Building2, Coins, LogOut, Sofa, UserRound } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { ThemeMenu } from './ThemeMenu'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
-import { fmt, useAccount } from '../lib/account'
+import { fmt, LLMS, useAccount } from '../lib/account'
 import { ModelSelect } from './ModelSelect'
 
 export type Tab = 'img2img' | 'inpainting' | 'account'
@@ -32,6 +32,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
           </span>
         </a>
 
+        <LlmSwitch className="order-last flex sm:hidden" />
         <nav className="relative order-last mx-auto flex rounded-full bg-fg/[0.05] p-1 sm:order-none sm:mx-0" role="tablist">
           {TABS.map((t) => {
             const active = t.id === tab
@@ -63,6 +64,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
 
         <div className="flex items-center gap-1.5 sm:gap-4">
           <SceneSwitch />
+          <LlmSwitch className="hidden sm:flex" />
           <ModelMenu />
           <TokenChip active={tab === 'account'} onClick={() => onChange('account')} />
           <div className="flex items-center gap-1 sm:gap-2">
@@ -123,6 +125,45 @@ function SceneSwitch() {
             )}
             <Icon className="size-[15px]" strokeWidth={1.9} />
             <span className="hidden md:inline">{SCENE_LABEL[id]}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Переключатель DeepSeek: Flash (быстрее) / Pro (точнее размер, место и описание) — общий для всего сайта */
+function LlmSwitch({ className = '' }: { className?: string }) {
+  const { llm, setLlm } = useAccount()
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Модель DeepSeek"
+      title="DeepSeek: разбор сцены, размер и место объекта, инструкции для генерации"
+      className={`relative items-center gap-1 rounded-full p-1 ring-1 ring-fg/[0.08] ${className}`}
+    >
+      <span className="pl-1.5 pr-0.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-faint">DS</span>
+      {LLMS.map((m) => {
+        const active = m.id === llm
+        return (
+          <button
+            key={m.id}
+            role="radio"
+            aria-checked={active}
+            title={m.hint}
+            onClick={() => setLlm(m.id)}
+            className={`relative isolate rounded-full px-2.5 py-1 text-[12.5px] font-medium transition-colors duration-300 ${
+              active ? 'text-on-ink' : 'text-mute hover:text-ink'
+            }`}
+          >
+            {active && (
+              <motion.span
+                layoutId={`llm-pill${className.includes('sm:hidden') ? '-m' : ''}`}
+                className="absolute inset-0 -z-10 rounded-full bg-ink"
+                transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+              />
+            )}
+            {m.label}
           </button>
         )
       })}

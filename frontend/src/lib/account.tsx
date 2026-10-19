@@ -159,12 +159,23 @@ function fakeHistory(seed: string, usage: UsageDay[]): Activity[] {
   return out
 }
 
+// ---------- DeepSeek (разбор сцены, размер и место объекта, инструкции) ----------
+export type LlmId = 'deepseek-flash' | 'deepseek-v4-pro'
+
+export const LLMS: { id: LlmId; label: string; hint: string }[] = [
+  { id: 'deepseek-flash', label: 'Flash', hint: 'DeepSeek Flash — быстрее' },
+  { id: 'deepseek-v4-pro', label: 'Pro', hint: 'DeepSeek V4 Pro — точнее размер, место и описание, но медленнее' },
+]
+
 // ---------- контекст ----------
 interface AccountContextValue {
   balance: number
   plan: Plan
   model: ModelId
   setModel: (m: ModelId) => void
+  /** Модель DeepSeek для разбора сцены и инструкций (переключатель в шапке) */
+  llm: LlmId
+  setLlm: (m: LlmId) => void
   usage: UsageDay[]
   history: Activity[]
   /** Демо-пополнение без оплаты. */
@@ -184,6 +195,15 @@ const readModel = (): ModelId => {
   return 'klein-4b'
 }
 
+const LLM_KEY = 'inego.llm'
+const readLlm = (): LlmId => {
+  try {
+    const v = localStorage.getItem(LLM_KEY)
+    if (LLMS.some((m) => m.id === v)) return v as LlmId
+  } catch { /* storage недоступен */ }
+  return 'deepseek-flash'
+}
+
 interface Local {
   balance: number
   events: Activity[]
@@ -195,6 +215,7 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
   const key = `inego.wallet.${seed}`
 
   const [model, setModelState] = useState<ModelId>(readModel)
+  const [llm, setLlmState] = useState<LlmId>(readLlm)
   const [local, setLocal] = useState<Local>({ balance: 0, events: [] })
 
   useEffect(() => {
@@ -218,6 +239,11 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
   const setModel = useCallback((m: ModelId) => {
     setModelState(m)
     try { localStorage.setItem(MODEL_KEY, m) } catch { /* storage недоступен */ }
+  }, [])
+
+  const setLlm = useCallback((m: LlmId) => {
+    setLlmState(m)
+    try { localStorage.setItem(LLM_KEY, m) } catch { /* storage недоступен */ }
   }, [])
 
   const baseUsage = useMemo(() => fakeUsage(seed), [seed])
@@ -262,7 +288,7 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <AccountContext.Provider value={{ balance: local.balance, plan, model, setModel, usage, history, topUp, charge }}>
+    <AccountContext.Provider value={{ balance: local.balance, plan, model, setModel, llm, setLlm, usage, history, topUp, charge }}>
       {children}
     </AccountContext.Provider>
   )

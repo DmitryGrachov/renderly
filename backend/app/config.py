@@ -23,6 +23,8 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
+# модели DeepSeek, между которыми можно переключаться из шапки сайта (поле llm в запросах)
+DEEPSEEK_MODELS = [m.strip() for m in os.getenv("DEEPSEEK_MODELS", "deepseek-flash,deepseek-v4-pro").split(",") if m.strip()]
 
 # FLUX.2 [klein] (distilled) в ComfyUI: модель выбирается в запросе, VAE общий.
 # 9B закрыта лицензией BFL — ComfyUI скачает её только при заданном HF_TOKEN.

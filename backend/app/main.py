@@ -10,11 +10,11 @@ from . import comfy
 from . import inpaint as inpainting
 from .auth import current_user
 from .auth import router as auth_router
-from .config import CORS_ORIGINS, DEFAULT_MODEL, FLUX_MODELS, log
+from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, FLUX_MODELS, log
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
-from .prompting import warm_preset_analyses
+from .prompting import llm_model, warm_preset_analyses
 
 
 @asynccontextmanager
@@ -43,6 +43,12 @@ def check_scene(scene: str) -> None:
         raise HTTPException(400, f"Unknown scene: {scene}")
 
 
+@app.get("/api/llm-models")
+async def llm_models():
+    """Модели DeepSeek для переключателя в шапке."""
+    return {"models": DEEPSEEK_MODELS, "default": DEEPSEEK_MODEL}
+
+
 @app.get("/api/presets")
 async def presets(scene: str = "exterior"):
     check_scene(scene)
@@ -66,11 +72,16 @@ async def img2img(
     seed: int | None = Form(None, ge=0, lt=2**48),
     # FLUX.2 klein: klein-4b | klein-9b
     model: str = Form(DEFAULT_MODEL),
+    # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
+    llm: str = Form(DEEPSEEK_MODEL),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
     if model not in FLUX_MODELS:
         raise HTTPException(400, f"Unknown model: {model}")
+    if llm not in DEEPSEEK_MODELS:
+        raise HTTPException(400, f"Unknown llm: {llm}")
+    llm_model.set(llm)
     if preset not in PRESETS[scene]:
         raise HTTPException(400, f"Unknown preset: {preset}")
     if preset == "custom" and reference is None:
@@ -108,11 +119,16 @@ async def inpaint(
     prompt: str | None = Form(None, max_length=300),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
+    # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
+    llm: str = Form(DEEPSEEK_MODEL),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
     if model not in FLUX_MODELS:
         raise HTTPException(400, f"Unknown model: {model}")
+    if llm not in DEEPSEEK_MODELS:
+        raise HTTPException(400, f"Unknown llm: {llm}")
+    llm_model.set(llm)
     if mode not in ("edit", "remove"):
         raise HTTPException(400, f"Unknown mode: {mode}")
     if mode == "edit" and not (prompt and prompt.strip()):

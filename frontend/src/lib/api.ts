@@ -20,6 +20,8 @@ export interface Img2ImgRequest {
   keepSur?: boolean
   /** Модель на бэкенде: klein-4b | klein-9b */
   model?: string
+  /** Модель DeepSeek: deepseek-flash | deepseek-v4-pro */
+  llm?: string
   /** Сид генерации; не задан — случайный */
   seed?: number | null
   reference?: File | null
@@ -69,6 +71,7 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
   body.append('keep_bg', String(!!req.keepBg))
   body.append('keep_sur', String(!!req.keepSur))
   if (req.model) body.append('model', req.model)
+  if (req.llm) body.append('llm', req.llm)
   if (req.seed != null) body.append('seed', String(req.seed))
   if (req.reference) body.append('reference', req.reference)
 

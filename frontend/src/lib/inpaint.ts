@@ -26,6 +26,8 @@ export interface InpaintRequest {
   prompt?: string
   /** Модель на бэкенде: klein-4b | klein-9b */
   model?: string
+  /** Модель DeepSeek: deepseek-flash | deepseek-v4-pro */
+  llm?: string
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -66,6 +68,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   body.append('mode', req.mode)
   if (req.prompt) body.append('prompt', req.prompt)
   if (req.model) body.append('model', req.model)
+  if (req.llm) body.append('llm', req.llm)
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления
   const expected = 12000

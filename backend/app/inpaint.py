@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import random
+import re
 import uuid
 from collections import OrderedDict
 
@@ -24,7 +25,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, fit_size, to_png
 from .config import COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, log
-from .prompting import DEEPSEEK_API_KEY, _box, _chat, _data_url
+from .prompting import DEEPSEEK_API_KEY, _box, _chat, _data_url, llm_model
 
 CONTEXT = 1.0  # контекст вокруг маски: столько же от её размера с каждой стороны
 MIN_CROP = 512  # минимальная сторона кропа в пикселях исходника — модели нужен контекст
@@ -82,7 +83,8 @@ EDIT_SYSTEM = (
     "(bottom of the box where it touches the ground) at true scale. If the request changes something already "
     "there (material, colour, species, style of the same thing), its shape and position stay. If it turns into a "
     "different kind of object (a person into a dog, a tree into a lamp post), the old thing disappears completely "
-    "with its shadow and the new one gets its own true size standing at the same spot; then the instruction starts "
+    "with its shadow and the new one gets its own true size and its own natural pose (a dog on four legs, not "
+    "the upright pose of the person it replaces) standing at the same spot; then the instruction starts "
     "with what disappears. Measure "
     "the look of the whole frame: light direction and colour, shadow hardness and direction, ambient and sky "
     "colour, white balance, contrast, saturation, haze, depth of field, grain. Do not add anything the user did not "
@@ -102,7 +104,8 @@ EDIT_PROMPT = (
     "same colour as everything around it, with contact shadows and cast shadows of the same direction and "
     "softness as the other objects, reflections of the surrounding scene on glossy surfaces, the same colour "
     "grading, haze, sharpness, depth of field and grain. It is shown whole at its real size, never cut off. "
-    "Everything else stays exactly as in image 1."
+    "Do not add lens flares, glow, light leaks or haze that image 1 does not have. Everything else stays exactly "
+    "as in image 1."
 )
 # область правки подсвечена на image 1 — модель видит, где и какого размера рисовать, и не путает место по словам
 MARK_RULE = (
@@ -112,16 +115,33 @@ MARK_RULE = (
 )
 # с рамкой: модель держалась за маленькую заливку выделения и рисовала машину размером с собаку — размер говорим прямо
 MARK_BOX_RULE = (
-    " Image 2 is image 1 with a translucent red spot where the new element stands and a thin red outline of its full "
-    "size; it is only a guide: the new element fills that outline from edge to edge, it is not squeezed into the "
-    "small red spot. The result is based on the clean image 1: no red tint or outline anywhere, the ground and "
-    "surroundings keep their own colours."
+    " Image 2 is image 1 with a soft translucent red spot where the base of the new element stands. The spot marks "
+    "the place, not the size: the element has its true real-world size from the instruction and may extend far "
+    "beyond the spot. It is only a guide: do not draw any red frame, line, pole, ring or patch. The result is based "
+    "on the clean image 1, the ground and surroundings keep their own colours."
 )
+# второй прогон «детализации» (добавить / заменить): объект крупным планом, частичный шум
+# второй прогон (добавить / заменить): как в фотошопе — вырезать объект, перегенерировать крупно, вставить обратно
+REFINE_PROMPT = (
+    "Re-render the newly added element in image 1 as a sharp, complete, photorealistic close-up; it is: "
+    "{instruction}. Keep its pose, silhouette, size, position, colours and lighting, and fix every defect: a "
+    "missing, cut-off or blurry head or face, malformed or extra fingers and hands, missing or extra limbs, "
+    "semi-transparent or ghostly parts, smeared or melted details, parts cut off at an edge. It must be whole and "
+    "anatomically and physically correct, with crisp natural detail (face, hands, hair, fabric folds, leaves, "
+    "bark, materials) and the same sharpness, noise and grain as the surroundings. Everything else stays exactly as "
+    "in image 1."
+)
+REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечит полупрозрачность и шлейфы; на 6 уже меняется цвет одежды
+REFINE_PAD = 0.15  # поле вокруг объекта (доля его размера) — контекст для света и резкости
+# запас вверх для второго прогона (доля высоты объекта): если в первом не было головы, ей должно быть где появиться
+REFINE_HEADROOM = 0.15
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
 # запас вокруг размеченной области (доля её размера): объекту есть куда выйти за рамку, а не обрезаться о край маски
 EDIT_ROOM = 0.08
+# запас вверх (доля высоты рамки объекта): головы, кроны и верхушки фонарей выходят выше оценённой рамки
+EDIT_HEADROOM = 0.25
 # изменение того, что уже есть (материал, цвет, порода): форма и размер прежние — запас минимальный,
 # иначе модель «разращивает» объект (сакура больше дерева, которое заменяла)
 EDIT_ROOM_CHANGE = 0.03
@@ -131,6 +151,18 @@ EDIT_EDGE = 1 / 480
 REMOVE_EDGE = 1 / 160
 # порог изменения (0..255 по сглаженной картинке): во вклейку идёт только то, что модель действительно поменяла
 CHANGE_THRESHOLD = 22
+# «мостики» между клочками изменений (доля стороны кропа): крона берёзы, ветки, решётки остаются одним объектом
+CHANGE_BRIDGE = 0.015
+# цвет заливки разметки на подсказке (_highlight) и допуск «тонированного исходника» при зачистке
+MARK_COLOR = (255, 40, 60)
+TINT_RESID = 14
+# белёсая вуаль за новым объектом: структура совпадает с исходником (корреляция), но светлее и бледнее
+VEIL_NCC = 0.55
+VEIL_LIFT = 4  # насколько светлее исходника (0..255)
+VEIL_CONTRAST = 0.9  # контраст ниже этой доли исходного
+RED_WORDS = re.compile(r"красн|бордо|алый|алая|алое|вишн|кирпич|терракот|ржав|\bred\b|crimson|burgundy|brick")
+# якорная зона вокруг выделения (доля стороны рамки объекта): объект, начинающийся в ней, — тот, что просили
+ANCHOR_REACH = 0.25
 MAX_BOX_AREA = 0.6  # рамка объекта от DeepSeek — не больше этой доли кадра
 
 _described: OrderedDict[str, dict] = OrderedDict()
@@ -156,11 +188,13 @@ def _grow(mask: Image.Image, px: int) -> Image.Image:
 
 
 def _extend_down(mask: Image.Image, px: int, step: int) -> Image.Image:
-    """Маска, протянутая вниз на px: контактная тень у ног, колёс и основания почти всегда ниже обводки."""
+    """Маска, протянутая вниз на px (вверх — при px < 0): контактная тень у ног, колёс и основания почти всегда
+    ниже обводки; голова человека и крона дерева — выше рамки объекта."""
     out = mask
-    for dy in range(step, px + step, step):
+    sign = 1 if px >= 0 else -1
+    for d in range(step, abs(px) + step, step):
         shifted = Image.new("L", mask.size, 0)
-        shifted.paste(mask, (0, min(dy, px)))
+        shifted.paste(mask, (0, sign * min(d, abs(px))))
         out = ImageChops.lighter(out, shifted)
     return out
 
@@ -180,8 +214,8 @@ def _context_box(bbox: tuple[int, int, int, int], w: int, h: int) -> tuple[int, 
 
 
 def _highlight(crop: Image.Image, mask: Image.Image, opacity: float = 0.45) -> bytes:
-    """Кроп с красной подсветкой и контуром выделенной области — для DeepSeek и как image 1 правки."""
-    tint = Image.new("RGB", crop.size, (255, 40, 60))
+    """Кроп с красной подсветкой и контуром выделенной области — для DeepSeek (и подсказка при «изменить»)."""
+    tint = Image.new("RGB", crop.size, MARK_COLOR)
     out = Image.composite(Image.blend(crop, tint, opacity), crop, mask)
     edge = ImageChops.subtract(_grow(mask, max(2, min(crop.size) // 200)), mask)
     ImageDraw.Draw(out).bitmap((0, 0), edge, fill=(255, 0, 40))
@@ -199,7 +233,7 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
     fallback = REMOVE_FALLBACK | ({"object": hint} if hint else {})
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(highlighted + hint.encode()).hexdigest()
+    key = hashlib.sha256(highlighted + hint.encode() + llm_model.get().encode()).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
@@ -240,7 +274,8 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
 
 
 def build_workflow(
-    crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str, reference: str | None = None
+    crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str,
+    reference: str | None = None, steps: int = TOTAL_STEPS,
 ) -> dict:
     """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
     files = FLUX_MODELS[model]
@@ -267,7 +302,8 @@ def build_workflow(
         wf["ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["ref_img", 0], "vae": ["vae", 0]}}
         wf["cond_ref"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["ref_lat", 0]}}
         positive = ["cond_ref", 0]
-    image = _sampling(wf, "", positive, ["noise_lat", 0], width, height, TOTAL_STEPS, seed, model=["diffdiff", 0])
+    # steps < TOTAL_STEPS — хвост расписания: стартует с латента кропа (второй прогон «детализации»)
+    image = _sampling(wf, "", positive, ["noise_lat", 0], width, height, steps, seed, model=["diffdiff", 0])
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": f"inego/{prefix}"}}
     return wf
 
@@ -303,7 +339,51 @@ def _reconstruct(seed: "np.ndarray", allowed: "np.ndarray") -> "np.ndarray":
         region = grown
 
 
-def _changed(orig: Image.Image, patch: Image.Image, seed: Image.Image, allowed: Image.Image) -> Image.Image:
+def _shrink(mask: Image.Image, px: int) -> Image.Image:
+    """Сжатие бинарной маски на ~px (обратное _grow)."""
+    return ImageChops.invert(_grow(ImageChops.invert(mask), px))
+
+
+def _label(m: "np.ndarray") -> tuple["np.ndarray", int]:
+    """Связные области бинарной маски (4-связность) — номера 1..n."""
+    import numpy as np
+
+    lab = np.zeros(m.shape, dtype=np.int32)
+    n = 0
+    rest = m.copy()
+    while rest.any():
+        n += 1
+        y, x = np.argwhere(rest)[0]
+        seed = np.zeros_like(rest)
+        seed[y, x] = True
+        comp = _reconstruct(seed, rest)
+        lab[comp] = n
+        rest &= ~comp
+        if n > 200:  # обрывков слишком много — это не контур, а шум
+            break
+    return lab, n
+
+
+def _dilate(m: "np.ndarray", r: int) -> "np.ndarray":
+    """Расширение бинарной маски на r пикселей (8-связность)."""
+    m = m.copy()
+    for _ in range(r):
+        g = m.copy()
+        g[1:] |= m[:-1]
+        g[:-1] |= m[1:]
+        g[:, 1:] |= m[:, :-1]
+        g[:, :-1] |= m[:, 1:]
+        g[1:, 1:] |= m[:-1, :-1]
+        g[:-1, :-1] |= m[1:, 1:]
+        g[1:, :-1] |= m[:-1, 1:]
+        g[:-1, 1:] |= m[1:, :-1]
+        m = g
+    return m
+
+
+def _changed(
+    orig: Image.Image, patch: Image.Image, seed: Image.Image, allowed: Image.Image, anchor: Image.Image | None = None
+) -> Image.Image:
     """Маска вклейки: размеченная область + всё, что модель заметно изменила и что с ней связано (без дыр).
 
     Так в результат попадает и часть объекта, вышедшая за разметку (капот машины, крона), а перерисованный
@@ -319,7 +399,16 @@ def _changed(orig: Image.Image, patch: Image.Image, seed: Image.Image, allowed: 
     diff = np.abs(a - b).max(-1) > CHANGE_THRESHOLD
     core = np.asarray(seed.resize(small, Image.BILINEAR)) > 127
     room = np.asarray(allowed.resize(small, Image.BILINEAR)) > 127
-    region = _reconstruct(core, (diff & room) | core)
+    # ажурные объекты (крона берёзы, ветки, решётки) по пикселям распадаются на клочки, связанные тонкими
+    # ветками или вовсе разорванные небом — без «мостиков» во вклейку попадал только ствол. Изменения
+    # расширяются на CHANGE_BRIDGE размера, и связность считается уже по ним
+    bridged = _dilate(diff & room, max(2, round(CHANGE_BRIDGE * max(small)))) & room
+    # якорь: модель ставит объект чуть в стороне от маленького выделения (ствол берёзы в 80 px от кружка) —
+    # объект «свой», если начинается в якорной зоне; пустой газон в ней не вклеивается, только изменения
+    start = core
+    if anchor is not None:
+        start = core | (bridged & (np.asarray(anchor.resize(small, Image.BILINEAR)) > 127))
+    region = _reconstruct(start, bridged | core)
     # дыры внутри объекта (где его цвет совпал с фоном) — тоже объект
     border = np.zeros_like(region)
     border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
@@ -327,6 +416,124 @@ def _changed(orig: Image.Image, patch: Image.Image, seed: Image.Image, allowed: 
     region |= ~outside
     log.info("вклейка: разметка %.1f%%, с изменениями вокруг %.1f%% кропа", 100 * core.mean(), 100 * region.mean())
     return Image.fromarray((region * 255).astype(np.uint8)).resize(size, Image.BILINEAR).point(lambda v: 255 if v > 127 else 0)
+
+
+def _box_mean(a: "np.ndarray", r: int) -> "np.ndarray":
+    """Среднее по окну (2r+1)² через кумулятивные суммы."""
+    import numpy as np
+
+    k = 2 * r + 1
+    c = np.pad(np.pad(a, r, mode="edge").cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    return (c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]) / (k * k)
+
+
+def _unleak(
+    patch: Image.Image, crop: Image.Image, gen: Image.Image, core: Image.Image, extra: Image.Image | None
+) -> Image.Image:
+    """Убирает протёкшую разметку подсказки и не трогает красные объекты.
+
+    Модель иногда перерисовывает подсказку в результат: заливку — тонированным красным фоном (диск на газоне),
+    контур — тонкими красными линиями, часто со смещением (вокруг машины, на бордюре, штрихи на газоне).
+      - тонированный фон: красный, а структура совпадает с исходником (та же трава, тот же фасад);
+      - контур: тонкие линии насыщенного чисто-красного оттенка, не прилегающие к красному пятну.
+    Красный объект (купол парашюта, футболка, машина) — новая структура и пятно, его полосы и швы к нему
+    прилегают: не трогается. Кожа и терракота оранжевее и менее насыщены. Найденное заменяется исходным.
+    """
+    import numpy as np
+
+    area = np.asarray(gen) > 127
+    p = np.asarray(patch, dtype=np.int16)
+    o = np.asarray(crop, dtype=np.int16)
+    red_p = p[..., 0] - p[..., 1:].max(-1)
+    red_o = o[..., 0] - o[..., 1:].max(-1)
+
+    # 1) тонированный исходник: покраснело, а окна, швы, травинки на месте
+    lo = np.asarray(crop.convert("L"), dtype=np.float32)
+    lp = np.asarray(patch.convert("L"), dtype=np.float32)
+    r = max(3, round(min(lo.shape) / 160))
+    mo, mp = _box_mean(lo, r), _box_mean(lp, r)
+    vo = np.maximum(_box_mean(lo * lo, r) - mo * mo, 0)
+    vp = np.maximum(_box_mean(lp * lp, r) - mp * mp, 0)
+    ncc = (_box_mean(lo * lp, r) - mo * mp) / np.sqrt(vo * vp + 1e-3)
+    # и цвет — ровно смесь исходника с цветом разметки: p ≈ o + a·(MARK − o). Полупрозрачный оранжевый купол,
+    # сквозь который видно фасад, по структуре тоже похож на исходник, но в такую смесь не укладывается
+    mark = np.array(MARK_COLOR, dtype=np.float32)
+    of, pf = o.astype(np.float32), p.astype(np.float32)
+    d = mark - of
+    alpha = ((pf - of) * d).sum(-1) / ((d * d).sum(-1) + 1e-3)
+    resid = np.sqrt(((pf - (of + alpha[..., None] * d)) ** 2).mean(-1))
+    resid = _box_mean(resid, 2)
+    tinted = (alpha > 0.15) & (alpha < 0.9) & (resid < TINT_RESID)
+    tint_leak = area & tinted & (red_p - red_o > 40) & (ncc > 0.5) & (np.sqrt(vo) > 3)
+
+    # 2) тонкие линии разметки, не прилегающие к красному пятну
+    hsv = np.asarray(patch.convert("HSV"), dtype=np.int16)
+    h, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    pure_red = area & ((h < 9) | (h > 235)) & (sat > 140) & (val > 60) & (red_p - red_o > 40)
+    objects = np.zeros_like(area)  # красные пятна — объекты (купол, футболка) с прилегающими швами и полосами
+    line_leak = np.zeros_like(area)
+    if pure_red.any():
+        w = max(2, min(crop.size) // 250)
+        blobs = _dilate(~_dilate(~pure_red, w), w)  # размыкание: пятна шире 2w
+        lines = pure_red & ~blobs
+        attached = _reconstruct(_dilate(blobs, w) & lines, lines) if blobs.any() else np.zeros_like(lines)
+        line_leak = lines & ~attached
+        objects = _dilate(blobs | attached, w)
+    # у края выделения и контура рамки разметка перерисовывается и красно-оранжевым (смешана с травой, JPEG):
+    # там допуск по оттенку шире, но только для длинных линий — обрывок руки или пальцы так не выглядят
+    edge_w = max(3, round(0.03 * min(crop.size)))
+    near = _grow(ImageChops.subtract(_grow(core, edge_w), _shrink(core, edge_w)), 1)
+    if extra is not None:
+        near = ImageChops.lighter(near, ImageChops.subtract(_grow(extra, edge_w), _shrink(extra, edge_w)))
+    near = np.asarray(near) > 127
+    warm = area & near & ((h <= 22) | (h > 235)) & (sat > 85) & (val > 60) & (red_p - red_o > 30) & ~objects
+    if warm.any():
+        long_lines = np.zeros_like(warm)
+        lab, n = _label(warm)
+        min_len = 0.06 * min(crop.size)
+        for i in range(1, n + 1):
+            ys, xs = np.nonzero(lab == i)
+            if max(np.ptp(xs), np.ptp(ys)) >= min_len:
+                long_lines |= lab == i
+        line_leak |= long_lines
+    # края тонировки, где тон смешался с тенью и смесь сошлась хуже: красноватое, связанное с ней,
+    # но не заходя в красные объекты (иначе зачистка выедала край купола)
+    if tint_leak.any():
+        reddish = area & (red_p - red_o > 25) & (ncc > 0.3) & ~objects
+        tint_leak = _reconstruct(tint_leak & ~objects, tint_leak | reddish)
+    leak = tint_leak | line_leak
+    if leak.sum() < 20:
+        return patch
+    m = Image.fromarray((leak * 255).astype(np.uint8))
+    m = _grow(m, 2).filter(ImageFilter.GaussianBlur(1.5))
+    log.info("зачистка разметки: %d px", int(leak.sum()))
+    return Image.composite(crop, patch, m)
+
+
+def _unveil(patch: Image.Image, crop: Image.Image, gen: Image.Image) -> Image.Image:
+    """Снимает белёсую вуаль, которой модель заливает фон за новым объектом (фасад за парашютистом).
+
+    Вуаль — тот же фон, только светлее и бледнее: окна и швы на месте (структура совпадает с исходником,
+    корреляция высокая), но яркость выше, а контраст ниже. Там возвращаются исходные пиксели. Новый объект
+    по структуре на фон не похож — остаётся; тени темнят, а не высветляют, — тоже остаются.
+    """
+    import numpy as np
+
+    o = np.asarray(crop.convert("L"), dtype=np.float32)
+    p = np.asarray(patch.convert("L"), dtype=np.float32)
+    r = max(3, round(min(o.shape) / 160))
+    mo, mp = _box_mean(o, r), _box_mean(p, r)
+    vo = np.maximum(_box_mean(o * o, r) - mo * mo, 0)
+    vp = np.maximum(_box_mean(p * p, r) - mp * mp, 0)
+    ncc = (_box_mean(o * p, r) - mo * mp) / np.sqrt(vo * vp + 1e-3)
+    so, sp = np.sqrt(vo), np.sqrt(vp)
+    veil = (ncc > VEIL_NCC) & (mp - mo > VEIL_LIFT) & (sp < VEIL_CONTRAST * so) & (so > 3)
+    veil &= np.asarray(gen) > 127
+    if veil.sum() < 0.002 * veil.size:
+        return patch
+    m = Image.fromarray((veil * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.GaussianBlur(2))
+    log.info("снята вуаль: %.1f%% кропа", 100 * veil.mean())
+    return Image.composite(crop, patch, m)
 
 
 class _Region:
@@ -343,17 +550,29 @@ class _Region:
         gen = mark
         if room:
             x1, y1, x2, y2 = mark.getbbox()
-            gen = _grow(mark, max(grow, round(room * max(x2 - x1, y2 - y1))))
+            pad = max(grow, round(room * max(x2 - x1, y2 - y1)))
+            if extra is not None:
+                # верх высоких объектов (голова, крона, фонарь) уходит выше рамки DeepSeek — запас вверх больше,
+                # иначе голову срезает край области генерации, и вместо неё остаётся фон («призрак»)
+                ex1, ey1, ex2, ey2 = extra.getbbox()
+                gen = _extend_down(gen, -round(EDIT_HEADROOM * (ey2 - ey1)), pad)
+            gen = _grow(gen, pad)
         self.box = _context_box(gen.getbbox(), w, h)
         self.crop, self.mask, self.gen = src.crop(self.box), mark.crop(self.box), gen.crop(self.box)
         # выделение пользователя и рамка объекта по отдельности — для подсветки на image 1
         self.core = mask.crop(self.box)
         self.extra = extra.crop(self.box) if extra is not None else None
+        # якорная зона: выделение + четверть размера рамки — объект, начинающийся здесь, вклеивается целиком
+        self.anchor = None
+        if extra is not None:
+            x1, y1, x2, y2 = extra.getbbox()
+            self.anchor = _grow(mask, max(grow, round(ANCHOR_REACH * max(x2 - x1, y2 - y1)))).crop(self.box)
         self.room = bool(room)
         self.gen_size = fit_size(*self.crop.size, INPAINT_MEGAPIXELS)
 
     async def generate(
-        self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None
+        self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
+        unleak: bool = False, unveil: bool = False, refine: str | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении."""
         gw, gh = self.gen_size
@@ -373,16 +592,68 @@ class _Region:
         # вклейка: маска (а с запасом — и связные с ней изменения) с растушёвкой наружу — шов ложится на уже
         # перерисованную кромку
         patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(self.crop.size, Image.LANCZOS)
+        if unleak:
+            patch = _unleak(patch, self.crop, self.gen, self.core, self.extra)
+        if unveil:
+            patch = _unveil(patch, self.crop, self.gen)
         # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
         # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
-        keep = _changed(self.crop, patch, self.core, self.gen) if self.room else self.mask
+        keep = _changed(self.crop, patch, self.core, self.gen, self.anchor) if self.room else self.mask
         feather = max(2, self.grow // 2)
         alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
         result.paste(patch, self.box[:2], alpha)
+        if refine and self.room:
+            obj = Image.new("L", self.src.size, 0)
+            obj.paste(keep, self.box[:2])
+            result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
+
+
+async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int, model: str, scale1: float) -> Image.Image:
+    """Второй прогон: как в фотошопе — объект вырезается, перегенерируется крупно отдельно и вставляется обратно.
+
+    Первый прогон вписывает объект в сцену (место, размер, перспектива, свет), но видит его в кропе с контекстом:
+    мелкому объекту достаётся мало пикселей, отсюда каша вместо лица, кривые руки, «призраки». Здесь кроп — только
+    объект с полем, растянутый до ~1 Мп; модель перерисовывает его на REFINE_STEPS из TOTAL_STEPS (силуэт, поза,
+    место и свет — от первого прогона) с явным списком дефектов. Лечит то, что в объекте уже есть: размытое лицо
+    и руки, полупрозрачные части, смазанные шлейфы. Недостающую часть (голову) не дорисует: образец — результат
+    первого прогона, и модель редактирования его воспроизводит. Вклеивается то, что перерисовано и связано с объектом.
+    """
+    bbox = obj.getbbox()
+    if not bbox:
+        return result
+    w, h = result.size
+    x1, y1, x2, y2 = bbox
+    pad = max(16, round(REFINE_PAD * max(x2 - x1, y2 - y1)))
+    box = (max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad))
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    gw, gh = fit_size(bw, bh, INPAINT_MEGAPIXELS)
+    crop, mask = result.crop(box), obj.crop(box)
+    grow = max(2, round(0.02 * max(bw, bh)))
+    room = _grow(_extend_down(mask, -round(REFINE_HEADROOM * (y2 - y1)), grow), grow)
+    soft = room.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, min(gw, gh) // 200)))
+    log.info(
+        "второй прогон: объект %dx%d → %dx%d (×%.1f пикселей к первому), шагов %d из %d",
+        bw, bh, gw, gh, (gw / bw) / scale1, REFINE_STEPS, TOTAL_STEPS,
+    )
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+        mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
+        out = await _run(
+            client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, "refine", steps=REFINE_STEPS)
+        )
+    if "save" not in out:
+        return result
+    refined = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((bw, bh), Image.LANCZOS)
+    # объект целиком + то, что перерисовано и связано с ним (дорисованная голова), — фон запаса остаётся прежним
+    keep = _changed(crop, refined, mask, room)
+    alpha = ImageChops.lighter(_grow(keep, grow).filter(ImageFilter.GaussianBlur(max(1, grow / 2))), keep)
+    result = result.copy()
+    result.paste(refined, box[:2], alpha)
+    return result
 
 
 async def run_remove(
@@ -434,17 +705,15 @@ def _box_mask(box: list[float], src: Image.Image, core: Image.Image) -> Image.Im
 
 
 def _mark(crop: Image.Image, core: Image.Image, extra: Image.Image | None) -> Image.Image:
-    """image 1 правки: выделение — полупрозрачной заливкой, рамка объекта — только контуром.
+    """image 2 правки (подсказка): только место — мягкое полупрозрачное пятно на выделении, без линий и рамки.
 
-    Заливка большой рамки «протекала» в результат (терракотовая плитка под машиной), контур такого не даёт,
-    а размер модель по нему держит.
+    Чёткие красные линии модель «овеществляла» (обводка → красное кольцо на газоне, контур рамки → красная
+    металлическая дуга), а заливка всей рамки протекала (люди в красном, красная дорожка под ними). Размер объекта
+    задаёт текст инструкции (натуральный размер относительно соседей), место для него — область генерации.
     """
-    out = Image.open(io.BytesIO(_highlight(crop, core, EDIT_MARK_OPACITY))).convert("RGB")
-    if extra is not None:
-        width = max(2, min(crop.size) // 250)
-        edge = ImageChops.subtract(_grow(extra, width), extra)
-        ImageDraw.Draw(out).bitmap((0, 0), edge, fill=(255, 0, 40))
-    return out
+    feather = max(3, min(crop.size) // 80)
+    soft = core.filter(ImageFilter.GaussianBlur(feather))
+    return Image.composite(Image.blend(crop, Image.new("RGB", crop.size, MARK_COLOR), EDIT_MARK_OPACITY), crop, soft)
 
 
 # слова-команды в начале запроса правки: задают тип явно, DeepSeek им не перечит
@@ -487,7 +756,7 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
     }
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(frame + b"edit" + request.encode() + (kind or "").encode()).hexdigest()
+    key = hashlib.sha256(frame + b"edit" + request.encode() + (kind or "").encode() + llm_model.get().encode()).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
@@ -557,10 +826,18 @@ async def run_edit(
     if add and what.get("box") and extra is None:
         log.warning("Рамка объекта отброшена (слишком мала или во весь кадр): %s", what["box"])
     r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
-    prompt = EDIT_PROMPT.format(**what) + ((MARK_BOX_RULE if extra is not None else MARK_RULE) if EDIT_MARK else "")
+    # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
+    # дорожки на земле); место задаёт область генерации — рамка в натуральную величину, размер — текст инструкции.
+    # Разметка остаётся только для «изменить» и когда рамки нет: там она показывает, что именно меняется
+    mark = EDIT_MARK and extra is None
+    prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
     log.info(
         "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
         model, *src.size, r.box, *r.gen_size, seed, what.get("kind"), what.get("box") if extra else None, request, prompt,
     )
-    reference = _mark(r.crop, r.core, r.extra) if EDIT_MARK else None
-    return await r.generate(prompt, seed, model, "edit", EDIT_EDGE, reference), seed
+    reference = _mark(r.crop, r.core, r.extra) if mark else None
+    # зачистка протёкшей разметки — если сам запрос не про красное (красная машина пострадала бы)
+    unleak = mark and not RED_WORDS.search(request.lower())
+    # снятие белёсой вуали — только при добавлении и замене; при «изменить» перекраска того же объекта и есть цель
+    refine = REFINE_PROMPT.format(instruction=what["instruction"].rstrip(".")) if add else None
+    return await r.generate(prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine), seed

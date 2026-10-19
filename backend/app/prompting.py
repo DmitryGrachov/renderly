@@ -17,11 +17,15 @@ import io
 import json
 import logging
 from collections import OrderedDict
+from contextvars import ContextVar
 
 import httpx
 from PIL import Image
 
 from .config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL
+
+# модель DeepSeek текущего запроса (переключатель Flash / Pro в шапке); по умолчанию — из DEEPSEEK_MODEL
+llm_model: ContextVar[str] = ContextVar("llm_model", default=DEEPSEEK_MODEL)
 from .presets import PRESETS, reference_image
 
 log = logging.getLogger("inego")
@@ -205,7 +209,7 @@ def _data_url(image: bytes, max_side: int = 1536) -> str:
 
 
 async def _chat(messages: list[dict], json_mode: bool = False) -> str:
-    body = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0}
+    body = {"model": llm_model.get(), "messages": messages, "temperature": 0}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=120) as client:
@@ -224,7 +228,7 @@ def _clean(v) -> str:
 
 async def analyze_reference(reference: bytes) -> dict:
     """Подробный разбор референса по разделам ANALYSIS_FIELDS (пустые разделы отброшены)."""
-    key = hashlib.sha256(reference).hexdigest()
+    key = hashlib.sha256(reference + llm_model.get().encode()).hexdigest()
     if key in _analysis:
         _analysis.move_to_end(key)
         return _analysis[key]
@@ -446,7 +450,7 @@ async def build_prompt(
 
     h = hashlib.sha256(image)
     h.update(hashlib.sha256(reference or b"").digest())
-    h.update(json.dumps([scene, preset, materials, keep, "v6"]).encode())
+    h.update(json.dumps([scene, preset, materials, keep, "v6", llm_model.get()]).encode())
     key = h.hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
