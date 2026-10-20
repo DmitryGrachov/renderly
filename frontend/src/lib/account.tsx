@@ -62,7 +62,7 @@ export const MODELS: Model[] = [
     id: 'qwen-image-2.1',
     name: 'Qwen-Image 2.1 Turbo',
     tag: '7B · 8 шагов',
-    description: 'Новейшая Qwen (сентябрь 2026): правка по маске, компактнее и быстрее 2511. Только Inpainting.',
+    description: 'Новейшая Qwen (сентябрь 2026): правка по маске, компактнее и быстрее 2511. Только Inpainting. Лицензия некоммерческая.',
     cost: 5,
     speed: 3,
     quality: 5,

@@ -49,7 +49,7 @@ QWEN_EDIT = {
     "steps": int(os.getenv("QWEN_EDIT_STEPS", "4")),
     "shift": float(os.getenv("QWEN_EDIT_SHIFT", "3.1")),
 }
-# Qwen-Image-2.1 Turbo (Apache 2.0, 7B, сентябрь 2026) — только Inpainting: int8, 8 шагов по фиксированному расписанию
+# Qwen-Image-2.1 Turbo (7B, сентябрь 2026; Qwen Research License — только некоммерческое использование) — только Inpainting: int8, 8 шагов по фиксированному расписанию
 QWEN21_MODEL = "qwen-image-2.1"
 QWEN21 = {
     "unet": os.getenv("QWEN21_UNET", "qwen_image_2.1_turbo_int8_convrot.safetensors"),

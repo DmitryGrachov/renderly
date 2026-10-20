@@ -276,7 +276,22 @@ async def _upload(client: httpx.AsyncClient, data: bytes, name: str) -> str:
 
 
 async def _run(client: httpx.AsyncClient, workflow: dict) -> dict[str, bytes]:
-    """Выполняет workflow, возвращает {id SaveImage-нода: PNG}."""
+    """Выполняет workflow, возвращает {id SaveImage-нода: PNG}.
+
+    Нехватка видеопамяти — один повтор: после OOM ComfyUI выгружает модели, и тот же workflow обычно проходит
+    (Qwen-Image-2.1 на 2 Мп с длинным запросом впритык помещается в 16 ГБ).
+    """
+    try:
+        return await _run_once(client, workflow)
+    except ComfyError as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        log.warning("ComfyUI: нехватка видеопамяти — освобождаю память и повторяю")
+        await client.post("/free", json={"unload_models": True, "free_memory": True})
+        return await _run_once(client, workflow)
+
+
+async def _run_once(client: httpx.AsyncClient, workflow: dict) -> dict[str, bytes]:
     r = await client.post("/prompt", json={"prompt": workflow, "client_id": uuid.uuid4().hex})
     if r.status_code != 200:
         raise ComfyError(f"ComfyUI отклонил workflow: {r.text[:500]}")

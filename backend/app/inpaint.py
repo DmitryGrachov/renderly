@@ -13,6 +13,7 @@
 """
 
 import hashlib
+from pathlib import Path
 import io
 import json
 import random
@@ -875,6 +876,9 @@ async def run_remove(
     if native:
         tpl = Q21_REMOVE_PROMPT if model == QWEN21_MODEL else Q2511_REMOVE_PROMPT
         prompt = tpl.format(**what) + (Q21_KEEP.format(keep=what["keep"]) if what.get("keep") else "")
+    if model == QWEN21_MODEL:
+        request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
+        prompt = await rewrite_q21(r.crop, r.mask, "remove", request) or prompt
     log.info(
         "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
         model, *r.src.size, r.box, *r.gen_size, seed, what.get("shadow"), prompt,
@@ -913,6 +917,66 @@ def _mark(crop: Image.Image, core: Image.Image, extra: Image.Image | None) -> Im
     feather = max(3, min(crop.size) // 80)
     soft = core.filter(ImageFilter.GaussianBlur(feather))
     return Image.composite(Image.blend(crop, Image.new("RGB", crop.size, MARK_COLOR), EDIT_MARK_OPACITY), crop, soft)
+
+
+# Официальный системный промпт переписчика правок Qwen-Image-2.1 (QwenLM/Qwen-Image-2.1, prompt_rewrite/prompts/
+# system_prompt_edit.txt; Qwen Research License — некоммерческое использование). Модель обучена на запросах, которые
+# пишет этот переписчик; его роль у нас играет DeepSeek — свой Qwen3.5-переписчик не ставим
+Q21_REWRITE_SYSTEM = (Path(__file__).parent / "prompts" / "qwen21_edit_rewrite.txt").read_text(encoding="utf-8")
+# что переписчик узнаёт о маске и задаче — инструкция пользователя идёт следом как есть
+Q21_TASK = {
+    "add": (
+        "<image1> is the photo to edit. <image2> is a mask: its white area marks where the new element stands and how "
+        "big it is (the element stands on the ground at the bottom of the white area, at its true real-world size); "
+        "everything outside the white area of <image1> stays unchanged, and inside it only the new element and its "
+        "own shadow appear. Edit request"
+    ),
+    "change": (
+        "<image1> is the photo to edit. <image2> is a mask: its white area marks what to change; everything outside "
+        "the white area of <image1> stays unchanged. Edit request"
+    ),
+    "remove": (
+        "<image1> is the photo to edit. <image2> is a mask: its white area marks what to remove (with its shadow) and "
+        "fill with the background that continues around it; everything outside the white area of <image1> stays "
+        "unchanged. Edit request"
+    ),
+}
+
+
+async def rewrite_q21(crop: Image.Image, mask: Image.Image, task: str, request: str) -> str | None:
+    """Запрос для Qwen-Image-2.1 так, как его пишет официальный переписчик: DeepSeek с их системным промптом,
+    картинками <image1> (кроп) и <image2> (ч/б маска) и инструкцией пользователя. None — переписать не удалось."""
+    if not DEEPSEEK_API_KEY:
+        return None
+    instruction = f"{Q21_TASK[task]}: «{request}»"
+    crop_png, mask_png = to_png(crop), to_png(mask.convert("RGB"))
+    key = hashlib.sha256(crop_png + mask_png + instruction.encode() + llm_model.get().encode()).hexdigest()
+    if key in _described:
+        _described.move_to_end(key)
+        return _described[key]["prompt"]
+    messages = [
+        {"role": "system", "content": Q21_REWRITE_SYSTEM},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": _data_url(crop_png, 1536)}},
+                {"type": "image_url", "image_url": {"url": _data_url(mask_png, 1024)}},
+                {"type": "text", "text": instruction},
+            ],
+        },
+    ]
+    try:
+        data = json.loads(await _chat(messages, json_mode=True))
+        text = " ".join(str(data.get("rewritten_prompt") or data.get("rewrited_prompt") or "").split())
+    except Exception as e:  # noqa: BLE001 — без переписчика остаётся шаблон
+        log.warning("Переписчик Qwen-Image-2.1 (DeepSeek) недоступен: %s", e)
+        return None
+    if not text:
+        return None
+    _described[key] = {"prompt": text}
+    if len(_described) > CACHE_SIZE:
+        _described.popitem(last=False)
+    return text
 
 
 def _outline(crop: Image.Image, area: Image.Image) -> Image.Image:
@@ -1041,8 +1105,11 @@ async def run_edit(
     native = model in (QWEN21_MODEL, QWEN_EDIT_MODEL)
     mark = EDIT_MARK and extra is None and not native
     if model == QWEN21_MODEL:
-        # 2.1: место и размер — ч/б маской вторым входом (выделение + рамка объекта), без красной подсказки
-        prompt = Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
+        # 2.1: место и размер — ч/б маской вторым входом (выделение + рамка объекта); запрос — официальный
+        # переписчик Qwen в исполнении DeepSeek, шаблон — запасной вариант
+        prompt = await rewrite_q21(
+            r.crop, r.mask, "add" if extra is not None else "change", request.strip()
+        ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
     elif native:
         # 2511: место и размер — красным контуром на Picture 2
         prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
