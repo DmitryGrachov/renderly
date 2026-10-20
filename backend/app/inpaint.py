@@ -924,33 +924,62 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
         return result
     w, h = result.size
     x1, y1, x2, y2 = bbox
-    pad = max(16, round(REFINE_PAD * max(x2 - x1, y2 - y1)))
-    box = (max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad))
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    gw, gh = fit_size(bw, bh, INPAINT_MEGAPIXELS)
-    crop, mask = result.crop(box), obj.crop(box)
-    grow = max(2, round(0.02 * max(bw, bh)))
-    room = _grow(_extend_down(mask, -round(REFINE_HEADROOM * (y2 - y1)), grow), grow)
-    soft = room.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, min(gw, gh) // 200)))
-    log.info(
-        "второй прогон: объект %dx%d → %dx%d (×%.1f пикселей к первому), шагов %d из %d",
-        bw, bh, gw, gh, (gw / bw) / scale1, REFINE_STEPS, TOTAL_STEPS,
-    )
-    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
-        crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-        mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
-        out = await _run(
-            client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, "refine", steps=REFINE_STEPS)
+    # модель второго прогона может перерисовать объект чуть крупнее и выше: если он упёрся в край кропа (не кадра),
+    # прогон повторяется с удвоенным запасом, а если и тогда — остаётся целый объект первого прогона
+    # (раньше вклеивался срезанный ровной линией верх тента зонта)
+    for scale in (1, 2):
+        pad = max(16, round(scale * REFINE_PAD * max(x2 - x1, y2 - y1)))
+        box = (max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad))
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        gw, gh = fit_size(bw, bh, INPAINT_MEGAPIXELS)
+        crop, mask = result.crop(box), obj.crop(box)
+        grow = max(2, round(0.02 * max(bw, bh)))
+        room = _grow(_extend_down(mask, -round(scale * REFINE_HEADROOM * (y2 - y1)), grow), grow)
+        soft = room.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, min(gw, gh) // 200)))
+        log.info(
+            "второй прогон: объект %dx%d → %dx%d (×%.1f пикселей к первому), шагов %d из %d, запас ×%d",
+            bw, bh, gw, gh, (gw / bw) / scale1, REFINE_STEPS, TOTAL_STEPS, scale,
         )
-    if "save" not in out:
+        async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+            crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+            mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
+            out = await _run(
+                client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, "refine", steps=REFINE_STEPS)
+            )
+        if "save" not in out:
+            return result
+        refined = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((bw, bh), Image.LANCZOS)
+        # объект целиком + то, что перерисовано и связано с ним (дорисованная голова), — фон запаса остаётся прежним
+        keep = _changed(crop, refined, mask, room)
+        cut = _touches_edge(keep, box, (w, h))
+        if not cut:
+            break
+        log.info("второй прогон: объект упёрся в край кропа (%s)%s", cut, " — повтор с большим запасом" if scale == 1 else
+                 " — оставляю первый прогон")
+    else:
         return result
-    refined = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((bw, bh), Image.LANCZOS)
-    # объект целиком + то, что перерисовано и связано с ним (дорисованная голова), — фон запаса остаётся прежним
-    keep = _changed(crop, refined, mask, room)
     alpha = ImageChops.lighter(_grow(keep, grow).filter(ImageFilter.GaussianBlur(max(1, grow / 2))), keep)
     result = result.copy()
     result.paste(refined, box[:2], alpha)
     return result
+
+
+def _touches_edge(keep: Image.Image, box: tuple[int, int, int, int], size: tuple[int, int]) -> str:
+    """Стороны кропа (не совпадающие с краем кадра), в которые упирается вклеиваемый объект: «верх, слева»; пусто — нет."""
+    import numpy as np
+
+    k = np.asarray(keep) > 127
+    hh, ww = k.shape
+    band = max(2, round(0.01 * max(hh, ww)))
+    need = max(4, round(0.01 * min(hh, ww)))  # больше пары пикселей шва
+    sides = []
+    if box[1] > 0 and k[:band].any(0).sum() >= need:
+        sides.append("верх")
+    if box[0] > 0 and k[:, :band].any(1).sum() >= need:
+        sides.append("слева")
+    if box[2] < size[0] and k[:, -band:].any(1).sum() >= need:
+        sides.append("справа")
+    return ", ".join(sides)
 
 
 async def run_remove(
