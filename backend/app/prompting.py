@@ -132,11 +132,20 @@ Q21_REF_ROLE = (
     "Image 2 is a real reference photograph that supplies only the environment and the light: its sky, sun, shadows, "
     "atmosphere, vegetation, colour grading and photographic look."
 )
-# усиление реализма: 2.1 держит медиум входа, поэтому «как снято сенсором» — отдельной фразой
+# реализм для 2.1 — вместо PHOTOREAL: без «зерна» и «шума» (2.1 рисует их буквально — сыпью по стенам и небу),
+# с упором на резкую мелкую фактуру листвы и травы, где 2.1 скатывается в мазки; «как снято сенсором» — отдельной
+# фразой, т.к. 2.1 держит медиум входа
 Q21_PHOTOREAL = (
-    " Every surface, plant, cloud and reflection reads as captured by a camera sensor, with the natural "
-    "irregularity, small imperfections and optical character of a real photograph."
+    "An unretouched architectural photograph taken on location with a full-frame camera and a sharp prime lens at "
+    "low ISO: physically correct light falloff, bounce light and soft contact shadows, real glass with reflections "
+    "and visible interiors, true-to-life materials with real micro-texture, subtle weathering and slight unevenness, "
+    "a natural sky with clean smooth gradients. Trees show individual leaves and twigs with sunlit and shaded "
+    "leaves and sky gaps through the crowns, lawns show individual grass blades with natural colour variation, "
+    "all crisp in focus. Every surface, plant, cloud and reflection reads as captured by a camera sensor, with "
+    "the natural irregularity and optical character of a real photograph."
 )
+# фразы про зерно и шум из разбора референса (раздел photography): 2.1 воспроизводит их буквально
+_NOISE = re.compile(r"[,;]?\s*[^,;.]*\b(grain|grainy|noise|noisy)\b[^,;.]*", re.I)
 # правило для DeepSeek: как пишет официальный переписчик 2.1 — то, что остаётся, называется по типу и месту,
 # не перерисовывается словами (подробное описание сохраняемого 2.1 читает как команду нарисовать заново)
 Q21_BODY_RULE = """- Write it as an edit instruction from someone holding only the input images. Describe concretely only
@@ -399,7 +408,9 @@ def assemble(
         parts.append(KEEP_BG)
     if keep_sur:
         parts.append(KEEP_SUR)
-    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", PHOTOREAL + (Q21_PHOTOREAL if q21 else ""), FINAL_LOCK]
+    if q21:
+        ref_text = _NOISE.sub("", ref_text)
+    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", Q21_PHOTOREAL if q21 else PHOTOREAL, FINAL_LOCK]
     text = " ".join(p for p in parts if p)
     return q21_tags(text) if q21 else text
 

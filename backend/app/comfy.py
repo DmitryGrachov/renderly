@@ -49,6 +49,8 @@ from .config import (
     FLUX_MODELS,
     FLUX_VAE,
     QWEN21,
+    QWEN21_BASE_STEPS,
+    QWEN21_REFINE,
     QWEN21_MODEL,
     QWEN21_RENDER_MEGAPIXELS,
     QWEN21_ZONE_STEPS,
@@ -199,14 +201,21 @@ def _q21_sigmas(denoise: float) -> str:
     return ", ".join(f"{v:g}" for v in sig)
 
 
-def _q21_sampling(wf: dict, tag: str, text: str, model: list, latent: list, denoise: float, seed: int) -> list:
-    """Сэмплинг Qwen-Image-2.1 Turbo: cfg 1 (негатив не используется), euler, фиксированное расписание."""
+def _q21_sampling(
+    wf: dict, tag: str, text: str, model: list, latent: list, denoise: float, seed: int, base_steps: int = 0
+) -> list:
+    """Сэмплинг Qwen-Image-2.1: cfg 1 (негатив не используется), euler. Turbo — фиксированное расписание на 8 шагов;
+    base_steps — базовая модель: планировщик simple (сдвиг 0.69 из настроек модели), как в шаблонах ComfyUI."""
+    if base_steps:
+        sigmas = {"class_type": "BasicScheduler", "inputs": {"model": model, "scheduler": "simple", "steps": base_steps, "denoise": denoise}}
+    else:
+        sigmas = {"class_type": "ManualSigmas", "inputs": {"sigmas": _q21_sigmas(denoise)}}
     wf |= {
         f"guider{tag}": {
             "class_type": "CFGGuider",
             "inputs": {"model": model, "positive": [text, 0], "negative": [text, 1], "cfg": 1.0},
         },
-        f"sigmas{tag}": {"class_type": "ManualSigmas", "inputs": {"sigmas": _q21_sigmas(denoise)}},
+        f"sigmas{tag}": sigmas,
         f"noise{tag}": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         f"sample{tag}": {
             "class_type": "SamplerCustomAdvanced",
@@ -233,8 +242,10 @@ def build_qwen21_workflow(
     building_box: list[float] | None = None,
     zone_prompt: str = "",
     sky_match: bool = False,
+    refine: bool = False,
 ) -> dict:
-    """Img to Img на Qwen-Image-2.1 Turbo: <image1> — исходник (холст), <image2> — референс."""
+    """Img to Img на Qwen-Image-2.1: <image1> — исходник (холст), <image2> — референс. Рендер — Turbo на 8 шагов;
+    refine — финальная доводка фактуры базовой моделью (QWEN21_REFINE шума от готового кадра)."""
     q = QWEN21
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet"], "weight_dtype": "default"}},
@@ -279,6 +290,17 @@ def build_qwen21_workflow(
             QWEN21_ZONE_STEPS / 8, seed + 1,
         )
 
+    if refine:
+        # доводка: базовая модель от готового кадра (он же <image1>) с частичным шумом — композиция и здание
+        # остаются, листва и трава из мазков дистиллята прорисовываются отдельными листьями и травинками
+        wf["unet_r"] = {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet_base"], "weight_dtype": "default"}}
+        wf["cache_r"] = {"class_type": "QwenImage21Cache", "inputs": {"model": ["unet_r", 0], "device": "cpu", "dtype": "default"}}
+        wf["lat_r"] = {"class_type": "VAEEncode", "inputs": {"pixels": image, "vae": ["vae", 0]}}
+        image = _q21_sampling(
+            wf, "_r", encode("text_r", prompt, {"images.image_1": image}), ["cache_r", 0], ["lat_r", 0],
+            QWEN21_REFINE, seed + 2, QWEN21_BASE_STEPS,
+        )
+
     if sky_match and reference:
         image = _sky_match(wf, image)
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": "inego/img2img"}}
@@ -301,11 +323,13 @@ def build_workflow(
     zone_prompt: str = "",
     sky_ref: str | None = None,
     sky_match: bool = False,
+    qwen21_refine: bool = False,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
     if model == QWEN21_MODEL:
         return build_qwen21_workflow(
             source, prompt, seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_match,
+            refine=qwen21_refine,
         )
     files = FLUX_MODELS[model]
     wf: dict = {
@@ -493,6 +517,12 @@ async def run_img2img(
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         await _check_model(client, model)
+        # доводка базовой Qwen-Image-2.1 — если она скачана (entrypoint.sh)
+        qwen21_refine = family == "qwen21" and QWEN21_REFINE > 0 and QWEN21["unet_base"] in (
+            await client.get("/models/diffusion_models")
+        ).json()
+        if family == "qwen21":
+            log.info("Qwen-Image-2.1: Turbo%s", f" + доводка базовой ({QWEN21_REFINE:g})" if qwen21_refine else "")
         src_fit = src.resize((width, height), Image.LANCZOS)
         source_name = await _upload(client, to_png(src_fit), f"{uuid.uuid4().hex}.png")
         ref_name = sky_name = None
@@ -506,7 +536,7 @@ async def run_img2img(
 
         workflow = build_workflow(
             source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model,
-            zone_prompt, sky_name, sky_match=exterior and SKY_MATCH > 0,
+            zone_prompt, sky_name, sky_match=exterior and SKY_MATCH > 0, qwen21_refine=qwen21_refine,
         )
         out = await _run(client, workflow)
 

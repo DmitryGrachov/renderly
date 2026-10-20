@@ -55,6 +55,8 @@ QWEN21 = {
     "unet": os.getenv("QWEN21_UNET", "qwen_image_2.1_turbo_int8_convrot.safetensors"),
     "text_encoder": os.getenv("QWEN21_TEXT_ENCODER", "qwen3vl_8b_int8_convrot.safetensors"),
     "vae": os.getenv("QWEN21_VAE", "qwen_image_2.1_vae_bf16.safetensors"),
+    # базовая (не Turbo) модель — финальная доводка фактуры в Img to Img: на дистилляте Turbo листва выходит мазками
+    "unet_base": os.getenv("QWEN21_BASE_UNET", "qwen_image_2.1_int8_convrot.safetensors"),
     # расписание Turbo из официального шаблона ComfyUI (8 шагов, cfg 1)
     "sigmas": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0],
 }
@@ -67,6 +69,11 @@ QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "1.5"))
 # Img to Img на Qwen-Image-2.1, «Сохранить небо / фон / окружение»: шагов перерисовки зон из 8
 # (больше — фотореальнее, но 2.1 начинает подменять деревья и добавлять объекты с референса)
 QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
+# Img to Img на Qwen-Image-2.1: доводка фактуры базовой моделью (если скачана) поверх рендера Turbo — доля шума
+# (0 — выкл.) и шаги полного расписания (как в шаблонах ComfyUI: 25, euler / simple, cfg 1). Сам рендер — на Turbo:
+# базовая с чистого шума перерисовывала здание (уже башня, сдвинутые эркеры); от готового кадра она его не двигает
+QWEN21_REFINE = float(os.getenv("QWEN21_REFINE", "0.6"))
+QWEN21_BASE_STEPS = int(os.getenv("QWEN21_BASE_STEPS", "25"))
 # модели генерации, доступные в Img to Img (Qwen-Image-Edit-2511 — только Inpainting)
 IMG2IMG_MODELS = [*FLUX_MODELS, QWEN21_MODEL]
 # модели генерации, доступные в Inpainting

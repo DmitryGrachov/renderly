@@ -557,6 +557,9 @@ class InegoAlign:
             b[:hh, :ww] = b_full[:hh, :ww]
             # результат, увеличенный в s раз от левого верхнего угла, сдвинутый на (dx, dy), — поверх исходника
             score, dy, dx = _xcorr(src, b, max(1, round(W * (max_shift + abs(s - 1)))), max(1, round(H * (max_shift + abs(s - 1)))))
+            # штраф за большое преобразование: новые деревья и кусты результата иначе перетягивают оценку
+            # к краю диапазона (масштаб 1.085 вместо 1.025, здание двоится)
+            score -= 0.5 * (abs(s - 1) + abs(dx) / W + abs(dy) / H)
             if score > best[0]:
                 best = (score, float(s), dx, dy)
         return best
@@ -567,6 +570,10 @@ class InegoAlign:
         coarse_w, fine_w = 512, 1024
         a = _edge_map(src_img, coarse_w)
         _, s0, _, _ = self._search(a, out, coarse_w, np.arange(1 - max_scale, 1 + max_scale + 1e-6, 0.005), max_shift)
+        if abs(s0 - 1) > max_scale - 0.006:
+            # масштаб упёрся в край диапазона — оценка ненадёжна, лучше несовмещённый кадр, чем двоящееся здание
+            log.info("INEGO align: масштаб %.3f на краю диапазона — кадр не трогаю", s0)
+            return (image,)
         a = _edge_map(src_img, fine_w)
         score, s, dx, dy = self._search(a, out, fine_w, np.arange(s0 - 0.005, s0 + 0.0051, 0.001), max_shift)
         base, _, _ = _xcorr(a, _edge_map(out, fine_w)[: a.shape[0], : a.shape[1]], 0, 0)
