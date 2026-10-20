@@ -76,7 +76,8 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
   if (req.reference) body.append('reference', req.reference)
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время рендера
-  const expected = 30000
+  // Qwen-Image-2.1 рендерит 2K: ~55 с, с сохранением зон — ~2 мин
+  const expected = req.model === 'qwen-image-2.1' ? 60000 : 30000
   const start = performance.now()
   const timer = setInterval(() => {
     const t = (performance.now() - start) / expected

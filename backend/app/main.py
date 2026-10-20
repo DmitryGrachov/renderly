@@ -10,7 +10,7 @@ from . import comfy
 from . import inpaint as inpainting
 from .auth import current_user
 from .auth import router as auth_router
-from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, FLUX_MODELS, INPAINT_MODELS, log
+from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, log
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
@@ -70,14 +70,14 @@ async def img2img(
     keep_sur: bool = Form(False),  # окружение: земля, озеленение, люди, машины перед зданием
     # сид генерации; пусто — случайный. Фактический сид возвращается в заголовке X-Seed
     seed: int | None = Form(None, ge=0, lt=2**48),
-    # FLUX.2 klein: klein-4b | klein-9b
+    # FLUX.2 klein: klein-4b | klein-9b; Qwen-Image-2.1 Turbo: qwen-image-2.1
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
     llm: str = Form(DEEPSEEK_MODEL),
     _user: User = Depends(current_user),
 ):
     check_scene(scene)
-    if model not in FLUX_MODELS:
+    if model not in IMG2IMG_MODELS:
         raise HTTPException(400, f"Модель {model} доступна только в Inpainting" if model in INPAINT_MODELS else f"Unknown model: {model}")
     if llm not in DEEPSEEK_MODELS:
         raise HTTPException(400, f"Unknown llm: {llm}")

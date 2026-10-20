@@ -28,7 +28,7 @@ const SUBTITLE: Record<Scene, string> = {
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
   const { charge, model: chosen, llm } = useAccount()
-  // модели «только Inpainting» (Qwen-Image-Edit) — рендер Img to Img идёт на запасной klein 9B
+  // модели «только Inpainting» (Qwen-Image-Edit 2511) — рендер Img to Img идёт на запасной klein 9B
   const fallback = !!modelById(chosen).inpaintOnly
   const model = fallback ? IMG2IMG_FALLBACK : chosen
   const activeModel = modelById(model)

@@ -1,4 +1,4 @@
-"""Сборка промпта для FLUX.2 [klein] через DeepSeek (vision).
+"""Сборка промпта для FLUX.2 [klein] и Qwen-Image-2.1 через DeepSeek (vision).
 
 Референс (image 2) — эталон окружения и света: небо, солнце и тени, лучи, атмосфера, трава и деревья,
 колористика и «фотографичность». Здание, его геометрия, материалы и камера — строго с исходника (image 1).
@@ -8,7 +8,15 @@
   2. DeepSeek видит исходник и референс, получает разбор и пишет описательную часть под ЭТО здание:
      с какой стороны свет, какие фасады в тени, где на этой земле трава и деревья с рефа.
 Замки геометрии/материалов и блок переноса окружения добавляются в промпт всегда, даже без DeepSeek.
+
+Qwen-Image-2.1 (family="qwen21") — по правилам официального переписчика правок (prompts/qwen21_edit_rewrite.txt):
+картинки — тегами <image1>, <image2>, <image3>, у каждой названа роль (холст / донор окружения / образец неба),
+запрос начинается с действия, а смена «медиума» (рендер → фото) названа целью правки явно и в полную силу —
+иначе 2.1 сохраняет медиум входа как идентичность. Стиль с картинки-референса 2.1 переносит хуже, чем по тексту,
+поэтому разбор референса идёт в запрос целиком. Один абзац, всё утвердительно.
 """
+
+import re
 
 import asyncio
 import base64
@@ -111,6 +119,36 @@ REALISM_REMOVE = (
 )
 FINAL_LOCK = "The building itself stays exactly as in image 1: only the world around it and the light change."
 
+# ---------------- Qwen-Image-2.1 ----------------
+# с действия и роли картинок: <image1> — холст, <image2> — донор окружения и света; смена медиума — цель правки
+Q21_INTRO = (
+    "Convert image 1, a draft architectural 3D render, into a real unretouched architectural photograph taken on "
+    "location with a full-frame camera, changing its medium completely from computer graphics to photography. "
+    "Image 1 is the canvas: its camera, framing, composition, building and layout carry over to the result. "
+    "Every object of image 1 keeps its place, shape and size: the streets and paving, cars, people, neighbouring "
+    "buildings, trees and shrubs all stay, each becoming its real photographed counterpart."
+)
+Q21_REF_ROLE = (
+    "Image 2 is a real reference photograph that supplies only the environment and the light: its sky, sun, shadows, "
+    "atmosphere, vegetation, colour grading and photographic look."
+)
+# усиление реализма: 2.1 держит медиум входа, поэтому «как снято сенсором» — отдельной фразой
+Q21_PHOTOREAL = (
+    " Every surface, plant, cloud and reflection reads as captured by a camera sensor, with the natural "
+    "irregularity, small imperfections and optical character of a real photograph."
+)
+# правило для DeepSeek: как пишет официальный переписчик 2.1 — то, что остаётся, называется по типу и месту,
+# не перерисовывается словами (подробное описание сохраняемого 2.1 читает как команду нарисовать заново)
+Q21_BODY_RULE = """- Write it as an edit instruction from someone holding only the input images. Describe concretely only
+  what changes: the light, the sky, the vegetation, how the existing surfaces look once photographed. Name what stays
+  (the building, its openings, the layout) by type and position, without re-describing its appearance.
+"""
+
+
+def q21_tags(text: str) -> str:
+    """«image 1» → «<image1>»: в Qwen-Image-2.1 картинки адресуются только тегами; один абзац без переносов."""
+    return " ".join(re.sub(r"\b[Ii]mage ([1-9])\b", r"<image\1>", text).split())
+
 # ---------------- разбор референса ----------------
 ANALYSIS_FIELDS = {
     "time_and_weather": "time of day, season, weather",
@@ -163,7 +201,7 @@ ANALYSIS_SYSTEM = (
 )
 
 # ---------------- описательная часть под конкретное здание ----------------
-PROMPT_SYSTEM = """You are a prompt engineer for FLUX.2 [klein], an instruction-based image EDITING model.
+PROMPT_SYSTEM = """You are a prompt engineer for {model}, an instruction-based image EDITING model.
 Image 1 is a draft {scene} architectural image: a viewport screenshot, a clay render or a weak render.
 Image 2 is the master reference for the environment and the light. You also get a detailed analysis of image 2.
 Write the descriptive part of an edit instruction that turns image 1 into a real photograph that looks as if it was
@@ -180,7 +218,7 @@ Rules:
   shrubs and their season and colours of image 2 on the ground and in the background areas that are open in
   image 1. Vegetation never stands in front of the main building and never covers its facade.
 - The light and colour grading must never change the material colours, only how they are lit.
-{sur_rule}- 120-180 words, plain English, no lists, no quotes, no negative prompt.
+{sur_rule}{model_rule}- 120-180 words, plain English, no lists, no quotes, no negative prompt.
 {box_rule}Answer with JSON: {json_shape}"""
 
 SUR_KEEP_RULE = """- The surroundings of image 1 keep their layout: nothing is added, removed or moved. Go through what is there
@@ -345,11 +383,14 @@ def assemble(
     keep_bg: bool = False,
     keep_sur: bool = False,
     sky_image: bool = False,
+    family: str = "flux",
 ) -> str:
     """Промпт = вступление + замки здания + рамка референса + замки зон + разбор референса
-    + описательная часть под здание + [образец неба] + фотореализм + финальный замок здания."""
+    + описательная часть под здание + [образец неба] + фотореализм + финальный замок здания.
+    family="qwen21": вступление с действия и ролей картинок, теги <imageN>, один абзац."""
     lock = SPEC_MATERIALS.format(spec=materials.rstrip(".") + ".") if materials else KEEP_MATERIALS
-    parts = [INTRO, KEEP_GEOMETRY, lock]
+    q21 = family == "qwen21"
+    parts = [Q21_INTRO, Q21_REF_ROLE if has_ref else "", KEEP_GEOMETRY, lock] if q21 else [INTRO, KEEP_GEOMETRY, lock]
     if has_ref:
         parts.append(REF_RULE)
     if keep_sky:
@@ -358,8 +399,9 @@ def assemble(
         parts.append(KEEP_BG)
     if keep_sur:
         parts.append(KEEP_SUR)
-    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", PHOTOREAL, FINAL_LOCK]
-    return " ".join(p for p in parts if p)
+    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", PHOTOREAL + (Q21_PHOTOREAL if q21 else ""), FINAL_LOCK]
+    text = " ".join(p for p in parts if p)
+    return q21_tags(text) if q21 else text
 
 
 # ---------------- перерисовка сохраняемых зон (второй проход, только по маске) ----------------
@@ -381,13 +423,19 @@ ZONE_SUR = (
     "flat or painted green areas become dense real lawn grass with individual blades; flat grey areas become real "
     "asphalt or paving; simple trees and shrubs become real ones; placeholder cars and people become real ones"
 )
+Q21_ZONE_PLANTS = (
+    "Every existing tree, shrub and lawn of image 1 keeps its number, place, shape and size, and no new plants "
+    "appear; only their species look, season, leaf colours, grass texture and light follow image 2."
+)
 ZONE_OUTRO = (
     "Everything must look like an unretouched real photograph, seamlessly blended with the building and the rest "
     "of the image."
 )
 
 
-async def zone_instruction(reference: bytes | None, keep_sky: bool, keep_bg: bool, keep_sur: bool) -> str:
+async def zone_instruction(
+    reference: bytes | None, keep_sky: bool, keep_bg: bool, keep_sur: bool, family: str = "flux"
+) -> str:
     """Команда для второго прохода: заглушки в сохраняемых зонах → настоящие объекты в стилистике референса."""
     names, rules = [], []
     if keep_sky:
@@ -408,7 +456,10 @@ async def zone_instruction(reference: bytes | None, keep_sky: bool, keep_bg: boo
         except Exception as e:  # noqa: BLE001
             log.warning("Разбор референса для зон недоступен: %s", e)
     style = []
-    if (keep_bg or keep_sur) and a.get("vegetation"):
+    if (keep_bg or keep_sur) and family == "qwen21":
+        # 2.1 читает перечень растений референса («саженцы на кольях, низкие кусты») как команду их добавить
+        style.append(Q21_ZONE_PLANTS)
+    elif (keep_bg or keep_sur) and a.get("vegetation"):
         style.append(f"Grass, trees and shrubs exactly like in image 2: {a['vegetation']}")
     if keep_sky and a.get("sky"):
         style.append(f"Sky colours, light and cloud texture like in image 2: {a['sky']}")
@@ -418,7 +469,8 @@ async def zone_instruction(reference: bytes | None, keep_sky: bool, keep_bg: boo
             style.append(f"{label} like in image 2: {a[k]}")
     if not style and reference is not None:
         style.append("Match the vegetation, sky, light and colour grading of image 2.")
-    return " ".join(parts + style + [ZONE_OUTRO])
+    text = " ".join(parts + style + [ZONE_OUTRO])
+    return q21_tags(text) if family == "qwen21" else text
 
 
 def _box(raw) -> list[float] | None:
@@ -446,8 +498,9 @@ async def build_prompt(
     keep_sky: bool = False,
     keep_bg: bool = False,
     keep_sur: bool = False,
+    family: str = "flux",
 ) -> tuple[str, list[float] | None]:
-    """Итоговый промпт для FLUX и рамка главного здания (доли кадра; только при keep_bg/keep_sur, для SAM).
+    """Итоговый промпт для FLUX / Qwen-Image-2.1 (family) и рамка главного здания (доли кадра; только при keep_bg/keep_sur, для SAM).
 
     reference — референс пресета или пользователя (image 2); materials — спецификация архитектора,
     пусто — материалы берутся с изображения. При любой ошибке DeepSeek — шаблонный промпт из пресета.
@@ -462,11 +515,11 @@ async def build_prompt(
     need_box = keep_bg or keep_sur or scene == "exterior"
 
     if not DEEPSEEK_API_KEY:
-        return assemble(fallback_body(scene, look), materials, "", has_ref, *keep), None
+        return assemble(fallback_body(scene, look), materials, "", has_ref, *keep, family=family), None
 
     h = hashlib.sha256(image)
     h.update(hashlib.sha256(reference or b"").digest())
-    h.update(json.dumps([scene, preset, materials, keep, "v6", llm_model.get()]).encode())
+    h.update(json.dumps([scene, preset, materials, keep, "v6", llm_model.get(), family]).encode())
     key = h.hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
@@ -483,6 +536,8 @@ async def build_prompt(
         if need_box:
             shape["box"] = [0, 0, 1000, 1000]
         system = PROMPT_SYSTEM.format(
+            model="Qwen-Image-2.1" if family == "qwen21" else "FLUX.2 [klein]",
+            model_rule=Q21_BODY_RULE if family == "qwen21" else "",
             scene=scene,
             material_rules=RULES_FROM_SPEC if materials else RULES_FROM_IMAGE,
             sur_rule=(SKY_KEEP_RULE if keep_sky else "") + (BG_KEEP_RULE if keep_bg else "") + (SUR_KEEP_RULE if keep_sur else ""),
@@ -513,7 +568,7 @@ async def build_prompt(
         # образец неба (image 3) — экстерьер без «Сохранить небо», если на референсе есть чистое небо
         sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box"))
         result = (
-            assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image),
+            assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image, family=family),
             _box(data.get("box")) if need_box else None,
         )
         _cache[key] = result
@@ -522,4 +577,4 @@ async def build_prompt(
         return result
     except Exception as e:  # noqa: BLE001 — генерация не должна падать из-за LLM
         log.warning("DeepSeek недоступен, использую шаблонный промпт: %s", e)
-        return assemble(fallback_body(scene, look), materials, "", has_ref, *keep), None
+        return assemble(fallback_body(scene, look), materials, "", has_ref, *keep, family=family), None
