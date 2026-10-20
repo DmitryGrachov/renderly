@@ -556,34 +556,71 @@ class InegoObjectMask:
         box = [xs.min() / w, ys.min() / h, (xs.max() + 1) / w, (ys.max() + 1) / h]
         cy, cx = ndimage.center_of_mass(core) if core.any() else ((ys.min() + ys.max()) / 2, (xs.min() + xs.max()) / 2)
 
-        processor, model = _sam()
         rgb = _to_uint8(image[0])
-        px = [box[0] * w, box[1] * h, box[2] * w, box[3] * h]
-        model.to(_device())
-        try:
-            inputs = processor(
-                images=rgb, input_boxes=[[px]], input_points=[[[[cx, cy]]]], input_labels=[[[1]]], return_tensors="pt"
-            ).to(_device())
-            with torch.no_grad():
-                out = model(**inputs, multimask_output=True)
-            masks = processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0][0].numpy() > 0
-            scores = out.iou_scores[0, 0].float().cpu().numpy()
-        finally:
-            model.to("cpu")
-        # из уверенных — тот, что лучше всего совпадает с изменениями (объект, а не кусок газона)
-        good = [i for i in range(len(scores)) if scores[i] >= scores.max() - 0.1]
-        best = max(good, key=lambda i: (masks[i] & region).sum() / max(1, (masks[i] | region).sum()))
-        obj = ndimage.binary_fill_holes(masks[best]) & room
-        # то, что SAM не увидел, но точно изменилось внутри рамки объекта (тонкие детали) — тоже объект
-        obj |= region & ndimage.binary_dilation(obj, iterations=max(1, round(min(h, w) * 0.004)))
 
-        # тень: связанная с объектом область, ставшая темнее (а не просто другой), ниже середины объекта
+        def segment(bx):
+            """SAM 2.1 по рамке (пиксели) и точке — центру выделения; самый уверенный вариант, совпадение с
+            изменениями — только при почти равной уверенности (вариант «объект + кусок перерисованного фона»
+            иначе выигрывал)."""
+            processor, model = _sam()
+            model.to(_device())
+            try:
+                inputs = processor(
+                    images=rgb, input_boxes=[[[float(v) for v in bx]]], input_points=[[[[float(cx), float(cy)]]]],
+                    input_labels=[[[1]]], return_tensors="pt",
+                ).to(_device())
+                with torch.no_grad():
+                    out = model(**inputs, multimask_output=True)
+                ms = processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0][0].numpy() > 0
+                sc = out.iou_scores[0, 0].float().cpu().numpy()
+            finally:
+                model.to("cpu")
+            good = [i for i in range(len(sc)) if sc[i] >= sc.max() - 0.02]
+            best = max(good, key=lambda i: (ms[i] & region).sum() / max(1, (ms[i] | region).sum()))
+            return ms[best], float(sc[best])
+
+        mask1, score = segment([box[0] * w, box[1] * h, box[2] * w, box[3] * h])
+        # второй проход с подрезанной рамкой: рамка по изменениям растягивается на фон, который модель тоже
+        # перерисовала (стенд за спиной выше головы), и SAM включал его в объект. Тонкие отростки маски срезаются
+        # размыканием; верх и бока рамки — по основному силуэту, низ — как был (стопы и колёса не подрезаются)
+        m1 = ndimage.binary_fill_holes(mask1)
+        if m1.any():
+            ys1 = np.nonzero(m1)[0]
+            k = max(3, round((ys1.max() - ys1.min()) * 0.05))
+            core_body = ndimage.binary_opening(m1, structure=np.ones((k, k), bool))
+            lab_b, nb = ndimage.label(core_body)
+            if nb:
+                sizes = ndimage.sum(core_body, lab_b, range(1, nb + 1))
+                body = lab_b == 1 + int(np.argmax(sizes))
+                by, bx_ = np.nonzero(body)
+                pad = k
+                b2 = [float(max(0, bx_.min() - pad)), float(max(0, by.min() - pad)), float(min(w, bx_.max() + 1 + pad)), float(ys1.max() + 1)]
+                if (b2[2] - b2[0]) * (b2[3] - b2[1]) < 0.92 * (box[2] - box[0]) * w * (box[3] - box[1]) * h:
+                    mask2, score2 = segment(b2)
+                    if score2 >= score - 0.05 and mask2.sum() > 0.5 * m1.sum():
+                        mask1, score = mask2, score2
+        masks, scores, best = [mask1], np.array([score]), 0
+        obj = ndimage.binary_fill_holes(masks[best]) & room
+        oy, ox = np.nonzero(obj)
+        if not oy.size:
+            return (empty, empty)
+        top, bottom = oy.min(), oy.max()
+        height = bottom - top + 1
+        # тонкие края, которые SAM не взял (носок, подошва), — только у ног: в верхней части к объекту иначе
+        # «прилипал» перерисованный моделью фон (стенд за головой)
+        feet = np.zeros_like(obj)
+        feet[int(top + 0.7 * height):] = True
+        obj |= region & feet & ndimage.binary_dilation(obj, iterations=max(1, round(min(h, w) * 0.004)))
+
+        # тень — только на земле у ног и ниже, без тонкой полосы вдоль контура объекта (на краях генерация и исходник
+        # расходятся всегда — это давало тёмную обводку) и без нитевидных обрывков
         la, lb = a.mean(-1), b.mean(-1)
-        darker = (lb - la > threshold * 0.6) & room & ~obj
-        oy = np.nonzero(obj)[0]
-        if oy.size:
-            darker[: int(oy.min() + 0.5 * (oy.max() - oy.min()))] = False
-        near = ndimage.binary_dilation(obj, iterations=max(2, round(min(h, w) * 0.01)))
+        band = ndimage.binary_dilation(obj, iterations=max(2, round(height * 0.02)))
+        darker = (lb - la > threshold * 0.35) & room & ~band
+        darker[: int(top + 0.75 * height)] = False
+        k = max(2, round(height * 0.012))
+        darker = ndimage.binary_opening(darker, structure=np.ones((k, k), bool))
+        near = ndimage.binary_dilation(obj, iterations=max(3, round(height * 0.06)))
         lab2, _ = ndimage.label(darker | near)
         sh_ids = np.unique(lab2[near & (lab2 > 0)])
         shadow = np.isin(lab2, sh_ids) & darker

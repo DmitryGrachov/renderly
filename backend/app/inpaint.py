@@ -754,19 +754,33 @@ async def _extract_object(
 
 
 def _compose_object(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image, edge: int) -> Image.Image:
-    """Кроп исходника + объект из генерации + тень только затемнением (поверхность под тенью не перекрашивается
-    и не высветляется — побочные правки модели вокруг объекта не попадают в результат)."""
+    """Кроп исходника + объект из генерации + тень.
+
+    Тень — мягкое затемнение: отношение сглаженных яркостей генерации и исходника (только темнее, без текстуры
+    генерации), с весом по области тени, размытой на ~4% размера объекта, — края нет. Бинарная маска тени с
+    резким краем давала видимое пятно на плитке. Свою тень не дорисовываем — только та, что нарисовала модель.
+    """
     import numpy as np
+    from scipy import ndimage
 
     o = np.asarray(crop, dtype=np.float32)
     g = np.asarray(patch, dtype=np.float32)
-    lo = o.mean(-1, keepdims=True) + 1.0
-    lg = g.mean(-1, keepdims=True) + 1.0
-    ratio = np.clip(lg / lo, 0.25, 1.0)  # только темнее
-    sh = np.asarray(shadow.filter(ImageFilter.GaussianBlur(max(1.0, edge))), dtype=np.float32)[..., None] / 255
-    out = o * (1 - sh) + o * ratio * sh
-    a = np.asarray(_grow(obj, 1).filter(ImageFilter.GaussianBlur(max(0.8, edge / 2))), dtype=np.float32)[..., None] / 255
-    out = out * (1 - a) + g * a
+    m = np.asarray(obj) > 127
+    sh = np.asarray(shadow) > 127
+    ys, xs = np.nonzero(m)
+    size = max(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1)
+
+    s_lum = max(2.0, size * 0.012)
+    ratio = np.clip(
+        (ndimage.gaussian_filter(g.mean(-1), s_lum) + 1) / (ndimage.gaussian_filter(o.mean(-1), s_lum) + 1), 0.25, 1.0
+    )
+    wgt = np.clip(ndimage.gaussian_filter(sh.astype(np.float32), max(3.0, size * 0.04)) * 1.6, 0, 1)
+    dark = 1 - wgt * (1 - ratio)
+
+    out = o * dark[..., None]
+    # край — с чуть сжатой маски: пиксели фона из генерации вокруг контура (тёмный ореол) не попадают в результат
+    a = ndimage.gaussian_filter(ndimage.binary_erosion(m, iterations=1).astype(np.float32), max(0.8, size * 0.0015))
+    out = out * (1 - a[..., None]) + g * a[..., None]
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
@@ -853,8 +867,8 @@ class _Region:
             obj, shadow = found
             patch = _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
             keep = obj
-            area = _grow(ImageChops.lighter(obj, shadow.point(lambda v: 255 if v > 32 else 0)), feather)
-            alpha = area.filter(ImageFilter.GaussianBlur(feather / 2))
+            # _compose_object уже свёл объект и тень с исходником — вклеивается весь кроп
+            alpha = Image.new("L", self.crop.size, 255)
         else:
             # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
             # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
