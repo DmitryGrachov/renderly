@@ -10,10 +10,11 @@
 Замки геометрии/материалов и блок переноса окружения добавляются в промпт всегда, даже без DeepSeek.
 
 Qwen-Image-2.1 (family="qwen21") — по правилам официального переписчика правок (prompts/qwen21_edit_rewrite.txt):
-картинки — тегами <image1>, <image2>, <image3>, у каждой названа роль (холст / донор окружения / образец неба),
-запрос начинается с действия, а смена «медиума» (рендер → фото) названа целью правки явно и в полную силу —
-иначе 2.1 сохраняет медиум входа как идентичность. Стиль с картинки-референса 2.1 переносит хуже, чем по тексту,
-поэтому разбор референса идёт в запрос целиком. Один абзац, всё утвердительно.
+исходник — тегом <image1> (холст), запрос начинается с действия, а смена «медиума» (рендер → фото) названа целью
+правки явно и в полную силу — иначе 2.1 сохраняет медиум входа как идентичность. Сама картинка-референс в 2.1
+не подаётся: на слабом холсте (клей-рендер) 2.1 выдавала вместо правки дом с референса. Референс видит только
+DeepSeek, а в 2.1 уходит его разбор текстом (стиль текстом 2.1 переносит надёжно) — «image 2» в тексте заменяется
+на «целевой облик» (q21_text). Один абзац, всё утвердительно.
 """
 
 import re
@@ -128,9 +129,15 @@ Q21_INTRO = (
     "Every object of image 1 keeps its place, shape and size: the streets and paving, cars, people, neighbouring "
     "buildings, trees and shrubs all stay, each becoming its real photographed counterpart."
 )
-Q21_REF_ROLE = (
-    "Image 2 is a real reference photograph that supplies only the environment and the light: its sky, sun, shadows, "
-    "atmosphere, vegetation, colour grading and photographic look."
+# референс-картинки у 2.1 нет: окружение и свет — «целевой облик», описанный текстом ниже
+Q21_LOOK_ROLE = (
+    "The world around the building and the light follow the target look described below: its sky, sun, shadows, "
+    "atmosphere, vegetation, colour grading and photographic look. The building, its materials and the camera come "
+    "only from image 1."
+)
+Q21_LOOK_RULE = (
+    "New vegetation grows only on the ground and in the background areas that are open in image 1; it never stands "
+    "in front of the main building, never covers its facade and never changes its silhouette."
 )
 # реализм для 2.1 — вместо PHOTOREAL: без «зерна» и «шума» (2.1 рисует их буквально — сыпью по стенам и небу),
 # с упором на резкую мелкую фактуру листвы и травы, где 2.1 скатывается в мазки; «как снято сенсором» — отдельной
@@ -157,6 +164,15 @@ Q21_BODY_RULE = """- Write it as an edit instruction from someone holding only t
 def q21_tags(text: str) -> str:
     """«image 1» → «<image1>»: в Qwen-Image-2.1 картинки адресуются только тегами; один абзац без переносов."""
     return " ".join(re.sub(r"\b[Ii]mage ([1-9])\b", r"<image\1>", text).split())
+
+
+def q21_text(text: str) -> str:
+    """Запрос для 2.1 без картинки-референса: упоминания «image 2» (разбор и описание DeepSeek) → «целевой облик»,
+    теги <image1>, один абзац."""
+    t = re.sub(r"\b(exactly )?(as|like) in [Ii]mage 2\b", "of the target look", text)
+    t = re.sub(r"\b[Ii]mage 2\b", "the target look", t)
+    t = re.sub(r"\bthe the target look\b", "the target look", t)
+    return q21_tags(t)
 
 # ---------------- разбор референса ----------------
 ANALYSIS_FIELDS = {
@@ -399,9 +415,9 @@ def assemble(
     family="qwen21": вступление с действия и ролей картинок, теги <imageN>, один абзац."""
     lock = SPEC_MATERIALS.format(spec=materials.rstrip(".") + ".") if materials else KEEP_MATERIALS
     q21 = family == "qwen21"
-    parts = [Q21_INTRO, Q21_REF_ROLE if has_ref else "", KEEP_GEOMETRY, lock] if q21 else [INTRO, KEEP_GEOMETRY, lock]
+    parts = [Q21_INTRO, Q21_LOOK_ROLE if has_ref else "", KEEP_GEOMETRY, lock] if q21 else [INTRO, KEEP_GEOMETRY, lock]
     if has_ref:
-        parts.append(REF_RULE)
+        parts.append(Q21_LOOK_RULE if q21 else REF_RULE)
     if keep_sky:
         parts.append(KEEP_SKY)
     if keep_bg:
@@ -412,7 +428,7 @@ def assemble(
         ref_text = _NOISE.sub("", ref_text)
     parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", Q21_PHOTOREAL if q21 else PHOTOREAL, FINAL_LOCK]
     text = " ".join(p for p in parts if p)
-    return q21_tags(text) if q21 else text
+    return q21_text(text) if q21 else text
 
 
 # ---------------- перерисовка сохраняемых зон (второй проход, только по маске) ----------------
@@ -481,7 +497,7 @@ async def zone_instruction(
     if not style and reference is not None:
         style.append("Match the vegetation, sky, light and colour grading of image 2.")
     text = " ".join(parts + style + [ZONE_OUTRO])
-    return q21_tags(text) if family == "qwen21" else text
+    return q21_text(text) if family == "qwen21" else text
 
 
 def _box(raw) -> list[float] | None:

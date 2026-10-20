@@ -21,10 +21,10 @@
      условные деревья — настоящими. Здание вне маски не трогается.
 
 Qwen-Image-2.1 Turbo — та же логика в родном для неё виде (build_qwen21_workflow):
-  - исходник и референс — картинки <image1>, <image2> в TextEncodeQwenImage21 (энкодер Qwen3-VL читает их
-    и вставляет латентами в последовательность) — вместо цепочки ReferenceLatent. Образца неба (image 3) нет:
-    каждая картинка удлиняет последовательность, и на 16 ГБ ComfyUI падал по CUDA OOM;
-  - кадр ~1.5 Мп со сторонами кратными 32, референс ~0.5 Мп; 8 шагов Turbo по фиксированному расписанию, cfg 1;
+  - исходник — картинка <image1> в TextEncodeQwenImage21 (энкодер Qwen3-VL читает её и вставляет латентом
+    в последовательность) — вместо ReferenceLatent. Референс картинкой не подаётся: на слабом холсте (клей-рендер)
+    2.1 выдавала вместо правки дом с референса; окружение и свет референса идут текстом — разбором DeepSeek;
+  - кадр ~1.5 Мп со сторонами кратными 32; 8 шагов Turbo по фиксированному расписанию, cfg 1;
   - старт с чистого шума (пустой латент энкодера в размере <image1>): со старта от латента исходника
     (σ ≤ 0.98) 2.1 почти копирует черновик — меняется только цвет. Цена — небольшое перекадрирование
     (здание смещается на 2–3% кадра), его снимает InegoAlign: масштаб и сдвиг по контурам до исходника.
@@ -66,8 +66,6 @@ from .presets import reference_image
 from .prompting import analyze_reference, build_prompt, zone_instruction
 
 REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
-# в Qwen-Image-2.1 референс удлиняет последовательность модели — на 1 Мп (и с образцом неба) ComfyUI падал по OOM
-QWEN21_REF_MEGAPIXELS = 0.5
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
 
 
@@ -244,7 +242,8 @@ def build_qwen21_workflow(
     sky_match: bool = False,
     refine: bool = False,
 ) -> dict:
-    """Img to Img на Qwen-Image-2.1: <image1> — исходник (холст), <image2> — референс. Рендер — Turbo на 8 шагов;
+    """Img to Img на Qwen-Image-2.1: <image1> — исходник (холст); reference — только для InegoSkyMatch, модели
+    не подаётся (см. docstring модуля). Рендер — Turbo на 8 шагов;
     refine — финальная доводка фактуры базовой моделью (QWEN21_REFINE шума от готового кадра)."""
     q = QWEN21
     wf: dict = {
@@ -259,7 +258,6 @@ def build_qwen21_workflow(
     images = {"images.image_1": ["src_img", 0]}
     if reference:
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
-        images["images.image_2"] = ["ref_img", 0]
 
     def encode(name: str, text: str, imgs: dict) -> str:
         # resolution 0 — кадр по <image1> (стороны уже кратны 32)
@@ -280,7 +278,7 @@ def build_qwen21_workflow(
     if keep_sky or keep_bg or keep_sur:
         _zones(wf, image, keep_sky, keep_bg, keep_sur, building_box)
         # проход 2 — только сохраняемые зоны: склейка — стартовый латент, шум под маской (Differential Diffusion),
-        # <image1> — исходник (держит расклад), <image2> — референс.
+        # <image1> — исходник (держит расклад).
         # Шагов — QWEN21_ZONE_STEPS из 8: на 7 (как ZONE_RESTYLE у FLUX) 2.1 подменяла деревья и добавляла кусты с референса
         wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cache", 0], "strength": 1.0}}
         wf["comp_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["restyle", 0], "vae": ["vae", 0]}}
@@ -529,7 +527,7 @@ async def run_img2img(
         if ref_bytes:
             ref = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
             # референс — эталон окружения: больше пикселей → точнее небо, листва и свет
-            ref = ref.resize(fit_size(*ref.size, QWEN21_REF_MEGAPIXELS if family == "qwen21" else REF_MEGAPIXELS), Image.LANCZOS)
+            ref = ref.resize(fit_size(*ref.size, REF_MEGAPIXELS), Image.LANCZOS)
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
             if sky_box:
                 sky_name = await _upload(client, to_png(_crop_sky(ref, sky_box)), f"{uuid.uuid4().hex}.png")
