@@ -28,6 +28,8 @@ export interface InpaintRequest {
   model?: string
   /** Модель DeepSeek: deepseek-flash | deepseek-v4-pro */
   llm?: string
+  /** Рамка объекта [x1, y1, x2, y2] в долях кадра, поправленная на канвасе (добавить / заменить) */
+  box?: [number, number, number, number]
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -69,6 +71,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   if (req.prompt) body.append('prompt', req.prompt)
   if (req.model) body.append('model', req.model)
   if (req.llm) body.append('llm', req.llm)
+  if (req.box) body.append('box', req.box.map((v) => v.toFixed(4)).join(','))
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления
   const expected = req.model === 'qwen-edit-2511' ? 60000 : req.model === 'qwen-image-2.1' ? 35000 : 12000
@@ -91,6 +94,25 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   } finally {
     clearInterval(timer)
   }
+}
+
+/** План правки до генерации: тип и рамка объекта (доли кадра) — показывается на канвасе, чтобы поправить.
+ *  В моке и для «изменить» рамки нет — генерация идёт сразу. */
+export async function planInpaint(req: InpaintRequest, signal?: AbortSignal): Promise<{ kind: string; box: [number, number, number, number] | null }> {
+  if (USE_MOCK || req.mode !== 'edit' || !req.prompt) return { kind: 'change', box: null }
+  const img = await loadImage(req.imageUrl)
+  const body = new FormData()
+  body.append('image', await fetch(req.imageUrl).then((r) => r.blob()), 'image.png')
+  body.append('mask', await exportMask(req.mask, img.naturalWidth, img.naturalHeight), 'mask.png')
+  body.append('prompt', req.prompt)
+  if (req.llm) body.append('llm', req.llm)
+  const res = await fetch('/api/inpaint/plan', { method: 'POST', body, signal })
+  if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
+  if (!res.ok) {
+    const detail = await res.json().then((j) => j.detail as string).catch(() => '')
+    throw new Error(detail || `Сервер ответил ${res.status}`)
+  }
+  return res.json()
 }
 
 /* ------------------------------------------------------------------ */

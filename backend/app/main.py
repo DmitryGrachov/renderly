@@ -109,6 +109,36 @@ async def img2img(
     return Response(content=result, media_type="image/jpeg", headers={"X-Seed": str(used_seed)})
 
 
+def _parse_box(raw: str | None) -> list[float] | None:
+    if not raw:
+        return None
+    try:
+        v = [float(x) for x in raw.split(",")]
+    except ValueError:
+        raise HTTPException(400, "box: ожидается x1,y1,x2,y2") from None
+    if len(v) != 4 or not (0 <= v[0] < v[2] <= 1 and 0 <= v[1] < v[3] <= 1):
+        raise HTTPException(400, "box: ожидается x1,y1,x2,y2 в долях кадра")
+    return v
+
+
+@app.post("/api/inpaint/plan")
+async def inpaint_plan(
+    image: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    prompt: str = Form(..., max_length=300),
+    llm: str = Form(DEEPSEEK_MODEL),
+    _user: User = Depends(current_user),
+):
+    """План правки до генерации: тип и рамка объекта (доли кадра) — её показывают на канвасе, чтобы поправить."""
+    if llm not in DEEPSEEK_MODELS:
+        raise HTTPException(400, f"Unknown llm: {llm}")
+    llm_model.set(llm)
+    try:
+        return await inpainting.plan_edit(await image.read(), await mask.read(), prompt)
+    except inpainting.EmptyMask as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/inpaint")
 async def inpaint(
     image: UploadFile = File(...),
@@ -117,6 +147,8 @@ async def inpaint(
     mode: str = Form(...),
     # edit — что нарисовать; remove — необязательное уточнение, что именно удалить («люди», «машина»)
     prompt: str | None = Form(None, max_length=300),
+    # рамка объекта «x1,y1,x2,y2» в долях кадра, поправленная на канвасе (добавить / заменить); пусто — от DeepSeek
+    box: str | None = Form(None, max_length=100),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
@@ -136,7 +168,9 @@ async def inpaint(
 
     try:
         if mode == "edit":
-            result, used_seed = await inpainting.run_edit(await image.read(), await mask.read(), prompt, seed, model)
+            result, used_seed = await inpainting.run_edit(
+                await image.read(), await mask.read(), prompt, seed, model, _parse_box(box)
+            )
         else:
             result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)
     except inpainting.EmptyMask as e:

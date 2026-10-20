@@ -715,6 +715,61 @@ def _unveil(patch: Image.Image, crop: Image.Image, gen: Image.Image) -> Image.Im
     return Image.composite(crop, patch, m)
 
 
+async def _extract_object(
+    client: httpx.AsyncClient, patch: Image.Image, crop: Image.Image, seed: Image.Image, allowed: Image.Image
+) -> tuple[Image.Image, Image.Image] | None:
+    """Силуэт нового объекта и его тень (ComfyUI, InegoObjectMask: изменения у выделения → рамка → SAM 2.1).
+    None — объект не найден (остаётся вклейка по изменениям)."""
+    names = []
+    for img in (patch, crop, seed.convert("RGB"), allowed.convert("RGB")):
+        names.append(await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png"))
+    wf = {
+        "img": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
+        "org": {"class_type": "LoadImage", "inputs": {"image": names[1]}},
+        "seed": {"class_type": "LoadImageMask", "inputs": {"image": names[2], "channel": "red"}},
+        "allowed": {"class_type": "LoadImageMask", "inputs": {"image": names[3], "channel": "red"}},
+        "obj": {
+            "class_type": "InegoObjectMask",
+            "inputs": {"image": ["img", 0], "original": ["org", 0], "seed": ["seed", 0], "allowed": ["allowed", 0],
+                       "threshold": 0.09},
+        },
+        "obj_img": {"class_type": "MaskToImage", "inputs": {"mask": ["obj", 0]}},
+        "sh_img": {"class_type": "MaskToImage", "inputs": {"mask": ["obj", 1]}},
+        "save_obj": {"class_type": "SaveImage", "inputs": {"images": ["obj_img", 0], "filename_prefix": "inego/objmask"}},
+        "save_sh": {"class_type": "SaveImage", "inputs": {"images": ["sh_img", 0], "filename_prefix": "inego/objshadow"}},
+    }
+    try:
+        out = await _run(client, wf)
+    except ComfyError as e:
+        log.warning("Маска объекта не получена: %s", e)
+        return None
+    if "save_obj" not in out:
+        return None
+    obj = Image.open(io.BytesIO(out["save_obj"])).convert("L").resize(crop.size, Image.BILINEAR)
+    shadow = Image.open(io.BytesIO(out["save_sh"])).convert("L").resize(crop.size, Image.BILINEAR)
+    obj = obj.point(lambda v: 255 if v > 127 else 0)
+    if not obj.getbbox() or sum(obj.histogram()[255:]) < 0.0005 * crop.size[0] * crop.size[1]:
+        return None
+    return obj, shadow
+
+
+def _compose_object(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image, edge: int) -> Image.Image:
+    """Кроп исходника + объект из генерации + тень только затемнением (поверхность под тенью не перекрашивается
+    и не высветляется — побочные правки модели вокруг объекта не попадают в результат)."""
+    import numpy as np
+
+    o = np.asarray(crop, dtype=np.float32)
+    g = np.asarray(patch, dtype=np.float32)
+    lo = o.mean(-1, keepdims=True) + 1.0
+    lg = g.mean(-1, keepdims=True) + 1.0
+    ratio = np.clip(lg / lo, 0.25, 1.0)  # только темнее
+    sh = np.asarray(shadow.filter(ImageFilter.GaussianBlur(max(1.0, edge))), dtype=np.float32)[..., None] / 255
+    out = o * (1 - sh) + o * ratio * sh
+    a = np.asarray(_grow(obj, 1).filter(ImageFilter.GaussianBlur(max(0.8, edge / 2))), dtype=np.float32)[..., None] / 255
+    out = out * (1 - a) + g * a
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
 class _Region:
     """Исходник, маска и кроп с контекстом вокруг неё.
 
@@ -788,11 +843,23 @@ class _Region:
             patch = _unleak(patch, self.crop, self.gen, self.core, self.extra)
         if unveil:
             patch = _unveil(patch, self.crop, self.gen)
-        # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
-        # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
-        keep = _changed(self.crop, patch, self.core, self.gen, self.anchor) if self.room else self.mask
         feather = max(2, self.grow // 2)
-        alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
+        found = None
+        if self.extra is not None:
+            # добавить / заменить: вклеиваются только силуэт объекта (SAM 2.1) и его тень затемнением
+            async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+                found = await _extract_object(client, patch, self.crop, self.core, self.gen)
+        if found:
+            obj, shadow = found
+            patch = _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
+            keep = obj
+            area = _grow(ImageChops.lighter(obj, shadow.point(lambda v: 255 if v > 32 else 0)), feather)
+            alpha = area.filter(ImageFilter.GaussianBlur(feather / 2))
+        else:
+            # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
+            # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
+            keep = _changed(self.crop, patch, self.core, self.gen, self.anchor) if self.room else self.mask
+            alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
         result.paste(patch, self.box[:2], alpha)
         if refine and self.room:
@@ -1074,8 +1141,44 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
     return result
 
 
+def _rect_mask(box: list[float], size: tuple[int, int]) -> Image.Image:
+    """Рамка (доли кадра) → маска со скруглёнными углами в размере исходника."""
+    w, h = size
+    x1, y1, x2, y2 = round(box[0] * w), round(box[1] * h), round(box[2] * w), round(box[3] * h)
+    m = Image.new("L", size, 0)
+    ImageDraw.Draw(m).rounded_rectangle((x1, y1, x2, y2), radius=round(0.12 * max(1, min(x2 - x1, y2 - y1))), fill=255)
+    return m
+
+
+async def _plan(src: Image.Image, core: Image.Image, request: str) -> tuple[dict, Image.Image | None]:
+    """Разбор правки DeepSeek (кэшируется) и рамка объекта в натуральную величину у выделения (None — «изменить»)."""
+    close_box = _context_box(core.getbbox(), *src.size)
+    what = await describe_edit(
+        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(), parse_kind(request)
+    )
+    if what.get("kind") == "change" or not what.get("box"):
+        return what, None
+    extra = _box_mask(what["box"], src, core)
+    if extra is None:
+        log.warning("Рамка объекта отброшена (слишком мала или во весь кадр): %s", what["box"])
+    return what, extra
+
+
+async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
+    """План правки для показа на канвасе: тип и рамка объекта (доли кадра), которую пользователь может поправить."""
+    src, core, _ = _load(image, mask, EDIT_GROW)
+    what, extra = await _plan(src, core, request)
+    box = None
+    if extra is not None:
+        x1, y1, x2, y2 = extra.getbbox()
+        w, h = src.size
+        box = [x1 / w, y1 / h, x2 / w, y2 / h]
+    return {"kind": what.get("kind", "add"), "box": box}
+
+
 async def run_edit(
-    image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL
+    image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
+    box: list[float] | None = None,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1086,16 +1189,21 @@ async def run_edit(
     if seed is None:
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
-    close_box = _context_box(core.getbbox(), *src.size)
-    kind = parse_kind(request)
-    what = await describe_edit(
-        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(), kind
-    )
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
+    what, extra = await _plan(src, core, request)
     add = what.get("kind") != "change"
-    extra = _box_mask(what["box"], src, core) if add and what.get("box") else None
-    if add and what.get("box") and extra is None:
-        log.warning("Рамка объекта отброшена (слишком мала или во весь кадр): %s", what["box"])
+    if add and box:
+        # рамка, поправленная пользователем на канвасе
+        extra = _rect_mask(box, src.size)
+    if extra is not None:
+        # рамка заменяет выделение, а не склеивается с ним в полосу: выделение остаётся только внутри рамки
+        # (откуда начинается объект), а если рамку отодвинули — им становится нижняя треть рамки
+        inside = ImageChops.multiply(core, extra)
+        if inside.getbbox():
+            core = inside
+        else:
+            x1, y1, x2, y2 = extra.getbbox()
+            core = ImageChops.multiply(extra, _rect_mask([0, (y1 + 2 * (y2 - y1) / 3) / src.size[1], 1, 1], src.size))
     r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
     if model == QWEN21_MODEL:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)

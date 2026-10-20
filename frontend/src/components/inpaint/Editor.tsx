@@ -5,7 +5,8 @@ import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } 
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
 import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
-import { inpaint, type InpaintMode } from '../../lib/inpaint'
+import { inpaint, planInpaint, type InpaintMode } from '../../lib/inpaint'
+import { PlanBox, type Box as PlanRect } from './PlanBox'
 import type { StudioImage } from '../../lib/types'
 import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
@@ -50,6 +51,8 @@ export function Editor({ image, onClose }: Props) {
   const [versions, setVersions] = useState<Version[]>([{ url: image.url, label: 'Исходник' }])
   const [current, setCurrent] = useState(0)
   const [peek, setPeek] = useState(false)
+  // план правки: рамка объекта от бэкенда, которую можно поправить перед генерацией
+  const [plan, setPlan] = useState<PlanRect | null>(null)
   // шторка «до / после»: исходник против текущей версии
   const [compareOn, setCompareOn] = useState(false)
   const [hist, setHist] = useState({ undo: 0, redo: 0 })
@@ -117,7 +120,7 @@ export function Editor({ image, onClose }: Props) {
 
   useEffect(() => recolor(mode), [mode, recolor])
   // подсказка удаления и описание правки — разные вещи, при смене режима поле очищается
-  useEffect(() => setPrompt(''), [mode])
+  useEffect(() => { setPrompt(''); setPlan(null) }, [mode])
 
   const computeBox = useCallback((): Box | null => {
     const d = ctx().getImageData(0, 0, maskW, maskH).data
@@ -162,6 +165,7 @@ export function Editor({ image, onClose }: Props) {
     if (record && bbox) pushUndo()
     ctx().clearRect(0, 0, maskW, maskH)
     setBbox(null)
+    setPlan(null)
   }
 
   /* ---------------- drawing ---------------- */
@@ -259,14 +263,38 @@ export function Editor({ image, onClose }: Props) {
 
   async function apply() {
     if (!bbox || busy) return
+    const text = prompt.trim()
+    // добавить / заменить: сначала план — рамка, где и какого размера встанет объект, её можно поправить
+    if (mode === 'edit' && !plan) {
+      const ctrl = new AbortController()
+      abortRef.current = ctrl
+      setBusy({ progress: 0.05, stage: 'Планирование' })
+      setError(null)
+      try {
+        const p = await planInpaint(
+          { imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text }, ctrl.signal,
+        )
+        setBusy(null)
+        if (p.box) { setPlan(p.box); return }
+      } catch (e) {
+        setBusy(null)
+        if ((e as Error).name !== 'AbortError') setError((e as Error).message)
+        return
+      }
+    }
+    await generate(plan ?? undefined)
+  }
+
+  async function generate(box?: PlanRect) {
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    setPlan(null)
     setBusy({ progress: 0, stage: '' })
     setError(null)
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined },
+        { imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )
@@ -321,7 +349,7 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- popover placement ---------------- */
 
-  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare
+  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan
   let pop = { x: 0, y: 0, placement: 'bottom' as 'top' | 'bottom' }
   if (bbox) {
     const bx = left + bbox.x / k
@@ -384,6 +412,18 @@ export function Editor({ image, onClose }: Props) {
               className={`absolute inset-0 size-full ${busy || (showPopover && mode === 'remove') ? 'animate-breathe' : 'opacity-50'}`}
             />
           </div>
+
+          {/* план правки: рамка объекта — подвинуть, растянуть, затем сгенерировать */}
+          {plan && !busy && (
+            <PlanBox
+              box={plan}
+              onChange={setPlan}
+              onConfirm={() => generate(plan)}
+              onCancel={() => setPlan(null)}
+              width={dispW}
+              height={dispH}
+            />
+          )}
 
           {/* превью лассо */}
           {lasso.length > 1 && (

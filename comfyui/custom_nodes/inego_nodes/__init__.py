@@ -501,9 +501,103 @@ class InegoSkyMatch:
         return (rgb.permute(1, 2, 0)[None],)
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch}
+class InegoObjectMask:
+    """Маска нового объекта после генерации (Inpainting «добавить / заменить») и его тени.
+
+    Вклейка «всего, что изменилось рядом» забирала и побочные правки модели: высветленную траву вокруг человека,
+    газон, перерисованный в плитку. Здесь: изменения рядом с выделением → их рамка → SAM 2.1 даёт точный силуэт
+    объекта (точка-подсказка — центр выделения). Тень — отдельно: связанные с объектом пиксели, которые стали
+    заметно темнее исходника (не светлее и не другого цвета).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),  # результат генерации (кроп)
+                "original": ("IMAGE",),  # тот же кроп до генерации
+                "seed": ("MASK",),  # выделение пользователя (откуда начинается объект)
+                "allowed": ("MASK",),  # где модели разрешено было рисовать
+                "threshold": ("FLOAT", {"default": 0.09, "min": 0.01, "max": 0.5, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("MASK", "MASK")
+    RETURN_NAMES = ("object", "shadow")
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    def run(self, image, original, seed, allowed, threshold):
+        img = image[0].float().numpy()
+        org = original[0].float().numpy()
+        h, w = img.shape[:2]
+
+        def fit(m):
+            m = m[0].float()[None, None]
+            if m.shape[-2:] != (h, w):
+                m = F.interpolate(m, size=(h, w), mode="bilinear", align_corners=False)
+            return m[0, 0].numpy() > 0.5
+
+        core, room = fit(seed), fit(allowed)
+        empty = torch.zeros((1, h, w))
+        sigma = max(1.0, min(h, w) / 400)
+        a = ndimage.gaussian_filter(img, sigma=(sigma, sigma, 0))
+        b = ndimage.gaussian_filter(org, sigma=(sigma, sigma, 0))
+        diff = (np.abs(a - b).max(-1) > threshold) & room
+        # изменения, связанные с выделением (с «мостиками» — крона, ветки)
+        bridged = ndimage.binary_dilation(diff, iterations=max(1, round(min(h, w) * 0.006)))
+        lab, n = ndimage.label(bridged | core)
+        ids = np.unique(lab[core & (lab > 0)])
+        region = np.isin(lab, ids) & (diff | core)
+        if region.sum() < 64:
+            log.info("INEGO object: изменений рядом с выделением нет")
+            return (empty, empty)
+        ys, xs = np.nonzero(region)
+        box = [xs.min() / w, ys.min() / h, (xs.max() + 1) / w, (ys.max() + 1) / h]
+        cy, cx = ndimage.center_of_mass(core) if core.any() else ((ys.min() + ys.max()) / 2, (xs.min() + xs.max()) / 2)
+
+        processor, model = _sam()
+        rgb = _to_uint8(image[0])
+        px = [box[0] * w, box[1] * h, box[2] * w, box[3] * h]
+        model.to(_device())
+        try:
+            inputs = processor(
+                images=rgb, input_boxes=[[px]], input_points=[[[[cx, cy]]]], input_labels=[[[1]]], return_tensors="pt"
+            ).to(_device())
+            with torch.no_grad():
+                out = model(**inputs, multimask_output=True)
+            masks = processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0][0].numpy() > 0
+            scores = out.iou_scores[0, 0].float().cpu().numpy()
+        finally:
+            model.to("cpu")
+        # из уверенных — тот, что лучше всего совпадает с изменениями (объект, а не кусок газона)
+        good = [i for i in range(len(scores)) if scores[i] >= scores.max() - 0.1]
+        best = max(good, key=lambda i: (masks[i] & region).sum() / max(1, (masks[i] | region).sum()))
+        obj = ndimage.binary_fill_holes(masks[best]) & room
+        # то, что SAM не увидел, но точно изменилось внутри рамки объекта (тонкие детали) — тоже объект
+        obj |= region & ndimage.binary_dilation(obj, iterations=max(1, round(min(h, w) * 0.004)))
+
+        # тень: связанная с объектом область, ставшая темнее (а не просто другой), ниже середины объекта
+        la, lb = a.mean(-1), b.mean(-1)
+        darker = (lb - la > threshold * 0.6) & room & ~obj
+        oy = np.nonzero(obj)[0]
+        if oy.size:
+            darker[: int(oy.min() + 0.5 * (oy.max() - oy.min()))] = False
+        near = ndimage.binary_dilation(obj, iterations=max(2, round(min(h, w) * 0.01)))
+        lab2, _ = ndimage.label(darker | near)
+        sh_ids = np.unique(lab2[near & (lab2 > 0)])
+        shadow = np.isin(lab2, sh_ids) & darker
+        log.info(
+            "INEGO object: SAM score %.2f, объект %.1f%%, тень %.1f%% кропа (изменений рядом было %.1f%%)",
+            scores[best], 100 * obj.mean(), 100 * shadow.mean(), 100 * region.mean(),
+        )
+        return (torch.from_numpy(obj.astype(np.float32))[None], torch.from_numpy(shadow.astype(np.float32))[None])
+
+
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
     "InegoZoneRestyle": "INEGO Zone Restyle (source content, render light)",
     "InegoSkyMatch": "INEGO Sky Match (sky colour from reference)",
+    "InegoObjectMask": "INEGO Object Mask (new object + shadow, SAM 2.1)",
 }
