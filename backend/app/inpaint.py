@@ -166,6 +166,16 @@ Q21_REMOVE_PROMPT = (
     "<image1>; the mask is only a guide and leaves no trace."
 )
 Q21_KEEP = " Keep {keep} exactly as they are."
+# дописывается к запросу переписчика: он пишет «внутри белой области — только объект» и молчит о фоне, и 2.1
+# рисовала объект на белом прямоугольнике маски (предметная съёмка на белом), а SAM брал прямоугольник за объект
+Q21_MASK_TRACE = (
+    "The mask <image2> only marks the area: its white is not a colour, backdrop or panel and leaves no trace, "
+    "no white, blank or empty area appears in the result."
+)
+Q21_MASK_TRACE_ADD = (
+    " Inside the marked area the original background of <image1> (ground, grass, paving, walls, windows, sky) "
+    "stays and continues around the new element."
+)
 # Qwen-Image-Edit-2511 — родной способ: инструкция по Picture 1 + Picture 2 — тот же кадр с тонким красным контуром
 # области правки (2511 понимает пометки и вспомогательные линии; отдельную ч/б маску её не учили понимать)
 Q2511_EDIT_PROMPT = (
@@ -464,9 +474,10 @@ def build_workflow(
     if model == QWEN_EDIT_MODEL:
         return build_qwen_workflow(crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
     if model in QWEN21_MODELS:
-        # qwen-image-2.1 — базовая модель, qwen-image-2.1-turbo — Turbo
+        # прогон с маской второй картинкой (native) — всегда Turbo: базовая принимала белое маски буквально и рисовала
+        # объект на белом прямоугольнике. Базовая (qwen-image-2.1) — во втором прогоне по шуму под объектом: фактура
         return build_qwen21_workflow(
-            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL
+            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL and not native
         )
     files = FLUX_MODELS[model]
     wf: dict = {
@@ -973,6 +984,7 @@ async def run_remove(
     if model in QWEN21_MODELS:
         request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
         prompt = await rewrite_q21(r.crop, r.mask, "remove", request) or prompt
+        prompt += " " + Q21_MASK_TRACE
     prompt += REALISM_REMOVE
     log.info(
         "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
@@ -1246,6 +1258,7 @@ async def run_edit(
         prompt = await rewrite_q21(
             r.crop, r.mask, "add" if extra is not None else "change", request.strip()
         ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
+        prompt += " " + Q21_MASK_TRACE + (Q21_MASK_TRACE_ADD if extra is not None else "")
     elif native:
         # 2511: место и размер — красным контуром на Picture 2
         prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
