@@ -30,7 +30,7 @@ from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN_EDIT,
     QWEN_EDIT_MODEL, log,
 )
-from .prompting import DEEPSEEK_API_KEY, _box, _chat, _data_url, llm_model
+from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model
 
 CONTEXT = 1.0  # контекст вокруг маски: столько же от её размера с каждой стороны
 MIN_CROP = 512  # минимальная сторона кропа в пикселях исходника — модели нужен контекст
@@ -66,8 +66,8 @@ HINT_RULE = (
 REMOVE_PROMPT = (
     "Remove {object} from the image completely, together with any shadow and reflection it casts. "
     "In its place show {background}, seamlessly continuing the surrounding surfaces, textures, patterns, lines "
-    "and lighting with correct perspective, as if it had never been there. Do not add any new object, person, "
-    "plant, sign or text. Everything else stays exactly as in image 1: same colours, light, sharpness and grain."
+    "and lighting with correct perspective, as if it had never been there; the area shows only that continuing "
+    "background. Everything else stays exactly as in image 1: same colours, light, sharpness and grain."
 )
 KEEP_PROMPT = " Keep {keep} exactly as they are in image 1, only the removed thing disappears."
 REMOVE_FALLBACK = {
@@ -110,9 +110,8 @@ EDIT_PROMPT = (
     "Match the camera perspective, lens and horizon of image 1; light it from the same direction and with the "
     "same colour as everything around it, with contact shadows and cast shadows of the same direction and "
     "softness as the other objects, reflections of the surrounding scene on glossy surfaces, the same colour "
-    "grading, haze, sharpness, depth of field and grain. It is shown whole at its real size, never cut off. "
-    "Do not add lens flares, glow, light leaks or haze that image 1 does not have. Everything else stays exactly "
-    "as in image 1."
+    "grading, haze, sharpness, depth of field and grain. It is shown whole at its real size. The light, contrast "
+    "and clarity of the scene stay exactly as in image 1, and everything else stays exactly as in image 1."
 )
 # область правки подсвечена на image 1 — модель видит, где и какого размера рисовать, и не путает место по словам
 MARK_RULE = (
@@ -134,8 +133,9 @@ REFINE_PROMPT = (
     "{instruction}. Keep its pose, silhouette, size, position, colours and lighting, and fix every defect: a "
     "missing, cut-off or blurry head or face, malformed or extra fingers and hands, missing or extra limbs, "
     "semi-transparent or ghostly parts, smeared or melted details, parts cut off at an edge. It must be whole and "
-    "anatomically and physically correct, with crisp natural detail (face, hands, hair, fabric folds, leaves, "
-    "bark, materials) and the same sharpness, noise and grain as the surroundings. Everything else stays exactly as "
+    "anatomically and physically correct, with natural detail (face, hands, hair, fabric folds, leaves, "
+    "bark, materials) and the same sharpness, noise and grain as the surroundings, as an unretouched photograph: "
+    "natural skin texture with visible pores, real micro-texture and subtle wear. Everything else stays exactly as "
     "in image 1."
 )
 REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечит полупрозрачность и шлейфы; на 6 уже меняется цвет одежды
@@ -149,7 +149,7 @@ Q21_EDIT_PROMPT = (
     "Edit <image1> only inside the region marked white in the mask <image2> ({location}): {instruction}. "
     "{size_rule}It must look photographed in the same shot: {look}. Same camera perspective, scale, light direction "
     "and colour, contact and cast shadows, colour grading, sharpness and grain as <image1>. Everything outside the "
-    "marked region stays exactly as in <image1>. Do not draw the mask, any white shape or outline."
+    "marked region stays exactly as in <image1>; the mask is only a guide and leaves no trace."
 )
 Q21_SIZE_ADD = (
     "The marked region shows where it stands and its full size: it fills the region at its real size, standing at "
@@ -160,9 +160,9 @@ Q21_SIZE_ADD = (
 Q21_REMOVE_PROMPT = (
     "Remove {object} from <image1> completely, together with any shadow and reflection it casts; it lies in the "
     "region marked white in the mask <image2>. Fill that region with {background}, seamlessly continuing the "
-    "surrounding surfaces, textures, lines and lighting with correct perspective, as if it had never been there. "
-    "Do not add any new object. Everything outside the marked region stays exactly as in <image1>. Do not draw the "
-    "mask or any white shape."
+    "surrounding surfaces, textures, lines and lighting with correct perspective, as if it had never been there; "
+    "the region shows only that continuing background. Everything outside the marked region stays exactly as in "
+    "<image1>; the mask is only a guide and leaves no trace."
 )
 Q21_KEEP = " Keep {keep} exactly as they are."
 # Qwen-Image-Edit-2511 — родной способ: инструкция по Picture 1 + Picture 2 — тот же кадр с тонким красным контуром
@@ -171,8 +171,8 @@ Q2511_EDIT_PROMPT = (
     "Edit Picture 1 only inside the area outlined in red in Picture 2 ({location}): {instruction}. "
     "{size_rule}It must look photographed in the same shot: {look}. Same camera perspective, scale, light direction "
     "and colour, contact and cast shadows, colour grading, sharpness and grain as Picture 1. Picture 2 is only a "
-    "guide: the red outline is not part of the scene and must not appear anywhere. Everything outside the outlined "
-    "area stays exactly as in Picture 1."
+    "guide: the result is based on the clean Picture 1 and the red outline leaves no trace. Everything outside the "
+    "outlined area stays exactly as in Picture 1."
 )
 Q2511_SIZE_ADD = (
     "The outlined area shows where it stands and its full size: it fills the area at its real size, standing at "
@@ -181,9 +181,9 @@ Q2511_SIZE_ADD = (
 Q2511_REMOVE_PROMPT = (
     "Remove {object} from Picture 1 completely, together with any shadow and reflection it casts; it is inside the "
     "area outlined in red in Picture 2. Fill that area with {background}, seamlessly continuing the surrounding "
-    "surfaces, textures, lines and lighting with correct perspective, as if it had never been there. Do not add any "
-    "new object. Picture 2 is only a guide: the red outline must not appear anywhere. Everything outside the "
-    "outlined area stays exactly as in Picture 1."
+    "surfaces, textures, lines and lighting with correct perspective, as if it had never been there; the area shows "
+    "only that continuing background. Picture 2 is only a guide: the result is based on the clean Picture 1 and "
+    "the red outline leaves no trace. Everything outside the outlined area stays exactly as in Picture 1."
 )
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
@@ -960,6 +960,7 @@ async def run_remove(
     if model == QWEN21_MODEL:
         request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
         prompt = await rewrite_q21(r.crop, r.mask, "remove", request) or prompt
+    prompt += REALISM_REMOVE
     log.info(
         "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
         model, *r.src.size, r.box, *r.gen_size, seed, what.get("shadow"), prompt,
@@ -1237,6 +1238,7 @@ async def run_edit(
         prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
     else:
         prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
+    prompt += REALISM_EDIT
     log.info(
         "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
         model, *src.size, r.box, *r.gen_size, seed, what.get("kind"), what.get("box") if extra else None, request, prompt,

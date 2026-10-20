@@ -88,10 +88,26 @@ KEEP_SUR = (
     "image 2 species and season, flat grey areas become real asphalt or paving, placeholder cars and people become "
     "real ones, all in the light, shadows and colours of image 2."
 )
+# Реализм — утвердительно и языком фотографа (гайды BFL по FLUX.2 и по Qwen-Image): камера, объектив, свет, фактура
+# и мелкие несовершенства реального фото. Без «8k / masterpiece / ultra-detailed / flawless / render» — они тянут
+# в CGI, и без отрицаний: FLUX не поддерживает негативные промпты, отрицание фокусирует модель на запрещённом
 PHOTOREAL = (
-    "Absolute photorealism: physically correct light falloff, bounce light and contact shadows, real glass "
-    "reflections, individual leaves and grass blades, natural sky structure, subtle real-world imperfections, true "
-    "camera optics and fine sensor grain. It must read as a real photograph, not as a 3D render."
+    "An unretouched architectural photograph taken on location with a full-frame camera and a sharp prime lens: "
+    "physically correct light falloff, bounce light and soft contact shadows, real glass with reflections and "
+    "visible interiors, individual leaves and grass blades, a natural sky, true-to-life materials with real "
+    "micro-texture, subtle weathering and slight unevenness, natural lens behaviour with gentle depth-of-field "
+    "falloff and faint vignetting, true dynamic range and fine sensor grain."
+)
+# для правок Inpainting: то, что добавлено или изменено, — снято той же камерой в том же кадре
+REALISM_EDIT = (
+    " Everything new is a real photographed thing from the same shot, as an unretouched photograph: true-to-life "
+    "materials with real micro-texture and subtle wear, people with natural skin texture, visible pores, slight "
+    "asymmetry and relaxed natural poses, fabric with real folds, the same lens sharpness, depth of field, "
+    "dynamic range, noise and fine sensor grain as the rest of the photo."
+)
+REALISM_REMOVE = (
+    " The filled area reads as the same unretouched photograph: the same real surface texture, wear, "
+    "noise and fine sensor grain as its surroundings."
 )
 FINAL_LOCK = "The building itself stays exactly as in image 1: only the world around it and the light change."
 
