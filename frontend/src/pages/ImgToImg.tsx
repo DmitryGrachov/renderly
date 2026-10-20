@@ -32,6 +32,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const fallback = !!modelById(chosen).inpaintOnly
   const model = fallback ? IMG2IMG_FALLBACK : chosen
   const activeModel = modelById(model)
+  // Qwen-Image-2.1 Turbo: шкалы «сила» нет — со старта от исходника она то копирует черновик, то делает полный
+  // рендер в зависимости от сида; рендер всегда с чистого шума (см. backend/app/comfy.py)
+  const fixedStrength = model === 'qwen-image-2.1'
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
@@ -450,17 +453,17 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
             <div className="my-6 h-px bg-line" />
 
-            <Step n={2} title="Сила эффекта" hint="Насколько сильно менять сцену" />
-            <div className="mt-4">
+            <Step n={2} title="Сила эффекта" hint={fixedStrength ? 'На Qwen-Image 2.1 не регулируется — всегда полный нейрорендер' : 'Насколько сильно менять сцену'} />
+            <div className={`mt-4 ${fixedStrength ? 'opacity-50' : ''}`}>
               <div className="mb-3 flex items-baseline justify-between">
-                <span className="text-[13px] text-mute">{strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
-                <span className="text-[15px] font-semibold tabular-nums">{Math.round(strength * 100)}%</span>
+                <span className="text-[13px] text-mute">{fixedStrength ? 'Полный рендер' : strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
+                <span className="text-[15px] font-semibold tabular-nums">{fixedStrength ? '100' : Math.round(strength * 100)}%</span>
               </div>
               <input
-                type="range" min={0.1} max={1} step={0.01} value={strength} disabled={running}
+                type="range" min={0.1} max={1} step={0.01} value={fixedStrength ? 1 : strength} disabled={running || fixedStrength}
                 onChange={(e) => setStrength(Number(e.target.value))}
                 className="range w-full"
-                style={{ '--fill': `${((strength - 0.1) / 0.9) * 100}%` } as React.CSSProperties}
+                style={{ '--fill': `${fixedStrength ? 100 : ((strength - 0.1) / 0.9) * 100}%` } as React.CSSProperties}
               />
             </div>
 
