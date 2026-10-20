@@ -27,7 +27,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, to_png
 from .comfy import fit_size as _fit16
 from .config import (
-    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN_EDIT,
+    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS, QWEN21_INPAINT_BASE,
+    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN_EDIT,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model
@@ -385,10 +386,11 @@ def build_qwen_workflow(
 
 def build_qwen21_workflow(
     crop: str, mask: str, prompt: str, seed: int, prefix: str, reference: str | None = None, denoise: float = 1.0,
-    native: bool = False,
+    native: bool = False, base: bool = False,
 ) -> dict:
-    """То же на Qwen-Image-2.1 Turbo: картинки — в TextEncodeQwenImage21 (<image1> — кроп, <image2> — подсказка),
-    латент <image1> (кроп кратен 32 — размер сохраняется) с шумом только под маской, 8 шагов по расписанию Turbo.
+    """То же на Qwen-Image-2.1: картинки — в TextEncodeQwenImage21 (<image1> — кроп, <image2> — подсказка),
+    латент <image1> (кроп кратен 32 — размер сохраняется) с шумом только под маской. Turbo — 8 шагов по своему
+    расписанию; base — базовая модель, QWEN21_BASE_STEPS шагов по simple (как в шаблонах ComfyUI).
     denoise < 1 — хвост расписания (второй прогон)."""
     q = QWEN21
     sig = q["sigmas"]
@@ -397,7 +399,7 @@ def build_qwen21_workflow(
     # в 2.1 картинки в тексте адресуются как <image1>, <image2>
     text = re.sub(r"\bimage ([12])\b", r"<image\1>", prompt)
     wf: dict = {
-        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet"], "weight_dtype": "default"}},
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet_base" if base else "unet"], "weight_dtype": "default"}},
         # KV-кэш образов — в RAM: в 16 ГБ видеопамяти рядом с энкодером (~9 ГБ) и моделью (~7 ГБ) он не помещается (OOM)
         "cache": {"class_type": "QwenImage21Cache", "inputs": {"model": ["unet", 0], "device": "cpu", "dtype": "default"}},
         "diffdiff": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cache", 0], "strength": 1.0}},
@@ -429,7 +431,13 @@ def build_qwen21_workflow(
             "inputs": {"model": ["cache" if native else "diffdiff", 0], "positive": ["text", 0], "negative": ["text", 1], "cfg": 1.0},
         },
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-        "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": ", ".join(f"{v:g}" for v in sig)}},
+        "sigmas": (
+            {
+                "class_type": "BasicScheduler",
+                "inputs": {"model": ["cache", 0], "scheduler": "simple", "steps": QWEN21_BASE_STEPS, "denoise": denoise},
+            }
+            if base else {"class_type": "ManualSigmas", "inputs": {"sigmas": ", ".join(f"{v:g}" for v in sig)}}
+        ),
         "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "sample": {
             "class_type": "SamplerCustomAdvanced",
@@ -448,6 +456,15 @@ def build_qwen21_workflow(
     return wf
 
 
+# базовая Qwen-Image-2.1 скачана и включена (QWEN21_INPAINT_BASE) — выясняется в generate() перед сборкой workflow
+_q21_base = False
+
+
+async def _detect_q21_base(client: httpx.AsyncClient) -> None:
+    global _q21_base
+    _q21_base = QWEN21_INPAINT_BASE and QWEN21["unet_base"] in (await client.get("/models/diffusion_models")).json()
+
+
 def build_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str,
     reference: str | None = None, steps: int = TOTAL_STEPS, native: bool = False,
@@ -456,7 +473,7 @@ def build_workflow(
     if model == QWEN_EDIT_MODEL:
         return build_qwen_workflow(crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
     if model == QWEN21_MODEL:
-        return build_qwen21_workflow(crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
+        return build_qwen21_workflow(crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, _q21_base)
     files = FLUX_MODELS[model]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
@@ -839,6 +856,9 @@ class _Region:
             soft = self.gen.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
         async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
             await _check_model(client, model)
+            if model == QWEN21_MODEL:
+                await _detect_q21_base(client)
+                log.info("Inpainting Qwen-Image-2.1: %s", f"базовая, {QWEN21_BASE_STEPS} шагов" if _q21_base else "Turbo, 8 шагов")
             crop_name = await _upload(client, to_png(self.crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
             mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
             ref_name = None

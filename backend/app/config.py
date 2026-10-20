@@ -74,6 +74,9 @@ QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
 # базовая с чистого шума перерисовывала здание (уже башня, сдвинутые эркеры); от готового кадра она его не двигает
 QWEN21_REFINE = float(os.getenv("QWEN21_REFINE", "0.6"))
 QWEN21_BASE_STEPS = int(os.getenv("QWEN21_BASE_STEPS", "25"))
+# Inpainting на Qwen-Image-2.1: базовая модель (если скачана) на QWEN21_BASE_STEPS шагов вместо Turbo на 8 —
+# фактура нового объекта (листва, ткань, кожа) без «пластика» дистиллята
+QWEN21_INPAINT_BASE = os.getenv("QWEN21_INPAINT_BASE", "true").lower() == "true"
 # модели генерации, доступные в Img to Img (Qwen-Image-Edit-2511 — только Inpainting)
 IMG2IMG_MODELS = [*FLUX_MODELS, QWEN21_MODEL]
 # модели генерации, доступные в Inpainting
