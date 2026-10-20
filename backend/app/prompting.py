@@ -54,10 +54,17 @@ INTRO = (
 )
 KEEP_GEOMETRY = (
     "Keep the exact same camera position, focal length, perspective, framing and horizon line. "
-    "Keep the building geometry, massing, silhouette, proportions, floor count, window layout, every opening, "
-    "edge and line exactly as in image 1; do not add, remove or move any architectural element. The roofline "
+    "Keep the building geometry, massing, silhouette, proportions, floor count, window layout, every opening "
+    "and edge exactly as in image 1; do not add, remove or move any architectural element. The roofline "
     "and the silhouette of the building against the sky stay exactly as in image 1: no added rooftop volumes, "
     "penthouses, extra floors, parapets, antennas, signs or structures on or above the roof."
+)
+# обводка граней скетча (SketchUp, вьюпорт): модель рисовала её тёмным кантом по краю карниза и углам —
+# «edge and line» в замке геометрии к тому же просил сохранить каждую линию
+DRAWING_LINES = (
+    "Thin black or dark outline strokes along the edges, corners and silhouettes in image 1 are only the lines of "
+    "the drawing, not physical objects: in the photograph every edge is a clean meeting of the real materials, "
+    "with no dark outline, trim, stripe or groove along it."
 )
 KEEP_MATERIALS = (
     "Keep every material exactly as in image 1: the same material type, colour, texture pattern, joint and panel "
@@ -415,7 +422,10 @@ def assemble(
     family="qwen21": вступление с действия и ролей картинок, теги <imageN>, один абзац."""
     lock = SPEC_MATERIALS.format(spec=materials.rstrip(".") + ".") if materials else KEEP_MATERIALS
     q21 = family == "qwen21"
-    parts = [Q21_INTRO, Q21_LOOK_ROLE if has_ref else "", KEEP_GEOMETRY, lock] if q21 else [INTRO, KEEP_GEOMETRY, lock]
+    parts = (
+        [Q21_INTRO, Q21_LOOK_ROLE if has_ref else "", KEEP_GEOMETRY, DRAWING_LINES, lock] if q21
+        else [INTRO, KEEP_GEOMETRY, DRAWING_LINES, lock]
+    )
     if has_ref:
         parts.append(Q21_LOOK_RULE if q21 else REF_RULE)
     if keep_sky:
