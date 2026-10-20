@@ -21,11 +21,14 @@
      условные деревья — настоящими. Здание вне маски не трогается.
 
 Qwen-Image-2.1 Turbo — та же логика в родном для неё виде (build_qwen21_workflow):
-  - исходник, референс и небо референса — картинки <image1>, <image2>, <image3> в TextEncodeQwenImage21
-    (энкодер Qwen3-VL читает их и вставляет латентами в последовательность) — вместо цепочки ReferenceLatent;
-  - кадр ~2 Мп со сторонами кратными 32 (родное 2K), 8 шагов по фиксированному расписанию Turbo, cfg 1;
-  - старт с латента исходника (VAE 2.1) с хвоста расписания: «сила» → 6 или 7 шагов из 8 (q21_steps).
-    С чистого шума (все 8 шагов) 2.1 перекадрирует сцену — камера отъезжает, здание смещается;
+  - исходник и референс — картинки <image1>, <image2> в TextEncodeQwenImage21 (энкодер Qwen3-VL читает их
+    и вставляет латентами в последовательность) — вместо цепочки ReferenceLatent. Образца неба (image 3) нет:
+    каждая картинка удлиняет последовательность, и на 16 ГБ ComfyUI падал по CUDA OOM;
+  - кадр ~1.5 Мп со сторонами кратными 32, референс ~0.5 Мп; 8 шагов Turbo по фиксированному расписанию, cfg 1;
+  - старт с чистого шума (пустой латент энкодера в размере <image1>): со старта от латента исходника
+    (σ ≤ 0.98) 2.1 почти копирует черновик — меняется только цвет. Цена — небольшое перекадрирование
+    (здание смещается на 2–3% кадра), его снимает InegoAlign: масштаб и сдвиг по контурам до исходника.
+    «Сила» здесь не применяется;
   - зоны — тем же InegoKeepZones / InegoZoneRestyle, перерисовка по маске — Differential Diffusion поверх
     QwenImage21Cache и хвост расписания; небо — тот же InegoSkyMatch.
 """
@@ -61,6 +64,8 @@ from .presets import reference_image
 from .prompting import analyze_reference, build_prompt, zone_instruction
 
 REF_MEGAPIXELS = 1.0  # размер референса (image 2) во FLUX
+# в Qwen-Image-2.1 референс удлиняет последовательность модели — на 1 Мп (и с образцом неба) ComfyUI падал по OOM
+QWEN21_REF_MEGAPIXELS = 0.5
 TOTAL_STEPS = 8  # шаги полного расписания; при denoise < 1 выполняется только хвост
 
 
@@ -187,13 +192,6 @@ def _sky_match(wf: dict, image: list) -> list:
     return ["sky_match", 0]
 
 
-def q21_steps(denoise: float) -> int:
-    """«Сила» (denoise 0.9–1.0 из denoise_for) → шаги Qwen-Image-2.1 из 8: 6 (старт σ 0.95 — ближе к исходнику,
-    облака черновика держатся) или 7 (σ 0.98 — свет и атмосфера референса сильнее). 8 не бывает: с чистого шума
-    2.1 перекадрирует сцену."""
-    return 7 if denoise >= 0.95 else 6
-
-
 def _q21_sigmas(denoise: float) -> str:
     """Расписание Turbo (8 шагов); denoise < 1 — его хвост из round(8 * denoise) шагов."""
     sig = QWEN21["sigmas"]
@@ -227,7 +225,6 @@ def _q21_sampling(wf: dict, tag: str, text: str, model: list, latent: list, deno
 def build_qwen21_workflow(
     source: str,
     prompt: str,
-    steps: int,
     seed: int,
     reference: str | None,
     keep_sky: bool = False,
@@ -235,10 +232,9 @@ def build_qwen21_workflow(
     keep_sur: bool = False,
     building_box: list[float] | None = None,
     zone_prompt: str = "",
-    sky_ref: str | None = None,
     sky_match: bool = False,
 ) -> dict:
-    """Img to Img на Qwen-Image-2.1 Turbo: <image1> — исходник (холст), <image2> — референс, <image3> — его небо."""
+    """Img to Img на Qwen-Image-2.1 Turbo: <image1> — исходник (холст), <image2> — референс."""
     q = QWEN21
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": q["unet"], "weight_dtype": "default"}},
@@ -248,16 +244,11 @@ def build_qwen21_workflow(
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": q["vae"]}},
         "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         "src_img": {"class_type": "LoadImage", "inputs": {"image": source}},
-        # латент самого исходника (VAE 2.1, размер как у <image1>)
-        "src_lat": {"class_type": "VAEEncode", "inputs": {"pixels": ["src_img", 0], "vae": ["vae", 0]}},
     }
     images = {"images.image_1": ["src_img", 0]}
     if reference:
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
         images["images.image_2"] = ["ref_img", 0]
-    if sky_ref and reference and not keep_sky:
-        wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
-        images["images.image_3"] = ["sky_ref_img", 0]
 
     def encode(name: str, text: str, imgs: dict) -> str:
         # resolution 0 — кадр по <image1> (стороны уже кратны 32)
@@ -267,20 +258,24 @@ def build_qwen21_workflow(
         }
         return name
 
-    # проход 1 — полный рендер с латента исходника: кадр держится пиксель в пиксель
-    image = _q21_sampling(wf, "", encode("text", prompt, images), ["cache", 0], ["src_lat", 0], steps / 8, seed)
+    # проход 1 — полный рендер с чистого шума, затем кадр возвращается на место исходника
+    image = _q21_sampling(wf, "", encode("text", prompt, images), ["cache", 0], ["text", 2], 1.0, seed)
+    wf["align"] = {
+        "class_type": "InegoAlign",
+        "inputs": {"image": image, "source": ["src_img", 0], "max_scale": 0.08, "max_shift": 0.08},
+    }
+    image = ["align", 0]
 
     if keep_sky or keep_bg or keep_sur:
         _zones(wf, image, keep_sky, keep_bg, keep_sur, building_box)
         # проход 2 — только сохраняемые зоны: склейка — стартовый латент, шум под маской (Differential Diffusion),
-        # <image1> — исходник (держит расклад), <image2> — референс; образец неба здесь не нужен.
+        # <image1> — исходник (держит расклад), <image2> — референс.
         # Шагов — QWEN21_ZONE_STEPS из 8: на 7 (как ZONE_RESTYLE у FLUX) 2.1 подменяла деревья и добавляла кусты с референса
         wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cache", 0], "strength": 1.0}}
         wf["comp_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["restyle", 0], "vae": ["vae", 0]}}
         wf["zone_lat"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["comp_lat", 0], "mask": ["zones", 3]}}
-        zone_images = {k: v for k, v in images.items() if k != "images.image_3"}
         image = _q21_sampling(
-            wf, "_z", encode("text_z", zone_prompt or prompt, zone_images), ["diffdiff", 0], ["zone_lat", 0],
+            wf, "_z", encode("text_z", zone_prompt or prompt, images), ["diffdiff", 0], ["zone_lat", 0],
             QWEN21_ZONE_STEPS / 8, seed + 1,
         )
 
@@ -310,8 +305,7 @@ def build_workflow(
     """Workflow в API-формате ComfyUI."""
     if model == QWEN21_MODEL:
         return build_qwen21_workflow(
-            source, prompt, q21_steps(denoise), seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_ref,
-            sky_match,
+            source, prompt, seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_match,
         )
     files = FLUX_MODELS[model]
     wf: dict = {
@@ -485,7 +479,7 @@ async def run_img2img(
     # небо референса: рамка чистого неба из разбора DeepSeek (из кэша) — образец неба (image 3) в экстерьере
     sky_box = None
     exterior = scene == "exterior"
-    if ref_bytes and exterior and not keep_sky:
+    if ref_bytes and exterior and not keep_sky and family == "flux":
         try:
             sky_box = (await analyze_reference(ref_bytes)).get("_sky_box")
         except Exception as e:  # noqa: BLE001 — без образца неба генерация всё равно идёт
@@ -505,7 +499,7 @@ async def run_img2img(
         if ref_bytes:
             ref = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
             # референс — эталон окружения: больше пикселей → точнее небо, листва и свет
-            ref = ref.resize(fit_size(*ref.size, REF_MEGAPIXELS), Image.LANCZOS)
+            ref = ref.resize(fit_size(*ref.size, QWEN21_REF_MEGAPIXELS if family == "qwen21" else REF_MEGAPIXELS), Image.LANCZOS)
             ref_name = await _upload(client, to_png(ref), f"{uuid.uuid4().hex}.png")
             if sky_box:
                 sky_name = await _upload(client, to_png(_crop_sky(ref, sky_box)), f"{uuid.uuid4().hex}.png")

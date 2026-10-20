@@ -501,6 +501,96 @@ class InegoSkyMatch:
         return (rgb.permute(1, 2, 0)[None],)
 
 
+def _edge_map(img: torch.Tensor, w: int) -> np.ndarray:
+    """Карта контуров (модуль градиента яркости) шириной w, с обрезанными выбросами и нулевым средним."""
+    x = img.permute(2, 0, 1)[None].float()
+    h = max(8, round(w * x.shape[2] / x.shape[3]))
+    g = F.interpolate(x.mean(1, keepdim=True), size=(h, w), mode="area")[0, 0].numpy()
+    g = ndimage.gaussian_filter(g, 1.0)
+    m = np.hypot(ndimage.sobel(g, 1), ndimage.sobel(g, 0))
+    m = np.minimum(m, np.percentile(m, 99))  # яркие края не перевешивают остальные
+    return (m - m.mean()).astype(np.float32)
+
+
+def _xcorr(a: np.ndarray, b: np.ndarray, max_dx: int, max_dy: int) -> tuple[float, int, int]:
+    """Сдвиг b относительно a по пику нормированной взаимной корреляции (FFT), в пределах max_dx / max_dy."""
+    H, W = a.shape
+    c = np.fft.irfft2(np.fft.rfft2(a, s=(2 * H, 2 * W)) * np.conj(np.fft.rfft2(b, s=(2 * H, 2 * W))), s=(2 * H, 2 * W))
+    c = np.roll(np.roll(c, max_dy, 0), max_dx, 1)[: 2 * max_dy + 1, : 2 * max_dx + 1]
+    i = np.unravel_index(np.argmax(c), c.shape)
+    return float(c[i]) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6), int(i[0]) - max_dy, int(i[1]) - max_dx
+
+
+class InegoAlign:
+    """Совмещает результат с исходником: масштаб + сдвиг по контурам.
+
+    Qwen-Image-2.1 при сильной правке (рендер → фото с референсом) слегка перекадрирует сцену: здание сдвигается
+    на 2–3% кадра и чуть меняет масштаб. Ракурс тот же, поэтому хватает подобия без поворота: по картам контуров
+    ищется масштаб (грубо, затем точно) и сдвиг (пик взаимной корреляции), результат возвращается на место
+    исходника. Открывшийся край заполняется несдвинутым результатом. Если совпадение не лучше, чем без сдвига, —
+    кадр не трогается.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "source": ("IMAGE",),
+                "max_scale": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 0.3, "step": 0.01}),
+                "max_shift": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 0.3, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    @staticmethod
+    def _search(src: np.ndarray, out_img: torch.Tensor, w: int, scales, max_shift: float):
+        H, W = src.shape
+        best = (-1.0, 1.0, 0, 0)
+        for s in scales:
+            b_full = _edge_map(out_img, max(8, round(w * s)))
+            b = np.zeros_like(src)
+            hh, ww = min(H, b_full.shape[0]), min(W, b_full.shape[1])
+            b[:hh, :ww] = b_full[:hh, :ww]
+            # результат, увеличенный в s раз от левого верхнего угла, сдвинутый на (dx, dy), — поверх исходника
+            score, dy, dx = _xcorr(src, b, max(1, round(W * (max_shift + abs(s - 1)))), max(1, round(H * (max_shift + abs(s - 1)))))
+            if score > best[0]:
+                best = (score, float(s), dx, dy)
+        return best
+
+    def run(self, image, source, max_scale, max_shift):
+        out = image[0][..., :3]
+        src_img = source[0][..., :3]
+        coarse_w, fine_w = 512, 1024
+        a = _edge_map(src_img, coarse_w)
+        _, s0, _, _ = self._search(a, out, coarse_w, np.arange(1 - max_scale, 1 + max_scale + 1e-6, 0.005), max_shift)
+        a = _edge_map(src_img, fine_w)
+        score, s, dx, dy = self._search(a, out, fine_w, np.arange(s0 - 0.005, s0 + 0.0051, 0.001), max_shift)
+        base, _, _ = _xcorr(a, _edge_map(out, fine_w)[: a.shape[0], : a.shape[1]], 0, 0)
+        H, W = out.shape[:2]
+        tx, ty = dx / fine_w, dy / a.shape[0]  # доли кадра
+        if score <= base * 1.02 or (abs(s - 1) < 0.002 and abs(tx) * W < 1 and abs(ty) * H < 1):
+            log.info("INEGO align: сдвига нет (совпадение %.3f, со сдвигом %.3f)", base, score)
+            return (image,)
+        # точка результата p_out переходит в s * p_out + t; обратное отображение для grid_sample
+        ys, xs = torch.meshgrid(torch.arange(H, dtype=torch.float32), torch.arange(W, dtype=torch.float32), indexing="ij")
+        sx = (xs - tx * W) / s
+        sy = (ys - ty * H) / s
+        grid = torch.stack([(sx + 0.5) / W * 2 - 1, (sy + 0.5) / H * 2 - 1], -1)[None]
+        img = out.permute(2, 0, 1)[None].float()
+        warped = F.grid_sample(img, grid, mode="bicubic", padding_mode="border", align_corners=False)
+        inside = ((sx >= 0) & (sx <= W - 1) & (sy >= 0) & (sy <= H - 1)).float()
+        # мягкий шов у открывшегося края: там остаётся несдвинутый результат
+        inside = torch.from_numpy(ndimage.gaussian_filter(inside.numpy(), max(1.0, 0.004 * min(H, W)))).clamp(0, 1)
+        res = (warped * inside + img * (1 - inside))[0].clamp(0, 1).permute(1, 2, 0)[None]
+        log.info("INEGO align: масштаб %.3f, сдвиг %+.1f%% / %+.1f%% кадра (совпадение %.3f → %.3f)",
+                 s, 100 * tx, 100 * ty, base, score)
+        return (res,)
+
+
 class InegoObjectMask:
     """Маска нового объекта после генерации (Inpainting «добавить / заменить») и его тени.
 
@@ -631,10 +721,11 @@ class InegoObjectMask:
         return (torch.from_numpy(obj.astype(np.float32))[None], torch.from_numpy(shadow.astype(np.float32))[None])
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask}
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
     "InegoZoneRestyle": "INEGO Zone Restyle (source content, render light)",
     "InegoSkyMatch": "INEGO Sky Match (sky colour from reference)",
     "InegoObjectMask": "INEGO Object Mask (new object + shadow, SAM 2.1)",
+    "InegoAlign": "INEGO Align (match result framing to source)",
 }

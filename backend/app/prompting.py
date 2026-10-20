@@ -560,13 +560,24 @@ async def build_prompt(
                 {"type": "text", "text": "Image 2 (environment and light reference):"},
                 {"type": "image_url", "image_url": {"url": _data_url(reference, 1024)}},
             ]
-        raw = await _chat([{"role": "system", "content": system}, {"role": "user", "content": content}], json_mode=True)
-        data = json.loads(raw)
+        # второй попыткой — при разовом сбое (таймаут, битый JSON): шаблон намного слабее, а Qwen-Image-2.1
+        # с ним почти копирует черновик
+        for attempt in range(2):
+            try:
+                raw = await _chat([{"role": "system", "content": system}, {"role": "user", "content": content}], json_mode=True)
+                data = json.loads(raw)
+                data["prompt"]
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt:
+                    raise
+                log.warning("DeepSeek: сбой описания, повторяю: %s", e)
         if materials:
             # переведённая DeepSeek спецификация; если не вернул — исходный текст архитектора
             materials = (data.get("materials") or "").strip() or materials
         # образец неба (image 3) — экстерьер без «Сохранить небо», если на референсе есть чистое небо
-        sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box"))
+        # (только FLUX: в Qwen-Image-2.1 третья картинка не помещается в память)
+        sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box")) and family == "flux"
         result = (
             assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image, family=family),
             _box(data.get("box")) if need_box else None,

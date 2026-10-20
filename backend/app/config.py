@@ -61,9 +61,9 @@ QWEN21 = {
 # площадь кропа для Qwen-Image-2.1 (Мп): модель родная для 2K — на ~1 Мп объект на большом рендере рисовался
 # вдвое мельче итогового и выходил «пластиковым»
 QWEN21_MEGAPIXELS = float(os.getenv("QWEN21_MEGAPIXELS", "2.0"))
-# Img to Img на Qwen-Image-2.1: площадь кадра (Мп). Модель родная для 2K: на 1.5 Мп мелкая фактура (листва,
-# трава, швы облицовки) выходит мягче, чем могла бы
-QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "2.0"))
+# Img to Img на Qwen-Image-2.1: площадь кадра (Мп). Модель родная для 2K, но в последовательности ещё исходник
+# и референс: на 2 Мп ComfyUI на 16 ГБ падал по CUDA OOM
+QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "1.5"))
 # Img to Img на Qwen-Image-2.1, «Сохранить небо / фон / окружение»: шагов перерисовки зон из 8
 # (больше — фотореальнее, но 2.1 начинает подменять деревья и добавлять объекты с референса)
 QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
