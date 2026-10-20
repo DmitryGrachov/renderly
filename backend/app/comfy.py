@@ -506,7 +506,7 @@ async def run_img2img(
 
         workflow = build_workflow(
             source_name, width, height, prompt, denoise, seed, ref_name, keep_sky, keep_bg, keep_sur, box, model,
-            zone_prompt, sky_name, sky_match=exterior,
+            zone_prompt, sky_name, sky_match=exterior and SKY_MATCH > 0,
         )
         out = await _run(client, workflow)
 

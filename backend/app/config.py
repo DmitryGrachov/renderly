@@ -83,7 +83,7 @@ ZONE_RESTYLE = float(os.getenv("ZONE_RESTYLE", "0.875"))
 # заливка исходника так и остаётся гладкой «перекрашенной» плоскостью вместо травы
 ZONE_DETAIL = float(os.getenv("ZONE_DETAIL", "0.9"))
 # сила подгонки цвета неба к небу референса (0 — выкл.)
-SKY_MATCH = float(os.getenv("SKY_MATCH", "0.85"))
+SKY_MATCH = float(os.getenv("SKY_MATCH", "0"))
 LOCAL_LIGHT = float(os.getenv("LOCAL_LIGHT", "0.6"))
 # Inpainting: площадь кропа вокруг маски в мегапикселях (мелкий объект получает полное разрешение модели)
 INPAINT_MEGAPIXELS = float(os.getenv("INPAINT_MEGAPIXELS", "1.0"))
