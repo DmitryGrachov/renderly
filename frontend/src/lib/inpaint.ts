@@ -74,7 +74,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   if (req.box) body.append('box', req.box.map((v) => v.toFixed(4)).join(','))
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления
-  const expected = req.model === 'qwen-edit-2511' ? 60000 : req.model === 'qwen-image-2.1' ? 35000 : 12000
+  const expected = req.model === 'qwen-edit-2511' ? 60000 : req.model === 'qwen-image-2.1' ? 50000 : req.model === 'qwen-image-2.1-turbo' ? 35000 : 12000
   const start = performance.now()
   const timer = setInterval(() => {
     const t = (performance.now() - start) / expected

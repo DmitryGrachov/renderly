@@ -52,6 +52,7 @@ from .config import (
     QWEN21_BASE_STEPS,
     QWEN21_REFINE,
     QWEN21_MODEL,
+    QWEN21_MODELS,
     QWEN21_RENDER_MEGAPIXELS,
     QWEN21_ZONE_STEPS,
     QWEN_EDIT,
@@ -324,7 +325,7 @@ def build_workflow(
     qwen21_refine: bool = False,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
-    if model == QWEN21_MODEL:
+    if model in QWEN21_MODELS:
         return build_qwen21_workflow(
             source, prompt, seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_match,
             refine=qwen21_refine,
@@ -396,9 +397,11 @@ async def _check_model(client: httpx.AsyncClient, model: str) -> None:
     if model == QWEN_EDIT_MODEL:
         q = QWEN_EDIT
         need = (("unet_gguf", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]), ("loras", q["lora"]))
-    elif model == QWEN21_MODEL:
+    elif model in QWEN21_MODELS:
         q = QWEN21
         need = (("diffusion_models", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]))
+        if model == QWEN21_MODEL:
+            need += (("diffusion_models", q["unet_base"]),)
     else:
         files = FLUX_MODELS[model]
         need = (("diffusion_models", files["unet"]), ("text_encoders", files["text_encoder"]))
@@ -410,7 +413,7 @@ async def _check_model(client: httpx.AsyncClient, model: str) -> None:
             continue
         if name not in r.json():
             raise ModelUnavailable(f"Модель {model} ещё не загружена в ComfyUI (нет {name})")
-    await _use_family(client, {QWEN_EDIT_MODEL: "qwen-2511", QWEN21_MODEL: "qwen-2.1"}.get(model, "flux"))
+    await _use_family(client, "qwen-2511" if model == QWEN_EDIT_MODEL else "qwen-2.1" if model in QWEN21_MODELS else "flux")
 
 
 async def _upload(client: httpx.AsyncClient, data: bytes, name: str) -> str:
@@ -485,7 +488,7 @@ async def run_img2img(
     if seed is None:
         seed = random.randrange(2**48)
     src = Image.open(io.BytesIO(image)).convert("RGB")
-    family = "qwen21" if model == QWEN21_MODEL else "flux"
+    family = "qwen21" if model in QWEN21_MODELS else "flux"
     if family == "qwen21":
         width, height = fit_size(*src.size, QWEN21_RENDER_MEGAPIXELS, step=32)
     else:
@@ -515,10 +518,8 @@ async def run_img2img(
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         await _check_model(client, model)
-        # доводка базовой Qwen-Image-2.1 — если она скачана (entrypoint.sh)
-        qwen21_refine = family == "qwen21" and QWEN21_REFINE > 0 and QWEN21["unet_base"] in (
-            await client.get("/models/diffusion_models")
-        ).json()
+        # доводка базовой Qwen-Image-2.1 — только в режиме качества (qwen-image-2.1), не в Turbo
+        qwen21_refine = model == QWEN21_MODEL and QWEN21_REFINE > 0
         if family == "qwen21":
             log.info("Qwen-Image-2.1: Turbo%s", f" + доводка базовой ({QWEN21_REFINE:g})" if qwen21_refine else "")
         src_fit = src.resize((width, height), Image.LANCZOS)

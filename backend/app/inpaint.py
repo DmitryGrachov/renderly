@@ -27,8 +27,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, to_png
 from .comfy import fit_size as _fit16
 from .config import (
-    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS, QWEN21_INPAINT_BASE,
-    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN_EDIT,
+    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
+    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN_EDIT,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model
@@ -456,15 +456,6 @@ def build_qwen21_workflow(
     return wf
 
 
-# базовая Qwen-Image-2.1 скачана и включена (QWEN21_INPAINT_BASE) — выясняется в generate() перед сборкой workflow
-_q21_base = False
-
-
-async def _detect_q21_base(client: httpx.AsyncClient) -> None:
-    global _q21_base
-    _q21_base = QWEN21_INPAINT_BASE and QWEN21["unet_base"] in (await client.get("/models/diffusion_models")).json()
-
-
 def build_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str,
     reference: str | None = None, steps: int = TOTAL_STEPS, native: bool = False,
@@ -472,8 +463,11 @@ def build_workflow(
     """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
     if model == QWEN_EDIT_MODEL:
         return build_qwen_workflow(crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
-    if model == QWEN21_MODEL:
-        return build_qwen21_workflow(crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, _q21_base)
+    if model in QWEN21_MODELS:
+        # qwen-image-2.1 — базовая модель, qwen-image-2.1-turbo — Turbo
+        return build_qwen21_workflow(
+            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL
+        )
     files = FLUX_MODELS[model]
     wf: dict = {
         "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": files["unet"], "weight_dtype": "default"}},
@@ -856,9 +850,6 @@ class _Region:
             soft = self.gen.resize((gw, gh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * edge))))
         async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
             await _check_model(client, model)
-            if model == QWEN21_MODEL:
-                await _detect_q21_base(client)
-                log.info("Inpainting Qwen-Image-2.1: %s", f"базовая, {QWEN21_BASE_STEPS} шагов" if _q21_base else "Turbo, 8 шагов")
             crop_name = await _upload(client, to_png(self.crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
             mask_name = await _upload(client, to_png(soft.convert("RGB")), f"{uuid.uuid4().hex}.png")
             ref_name = None
@@ -961,7 +952,7 @@ async def run_remove(
     # маска протягивается вниз — под контактную тень у ног, колёс и основания
     src, core, grow = _load(image, mask, 0.04, SHADOW_DOWN)
     r = _Region(src, core, grow)
-    if model == QWEN21_MODEL:
+    if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     cw, ch = r.crop.size
 
@@ -973,11 +964,11 @@ async def run_remove(
         ImageDraw.Draw(r.mask).ellipse(
             (round(shadow[0] * cw), round(shadow[1] * ch), round(shadow[2] * cw), round(shadow[3] * ch)), fill=255
         )
-    native = model in (QWEN21_MODEL, QWEN_EDIT_MODEL)
+    native = model in (*QWEN21_MODELS, QWEN_EDIT_MODEL)
     if native:
-        tpl = Q21_REMOVE_PROMPT if model == QWEN21_MODEL else Q2511_REMOVE_PROMPT
+        tpl = Q21_REMOVE_PROMPT if model in QWEN21_MODELS else Q2511_REMOVE_PROMPT
         prompt = tpl.format(**what) + (Q21_KEEP.format(keep=what["keep"]) if what.get("keep") else "")
-    if model == QWEN21_MODEL:
+    if model in QWEN21_MODELS:
         request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
         prompt = await rewrite_q21(r.crop, r.mask, "remove", request) or prompt
     prompt += REALISM_REMOVE
@@ -1240,14 +1231,14 @@ async def run_edit(
             x1, y1, x2, y2 = extra.getbbox()
             core = ImageChops.multiply(extra, _rect_mask([0, (y1 + 2 * (y2 - y1) / 3) / src.size[1], 1, 1], src.size))
     r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
-    if model == QWEN21_MODEL:
+    if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
     # дорожки на земле); место задаёт область генерации — рамка в натуральную величину, размер — текст инструкции.
     # Разметка остаётся только для «изменить» и когда рамки нет: там она показывает, что именно меняется
-    native = model in (QWEN21_MODEL, QWEN_EDIT_MODEL)
+    native = model in (*QWEN21_MODELS, QWEN_EDIT_MODEL)
     mark = EDIT_MARK and extra is None and not native
-    if model == QWEN21_MODEL:
+    if model in QWEN21_MODELS:
         # 2.1: место и размер — ч/б маской вторым входом (выделение + рамка объекта); запрос — официальный
         # переписчик Qwen в исполнении DeepSeek, шаблон — запасной вариант
         prompt = await rewrite_q21(

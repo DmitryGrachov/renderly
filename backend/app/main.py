@@ -70,7 +70,7 @@ async def img2img(
     keep_sur: bool = Form(False),  # окружение: земля, озеленение, люди, машины перед зданием
     # сид генерации; пусто — случайный. Фактический сид возвращается в заголовке X-Seed
     seed: int | None = Form(None, ge=0, lt=2**48),
-    # FLUX.2 klein: klein-4b | klein-9b; Qwen-Image-2.1 Turbo: qwen-image-2.1
+    # FLUX.2 klein: klein-4b | klein-9b; Qwen-Image-2.1: qwen-image-2.1 (качество) | qwen-image-2.1-turbo
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
     llm: str = Form(DEEPSEEK_MODEL),

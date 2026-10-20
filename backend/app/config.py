@@ -50,7 +50,11 @@ QWEN_EDIT = {
     "shift": float(os.getenv("QWEN_EDIT_SHIFT", "3.1")),
 }
 # Qwen-Image-2.1 Turbo (7B, сентябрь 2026; Qwen Research License — только некоммерческое использование) — только Inpainting: int8, 8 шагов по фиксированному расписанию
+# две модели в списке: qwen-image-2.1 — качество (базовая модель: Inpainting целиком, Img to Img — доводка фактуры
+# поверх рендера Turbo), qwen-image-2.1-turbo — скорость (всё на Turbo)
 QWEN21_MODEL = "qwen-image-2.1"
+QWEN21_TURBO_MODEL = "qwen-image-2.1-turbo"
+QWEN21_MODELS = (QWEN21_MODEL, QWEN21_TURBO_MODEL)
 QWEN21 = {
     "unet": os.getenv("QWEN21_UNET", "qwen_image_2.1_turbo_int8_convrot.safetensors"),
     "text_encoder": os.getenv("QWEN21_TEXT_ENCODER", "qwen3vl_8b_int8_convrot.safetensors"),
@@ -69,18 +73,15 @@ QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "1.5"))
 # Img to Img на Qwen-Image-2.1, «Сохранить небо / фон / окружение»: шагов перерисовки зон из 8
 # (больше — фотореальнее, но 2.1 начинает подменять деревья и добавлять объекты с референса)
 QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
-# Img to Img на Qwen-Image-2.1: доводка фактуры базовой моделью (если скачана) поверх рендера Turbo — доля шума
+# Img to Img на Qwen-Image-2.1 (не Turbo): доводка фактуры базовой моделью поверх рендера Turbo — доля шума
 # (0 — выкл.) и шаги полного расписания (как в шаблонах ComfyUI: 25, euler / simple, cfg 1). Сам рендер — на Turbo:
 # базовая с чистого шума перерисовывала здание (уже башня, сдвинутые эркеры); от готового кадра она его не двигает
 QWEN21_REFINE = float(os.getenv("QWEN21_REFINE", "0.6"))
 QWEN21_BASE_STEPS = int(os.getenv("QWEN21_BASE_STEPS", "25"))
-# Inpainting на Qwen-Image-2.1: базовая модель (если скачана) на QWEN21_BASE_STEPS шагов вместо Turbo на 8 —
-# фактура нового объекта (листва, ткань, кожа) без «пластика» дистиллята
-QWEN21_INPAINT_BASE = os.getenv("QWEN21_INPAINT_BASE", "true").lower() == "true"
 # модели генерации, доступные в Img to Img (Qwen-Image-Edit-2511 — только Inpainting)
-IMG2IMG_MODELS = [*FLUX_MODELS, QWEN21_MODEL]
+IMG2IMG_MODELS = [*FLUX_MODELS, *QWEN21_MODELS]
 # модели генерации, доступные в Inpainting
-INPAINT_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, QWEN21_MODEL]
+INPAINT_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, *QWEN21_MODELS]
 FLUX_VAE = os.getenv("FLUX_VAE", "flux2-vae.safetensors")
 # Площадь кадра генерации в мегапикселях (пропорции исходника сохраняются)
 RENDER_MEGAPIXELS = float(os.getenv("RENDER_MEGAPIXELS", "1.5"))
