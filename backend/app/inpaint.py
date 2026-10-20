@@ -866,14 +866,16 @@ class _Region:
         patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(self.crop.size, Image.LANCZOS)
         if unleak:
             patch = _unleak(patch, self.crop, self.gen, self.core, self.extra)
-        if unveil:
-            patch = _unveil(patch, self.crop, self.gen)
         feather = max(2, self.grow // 2)
         found = None
         if self.extra is not None:
             # добавить / заменить: вклеиваются только силуэт объекта (SAM 2.1) и его тень затемнением
             async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
                 found = await _extract_object(client, patch, self.crop, self.core, self.gen)
+        # вуаль снимается только без силуэта: с ним фон и так из исходника, а светлый объект над тёмным фоном
+        # (тент зонта над окном) _unveil принимал за вуаль и вырезал в нём дыры с окном
+        if unveil and not found:
+            patch = _unveil(patch, self.crop, self.gen)
         if found:
             obj, shadow = found
             patch = _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
