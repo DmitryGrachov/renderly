@@ -240,6 +240,8 @@ HARMONIZE_PROMPT = (
     "same light direction and colour, colour grading, sharpness, noise and grain as the rest of the photo. "
     "Everything else in <image1> stays exactly as it is, nothing added, removed or moved."
 )
+# возврат тона правленой области после пересчёта: контраст яркости — не больше чем во столько раз
+RESTORE_CONTRAST = 1.4
 HARMONIZE_REMOVED = (
     "Re-render <image1> as one coherent unretouched photograph taken in a single shot. {subject}: the filled area "
     "shows only that continuing background and looks untouched — the same texture, lines, perspective, light, "
@@ -1004,7 +1006,7 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if HARMONIZE_FULL and harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(result, seed + 3, *harmonize)
+            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1065,10 +1067,56 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     return result
 
 
-async def harmonize_frame(result: Image.Image, seed: int, subject: str, removed: bool = False) -> Image.Image:
+def restore_colour(after: Image.Image, before: Image.Image, area: Image.Image) -> Image.Image:
+    """Цвет и тон правленой области после пересчёта кадра — как до него. Модель вписывает правку (края, углы,
+    тени, свет), но «нормализует» материал: тёмная выветренная терракота выходила светлой оранжевой плиткой.
+    В YCbCr по каждому связному куску области: оттенок (Cb, Cr) — сдвиг среднего; яркость (Y) — среднее и
+    контраст (в пределах RESTORE_CONTRAST) как до пересчёта. Мелкое — края, швы, тени — остаётся от модели;
+    переход по краю области мягкий."""
+    import numpy as np
+    from scipy import ndimage
+
+    m = np.asarray(area.convert("L").resize(after.size)) > 127
+    if m.sum() < 100:
+        return after
+    A = np.asarray(after.convert("YCbCr"), dtype=np.float32)
+    B = np.asarray(before.convert("YCbCr").resize(after.size), dtype=np.float32)
+    size = max(after.size)
+    # среднее — по сжатой области: край после совмещения кадра мог сдвинуться на пару пикселей
+    core = ndimage.binary_erosion(m, iterations=max(2, round(0.004 * size)))
+    lab, n = ndimage.label(m)
+    out = A.copy()
+    weight = np.clip(ndimage.gaussian_filter(m.astype(np.float32), max(1.0, 0.002 * size)) * 1.5, 0, 1)
+    for i in range(1, n + 1):
+        part = lab == i
+        sel = part & core
+        if sel.sum() < 50:
+            sel = part
+        if sel.sum() < 50:
+            continue
+        ma, mb = A[sel].mean(0), B[sel].mean(0)
+        sa, sb = A[sel][:, 0].std() + 1e-3, B[sel][:, 0].std() + 1e-3
+        k = float(np.clip(sb / sa, 1 / RESTORE_CONTRAST, RESTORE_CONTRAST))
+        # кусок с запасом — чтобы мягкий край тоже получил свою поправку
+        zone = ndimage.binary_dilation(part, iterations=max(2, round(0.004 * size)))
+        fixed = A[zone].copy()
+        fixed[:, 0] = (fixed[:, 0] - ma[0]) * k + mb[0]
+        fixed[:, 1:] += mb[1:] - ma[1:]
+        w = weight[zone][:, None]
+        out[zone] = A[zone] * (1 - w) + fixed * w
+        log.info("цвет области после пересчёта: Y %+.0f (контраст ×%.2f), Cb %+.0f, Cr %+.0f",
+                 mb[0] - ma[0], k, mb[1] - ma[1], mb[2] - ma[2])
+    img = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "YCbCr").convert("RGB")
+    return img
+
+
+async def harmonize_frame(
+    result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None
+) -> Image.Image:
     """Пересчёт всего кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img,
     с совмещением кадра InegoAlign): правка вписывается в кадр целиком. Кадр — в исходный размер (апскейл —
-    дальше отдельно). Не получилось — результат правки как есть."""
+    дальше отдельно). area — правленая область: её цвет и тон возвращаются к тем, что были до пересчёта
+    (restore_colour). Не получилось — результат правки как есть."""
     w, h = result.size
     gw, gh = fit_size(w, h, QWEN21_MEGAPIXELS)
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
@@ -1083,7 +1131,10 @@ async def harmonize_frame(result: Image.Image, seed: int, subject: str, removed:
     if "save" not in out:
         return result
     log.info("кадр пересчитан целиком: %dx%d → %dx%d, вписано: %s", w, h, gw, gh, subject)
-    return Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
+    frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
+    if area is not None and not removed:
+        frame = restore_colour(frame, result, area)
+    return frame
 
 
 async def _harmonize(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image) -> Image.Image | None:
@@ -1772,7 +1823,7 @@ async def run_edit(
             if HARMONIZE_FULL:
                 frame = await harmonize_frame(
                     Image.open(io.BytesIO(projected)).convert("RGB"), seed + 3,
-                    f"the {material_name} cladding just applied to a surface",
+                    f"the {material_name} cladding just applied to a surface", area=surface,
                 )
                 buf = io.BytesIO()
                 frame.save(buf, "JPEG", quality=95)
