@@ -39,9 +39,9 @@ if [ "${QWEN_EDIT:-true}" = "true" ]; then
   fetch loras Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors "$HF/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"     || echo "[models] Lightning LoRA не скачана"
 fi
 
-# Qwen-Image-2.1 (7B, Qwen Research License — только некоммерческое использование): Turbo int8 (~7.3 ГБ) — Inpainting,
-# базовая int8 (~7.3 ГБ) — Img to Img (на Turbo листва и трава «пластиковые»), энкодер Qwen3-VL 8B int8 (~9.4 ГБ),
-# свой VAE. QWEN21=false — не скачивать (~24 ГБ)
+# Qwen-Image-2.1 (7B, Qwen Research License — только некоммерческое использование): Turbo int8 (~7.3 ГБ) — везде
+# (Img to Img и Inpainting), энкодер Qwen3-VL 8B int8 (~9.4 ГБ), свой VAE. Базовая int8 (~7.3 ГБ) скачивается про запас:
+# в интерфейсе её нет, код доводки ею выключен (на тестах прироста к Turbo не дала). QWEN21=false — не скачивать (~24 ГБ)
 if [ "${QWEN21:-true}" = "true" ]; then
   Q21="$HF/Comfy-Org/Qwen-Image-2.1/resolve/main"
   fetch diffusion_models qwen_image_2.1_turbo_int8_convrot.safetensors "$Q21/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors"     || echo "[models] Qwen-Image-2.1 не скачана"
