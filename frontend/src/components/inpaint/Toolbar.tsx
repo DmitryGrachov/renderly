@@ -1,9 +1,9 @@
 import { motion } from 'motion/react'
-import { Brush, Eraser, Hand, Lasso, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { Brush, Eraser, Hand, History, Lasso, Redo2, Trash2, Undo2 } from 'lucide-react'
 import { ToolButton } from '../ToolButton'
 import type { InpaintMode } from '../../lib/inpaint'
 
-export type Tool = 'lasso' | 'brush' | 'eraser' | 'hand'
+export type Tool = 'lasso' | 'brush' | 'eraser' | 'restore' | 'hand'
 export type Shape = 'circle' | 'square'
 
 export const MODE_COLOR: Record<InpaintMode, string> = {
@@ -16,6 +16,7 @@ const TOOLS: { id: Tool; icon: typeof Brush; label: string; key: string }[] = [
   { id: 'lasso', icon: Lasso, label: 'Лассо', key: 'L' },
   { id: 'brush', icon: Brush, label: 'Кисть', key: 'B' },
   { id: 'eraser', icon: Eraser, label: 'Ластик', key: 'E' },
+  { id: 'restore', icon: History, label: 'Кисть отката — вернуть предыдущую версию там, где закрасите', key: 'R' },
   { id: 'hand', icon: Hand, label: 'Рука — перемещение', key: 'H / пробел' },
 ]
 
@@ -28,16 +29,25 @@ interface ToolbarProps {
   onUndo: () => void
   onRedo: () => void
   onClear: () => void
+  /** Есть предыдущая версия — кисть отката доступна */
+  canRestore: boolean
   disabled?: boolean
 }
 
-export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRedo, onClear, disabled }: ToolbarProps) {
+export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRedo, onClear, canRestore, disabled }: ToolbarProps) {
   return (
     <div className={`glass flex flex-col gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5 ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
       {TOOLS.map(({ id, icon: Icon, label, key }) => {
         const active = tool === id
         return (
-          <ToolButton key={id} label={label} shortcut={key} onClick={() => onTool(id)} active={active}>
+          <ToolButton
+            key={id}
+            label={label}
+            shortcut={key}
+            onClick={() => onTool(id)}
+            active={active}
+            disabled={id === 'restore' && !canRestore}
+          >
             {active && (
               <motion.span layoutId="inpaint-tool" className="absolute inset-0 -z-10 rounded-xl bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />
             )}
@@ -52,7 +62,7 @@ export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRed
       <ToolButton label="Повторить" shortcut="Ctrl ⇧ Z" onClick={onRedo} disabled={!canRedo}>
         <Redo2 className="size-[18px]" strokeWidth={1.75} />
       </ToolButton>
-      <ToolButton label="Очистить маску" shortcut="Esc" onClick={onClear} disabled={!hasMask}>
+      <ToolButton label={tool === 'restore' ? 'Сбросить откат' : 'Очистить маску'} shortcut="Esc" onClick={onClear} disabled={!hasMask}>
         <Trash2 className="size-[18px]" strokeWidth={1.75} />
       </ToolButton>
     </div>

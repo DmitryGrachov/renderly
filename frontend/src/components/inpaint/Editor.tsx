@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Columns2, Download, Eye, X } from 'lucide-react'
+import { Check, Columns2, Download, Eye, History, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
@@ -8,6 +8,7 @@ import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
 import { inpaint, planInpaint, type InpaintMode } from '../../lib/inpaint'
 import { PlanBox, type Box as PlanRect } from './PlanBox'
 import type { StudioImage } from '../../lib/types'
+import { loadImage } from '../../lib/grade'
 import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
 import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
@@ -23,6 +24,8 @@ const PAD_BOTTOM = 76
 const BRUSH_MIN = 4
 const BRUSH_MAX = 200
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
+// кисть отката: мягкий край — размытие мазка на эту долю радиуса кисти
+const RESTORE_FEATHER = 0.35
 
 interface Props {
   image: StudioImage
@@ -35,6 +38,13 @@ export function Editor({ image, onClose }: Props) {
   const stageRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const maskRef = useRef<HTMLCanvasElement>(null)
+  // кисть отката: мазки (альфа, в размере маски) и превью — предыдущая версия, проступающая под мазками
+  const restoreRef = useRef<HTMLCanvasElement | null>(null)
+  const previewRef = useRef<HTMLCanvasElement>(null)
+  const prevImgRef = useRef<HTMLImageElement | null>(null)
+  const restoreUndo = useRef<ImageData[]>([])
+  const restoreRedo = useRef<ImageData[]>([])
+  const previewFrame = useRef(0)
   const cursorRef = useRef<HTMLDivElement>(null)
 
   const [stage, setStage] = useState({ w: 0, h: 0 })
@@ -59,6 +69,7 @@ export function Editor({ image, onClose }: Props) {
   // шторка «до / после»: исходник против текущей версии
   const [compareOn, setCompareOn] = useState(false)
   const [hist, setHist] = useState({ undo: 0, redo: 0 })
+  const [restoreDirty, setRestoreDirty] = useState(false)
 
   const undoStack = useRef<ImageData[]>([])
   const redoStack = useRef<ImageData[]>([])
@@ -83,6 +94,7 @@ export function Editor({ image, onClose }: Props) {
   const compare = compareOn && current > 0 && !busy
   // инструмент рисования выключает шторку — на ней левая кнопка двигает границу
   const chooseTool = (t: Tool) => {
+    if (t === 'restore' && current === 0) return
     setTool(t)
     if (t !== 'hand') setCompareOn(false)
   }
@@ -161,14 +173,140 @@ export function Editor({ image, onClose }: Props) {
     setBbox(computeBox())
     syncHist()
   }
-  const undo = () => restore(undoStack.current, redoStack.current)
-  const redo = () => restore(redoStack.current, undoStack.current)
+  const restoreStep = (from: ImageData[], to: ImageData[]) => {
+    const st = from.pop()
+    if (!st) return
+    const c = restoreCtx()
+    to.push(c.getImageData(0, 0, maskW, maskH))
+    c.putImageData(st, 0, 0)
+    syncRestore()
+  }
+  const undo = () => (tool === 'restore' ? restoreStep(restoreUndo.current, restoreRedo.current) : restore(undoStack.current, redoStack.current))
+  const redo = () => (tool === 'restore' ? restoreStep(restoreRedo.current, restoreUndo.current) : restore(redoStack.current, undoStack.current))
 
   const clearMask = (record = true) => {
     if (record && bbox) pushUndo()
     ctx().clearRect(0, 0, maskW, maskH)
     setBbox(null)
     setPlan(null)
+  }
+
+  /* ---------------- restore brush ---------------- */
+
+  const restoreCtx = () => {
+    if (!restoreRef.current) {
+      const c = document.createElement('canvas')
+      c.width = maskW
+      c.height = maskH
+      restoreRef.current = c
+    }
+    return restoreRef.current.getContext('2d', { willReadFrequently: true })!
+  }
+  const restoreFeather = () => Math.max(1, (size / 2) * k * RESTORE_FEATHER)
+
+  // превью: предыдущая версия, видимая только под мазками (с мягким краем)
+  const drawPreview = () => {
+    cancelAnimationFrame(previewFrame.current)
+    previewFrame.current = requestAnimationFrame(() => {
+      const pv = previewRef.current
+      const img = prevImgRef.current
+      if (!pv || !restoreRef.current) return
+      const c = pv.getContext('2d')!
+      c.clearRect(0, 0, maskW, maskH)
+      if (!img) return
+      c.globalCompositeOperation = 'source-over'
+      c.filter = 'none'
+      c.drawImage(img, 0, 0, maskW, maskH)
+      c.globalCompositeOperation = 'destination-in'
+      c.filter = `blur(${restoreFeather()}px)`
+      c.drawImage(restoreRef.current, 0, 0)
+      c.filter = 'none'
+      c.globalCompositeOperation = 'source-over'
+    })
+  }
+
+  const restoreHasStrokes = () => {
+    const d = restoreCtx().getImageData(0, 0, maskW, maskH).data
+    for (let i = 3; i < d.length; i += 16) if (d[i] > 8) return true
+    return false
+  }
+
+  const syncRestore = () => {
+    setRestoreDirty(restoreHasStrokes())
+    setHist({ undo: restoreUndo.current.length, redo: restoreRedo.current.length })
+    drawPreview()
+  }
+
+  const clearRestore = (record = true) => {
+    const c = restoreCtx()
+    if (record && restoreDirty) {
+      restoreUndo.current.push(c.getImageData(0, 0, maskW, maskH))
+      restoreRedo.current = []
+    }
+    c.clearRect(0, 0, maskW, maskH)
+    syncRestore()
+  }
+
+  // предыдущая версия для кисти — при смене текущей; мазки к другой паре версий не относятся
+  useEffect(() => {
+    prevImgRef.current = null
+    restoreUndo.current = []
+    restoreRedo.current = []
+    if (restoreRef.current) restoreCtx().clearRect(0, 0, maskW, maskH)
+    setRestoreDirty(false)
+    if (current === 0) {
+      if (tool === 'restore') setTool('brush')
+      drawPreview()
+      return
+    }
+    let alive = true
+    loadImage(versions[current - 1].url).then((img) => {
+      if (!alive) return
+      prevImgRef.current = img
+      drawPreview()
+    })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, versions])
+
+  // стек отмены и кнопки панели — свои у кисти отката
+  useEffect(() => {
+    if (tool === 'restore') setHist({ undo: restoreUndo.current.length, redo: restoreRedo.current.length })
+    else syncHist()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool])
+
+  // откат: текущая версия + предыдущая под мазками, в полном разрешении — новая версия в истории
+  async function applyRestore() {
+    if (!restoreDirty || busy || current === 0) return
+    setBusy({ progress: 0.5, stage: 'Откат кистью' })
+    try {
+      const [cur, prev] = await Promise.all([loadImage(versions[current].url), loadImage(versions[current - 1].url)])
+      const W = cur.naturalWidth
+      const H = cur.naturalHeight
+      const out = document.createElement('canvas')
+      out.width = W
+      out.height = H
+      const o = out.getContext('2d')!
+      o.drawImage(cur, 0, 0)
+      const layer = document.createElement('canvas')
+      layer.width = W
+      layer.height = H
+      const l = layer.getContext('2d')!
+      l.drawImage(prev, 0, 0, W, H)
+      l.globalCompositeOperation = 'destination-in'
+      l.filter = `blur(${restoreFeather() * (W / maskW)}px)`
+      l.drawImage(restoreRef.current!, 0, 0, W, H)
+      o.drawImage(layer, 0, 0)
+      const blob = await new Promise<Blob>((res, rej) => out.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.95))
+      const url = URL.createObjectURL(blob)
+      setVersions((v) => [...v.slice(0, current + 1), { url, label: 'Откат кистью' }])
+      setCurrent((c) => c + 1)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
   }
 
   /* ---------------- drawing ---------------- */
@@ -179,10 +317,11 @@ export function Editor({ image, onClose }: Props) {
   }
 
   const stampSegment = (a: Pt, b: Pt) => {
-    const c = ctx()
+    const restoring = tool === 'restore'
+    const c = restoring ? restoreCtx() : ctx()
     const r = (size / 2) * k
     c.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over'
-    c.fillStyle = MODE_COLOR[mode]
+    c.fillStyle = restoring ? '#fff' : MODE_COLOR[mode]
     const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / Math.max(1, r / 4)))
     for (let i = 0; i <= n; i++) {
       const x = a.x + ((b.x - a.x) * i) / n
@@ -196,6 +335,7 @@ export function Editor({ image, onClose }: Props) {
       }
     }
     c.globalCompositeOperation = 'source-over'
+    if (restoring) drawPreview()
   }
 
   const moveCursor = (e: React.PointerEvent) => {
@@ -208,7 +348,13 @@ export function Editor({ image, onClose }: Props) {
   const onPointerDown = (e: React.PointerEvent) => {
     if (busy || e.button !== 0 || panTool) return
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* синтетические события */ }
-    pushUndo()
+    if (tool === 'restore') {
+      restoreUndo.current.push(restoreCtx().getImageData(0, 0, maskW, maskH))
+      if (restoreUndo.current.length > UNDO_LIMIT) restoreUndo.current.shift()
+      restoreRedo.current = []
+    } else {
+      pushUndo()
+    }
     drawingRef.current = true
     setDrawing(true)
     setError(null)
@@ -259,7 +405,8 @@ export function Editor({ image, onClose }: Props) {
       setLasso([])
     }
     lastPt.current = null
-    setBbox(computeBox())
+    if (tool === 'restore') syncRestore()
+    else setBbox(computeBox())
   }
 
   /* ---------------- generation ---------------- */
@@ -330,8 +477,9 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- shortcuts ---------------- */
 
-  const handlers = useRef({ undo, redo, clearMask, setSize, chooseTool })
-  handlers.current = { undo, redo, clearMask, setSize, chooseTool }
+  const clearCurrent = () => (tool === 'restore' ? clearRestore() : clearMask())
+  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool })
+  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -346,9 +494,10 @@ export function Editor({ image, onClose }: Props) {
       else if (e.code === 'KeyB') h.chooseTool('brush')
       else if (e.code === 'KeyE') h.chooseTool('eraser')
       else if (e.code === 'KeyH') h.chooseTool('hand')
+      else if (e.code === 'KeyR') h.chooseTool('restore')
       else if (e.code === 'BracketLeft') h.setSize((s) => Math.max(BRUSH_MIN, s - 6))
       else if (e.code === 'BracketRight') h.setSize((s) => Math.min(BRUSH_MAX, s + 6))
-      else if (e.key === 'Escape') h.clearMask()
+      else if (e.key === 'Escape') h.clearCurrent()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -356,7 +505,7 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- popover placement ---------------- */
 
-  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan
+  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan && tool !== 'restore'
   let pop = { x: 0, y: 0, placement: 'bottom' as 'top' | 'bottom' }
   if (bbox) {
     const bx = left + bbox.x / k
@@ -380,7 +529,7 @@ export function Editor({ image, onClose }: Props) {
   }
 
   const shown = peek && current > 0 ? versions[current - 1] : versions[current]
-  const brushLike = (tool === 'brush' || tool === 'eraser') && !spaceHeld && !compare
+  const brushLike = (tool === 'brush' || tool === 'eraser' || tool === 'restore') && !spaceHeld && !compare
   const color = MODE_COLOR[mode]
 
   return (
@@ -415,8 +564,16 @@ export function Editor({ image, onClose }: Props) {
             />
           </AnimatePresence>
 
+          {/* кисть отката: предыдущая версия, проступающая под мазками */}
+          <canvas
+            ref={previewRef}
+            width={maskW}
+            height={maskH}
+            className={`pointer-events-none absolute inset-0 size-full ${peek || compare ? 'opacity-0' : ''}`}
+          />
+
           <div
-            className={`absolute inset-0 transition-opacity duration-300 ${peek || compare ? 'opacity-0' : ''}`}
+            className={`absolute inset-0 transition-opacity duration-300 ${peek || compare || tool === 'restore' ? 'opacity-0' : ''}`}
             style={{ filter: drawing ? undefined : `drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 0 10px ${color})` }}
           >
             <canvas
@@ -479,9 +636,9 @@ export function Editor({ image, onClose }: Props) {
                 style={{
                   width: size,
                   height: size,
-                  border: `1.5px ${tool === 'eraser' ? 'dashed' : 'solid'} #fff`,
+                  border: `1.5px ${tool === 'eraser' ? 'dashed' : tool === 'restore' ? 'dotted' : 'solid'} #fff`,
                   boxShadow: '0 0 0 1px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(0,0,0,0.15)',
-                  background: tool === 'eraser' ? 'rgba(255,255,255,0.12)' : `${color}22`,
+                  background: tool === 'eraser' ? 'rgba(255,255,255,0.12)' : tool === 'restore' ? 'rgba(255,255,255,0.08)' : `${color}22`,
                 }}
               />
             )}
@@ -529,13 +686,15 @@ export function Editor({ image, onClose }: Props) {
             )}
           </AnimatePresence>
           <AnimatePresence>
-            {!bbox && !busy && !drawing && !compare && (
+            {(tool === 'restore' ? !restoreDirty : !bbox) && !busy && !drawing && !compare && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                 className="glass rounded-full px-3.5 py-1.5 text-[12.5px] text-ink-2 shadow-soft ring-1 ring-fg/5"
               >
                 {tool === 'hand'
                   ? 'Перетаскивайте изображение · колесо — масштаб'
+                  : tool === 'restore'
+                  ? `Закрасьте места, где вернуть «${versions[current - 1]?.label ?? ''}»`
                   : `${tool === 'lasso' ? 'Обведите' : 'Закрасьте'} ${mode === 'edit' ? 'область, которую нужно изменить' : mode === 'material' ? 'поверхность, которой нужно сменить материал' : 'объект, который нужно удалить'}`}
               </motion.div>
             )}
@@ -549,10 +708,11 @@ export function Editor({ image, onClose }: Props) {
             onTool={chooseTool}
             canUndo={hist.undo > 0}
             canRedo={hist.redo > 0}
-            hasMask={!!bbox}
+            hasMask={tool === 'restore' ? restoreDirty : !!bbox}
             onUndo={undo}
             onRedo={redo}
-            onClear={() => clearMask()}
+            onClear={clearCurrent}
+            canRestore={current > 0}
             disabled={!!busy}
           />
         </div>
@@ -580,7 +740,28 @@ export function Editor({ image, onClose }: Props) {
               transition={{ type: 'spring', stiffness: 420, damping: 34 }}
               className="absolute inset-x-0 bottom-4 flex justify-center"
             >
-              <BrushOptions shape={shape} onShape={setShape} size={size} onSize={setSize} min={BRUSH_MIN} max={BRUSH_MAX} />
+              <div className="flex flex-col items-center gap-2">
+                {tool === 'restore' && restoreDirty && (
+                  <div className="glass flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
+                    <span className="flex items-center gap-1.5 pl-2.5 pr-1 text-[12.5px] text-ink-2">
+                      <History className="size-3.5" /> Вернуть «{versions[current - 1]?.label}»
+                    </span>
+                    <button
+                      onClick={() => clearRestore()}
+                      className="rounded-full px-3 py-1.5 text-[12.5px] font-medium text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink"
+                    >
+                      Сбросить
+                    </button>
+                    <button
+                      onClick={applyRestore}
+                      className="flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-on-ink transition-colors hover:bg-ink-hover"
+                    >
+                      <Check className="size-3.5" /> Применить откат
+                    </button>
+                  </div>
+                )}
+                <BrushOptions shape={shape} onShape={setShape} size={size} onSize={setSize} min={BRUSH_MIN} max={BRUSH_MAX} />
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
