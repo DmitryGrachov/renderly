@@ -154,6 +154,8 @@ async def inpaint(
     box: str | None = Form(None, max_length=100),
     # образец материала (вкладка «Материалы»): текстура, которую перетащили в окно
     texture: UploadFile | None = File(None),
+    # сколько сантиметров реального материала на образце (поперёк); пусто — оценит DeepSeek
+    texture_width: float | None = Form(None, gt=0, le=5000),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
@@ -186,6 +188,7 @@ async def inpaint(
             result, used_seed = await inpainting.run_edit(
                 await image.read(), await mask.read(), prompt or "", seed, model, _parse_box(box),
                 material=mode == "material", texture=texture_bytes or None,
+                texture_width=texture_width / 100 if texture_width else None,
             )
         else:
             result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)

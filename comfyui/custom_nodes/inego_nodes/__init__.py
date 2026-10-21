@@ -835,8 +835,264 @@ def _clean_surface(m: np.ndarray, stroke: np.ndarray) -> np.ndarray:
     return ndimage.binary_opening(m, iterations=1)
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask}
+MOGE_ID = "Ruicheng/moge-2-vitl-normal"
+IID_ID = "prs-eth/marigold-iid-lighting-v1-1"
+# грани: нормали ближе этого угла — одна грань; грань мельче этой доли поверхности — отбрасывается
+FACE_MERGE_DEG = 20
+FACE_MIN = 0.05
+# грань не плоская (арка, цилиндр, волна): средний угол нормалей грани от её средней нормали больше этого.
+# Разброс самих точек не годится: на узкой грани под острым углом (0.5 м) шум глубины MoGe сравним с шириной
+PLANE_TOL_DEG = 14
+# сглаживание освещённости внутри грани (доля высоты поверхности): швы старого материала не просвечивают
+SHADE_SMOOTH = 0.006
+
+
+def _moge():
+    if "moge" not in _models:
+        from moge.model.v2 import MoGeModel
+
+        _models["moge"] = MoGeModel.from_pretrained(MOGE_ID, cache_dir=f"{folder_paths.models_dir}/moge").eval()
+    return _models["moge"]
+
+
+def _iid():
+    if "iid" not in _models:
+        from diffusers import MarigoldIntrinsicsPipeline
+
+        _models["iid"] = MarigoldIntrinsicsPipeline.from_pretrained(
+            IID_ID, torch_dtype=torch.float16, cache_dir=f"{folder_paths.models_dir}/marigold"
+        )
+    return _models["iid"]
+
+
+def _free_vram():
+    """Своим моделям нужно место: ComfyUI выгружает свои (Qwen ~16 ГБ), иначе OOM."""
+    try:
+        import comfy.model_management as mm
+
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+    except Exception as e:  # noqa: BLE001
+        log.warning("INEGO texture: не удалось освободить видеопамять: %s", e)
+
+
+def _decompose(rgb: np.ndarray) -> np.ndarray:
+    """Marigold-IID lighting: (3, H, W, 3) — альбедо, диффузная освещённость, остаток (линейные)."""
+    from PIL import Image
+
+    pipe = _iid().to(_device())
+    try:
+        out = pipe(Image.fromarray(rgb), num_inference_steps=4, processing_resolution=768, ensemble_size=1)
+    finally:
+        pipe.to("cpu")
+        # кэш видеопамяти torch иначе остаётся за нами, и следующая Qwen-генерация падает с OOM
+        torch.cuda.empty_cache()
+    return np.asarray(out.prediction, dtype=np.float32)
+
+
+def _to_lin(x):
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def _to_srgb(x):
+    x = np.clip(x, 0, 1)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+
+class InegoTextureProject:
+    """Образец текстуры на поверхность 1 в 1 — проекцией, без генерации (Inpainting «Материалы» с образцом).
+
+    Генеративная модель переносит только характер материала, а крапинки, кирпичи и волокна рисует свои. Здесь
+    пиксели образца переносятся как есть:
+      1) MoGe-2 по кадру — точки сцены в метрах и нормали; поверхность (контур SAM) делится на плоские грани
+         по нормалям, к каждой подгоняется плоскость;
+      2) каждый пиксель грани — точка на её плоскости в метрах (луч камеры ∩ плоскость): горизонталь вдоль
+         грани (сшита на стыках граней), вертикаль общая — ряды кладки переходят через угол; образец
+         повторяется с шагом tex_width_m, мелкость — уменьшенной копией образца (без муара);
+      3) свет — с исходника: Marigold-IID раскладывает кадр на альбедо × освещённость + остаток; новый цвет =
+         образец (как альбедо, общий множитель — по разложению самого образца) × освещённость + остаток.
+    Не плоская поверхность или грани не найдены — пустая маска на выходе (бэкенд берёт генеративный путь).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),  # кроп исходника
+                "surface": ("MASK",),  # точный контур поверхности (InegoSurfaceMask)
+                "texture": ("IMAGE",),  # образец
+                "tex_width_m": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 50.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "applied")
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    def run(self, image, surface, texture, tex_width_m):
+        import cv2
+
+        src = image[0][..., :3].float().cpu().numpy()
+        H, W = src.shape[:2]
+        m = surface[0].float()[None, None]
+        if m.shape[-2:] != (H, W):
+            m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)
+        S = m[0, 0].numpy() > 0.5
+        fail = (image, torch.zeros((1, H, W)))
+        if S.sum() < 256:
+            return fail
+        tex = texture[0][..., :3].float().cpu().numpy()
+        _free_vram()
+
+        # 1) геометрия
+        model = _moge().to(_device())
+        try:
+            with torch.no_grad():
+                g = model.infer(torch.from_numpy(src).permute(2, 0, 1).to(_device()))
+        finally:
+            model.to("cpu")
+            torch.cuda.empty_cache()
+        P = g["points"].float().cpu().numpy()
+        N = g["normal"].float().cpu().numpy()
+        K = g["intrinsics"].float().cpu().numpy()
+        valid = S & np.isfinite(P).all(-1) & np.isfinite(N).all(-1)
+        if valid.sum() < 256:
+            log.info("INEGO texture: геометрии под поверхностью нет")
+            return fail
+
+        # грани — кластеры нормалей
+        n = N[valid] / (np.linalg.norm(N[valid], axis=1, keepdims=True) + 1e-6)
+        rng = np.random.default_rng(0)
+        c = n[rng.choice(len(n), 3, replace=False)]
+        for _ in range(30):
+            lab = np.argmax(n @ c.T, 1)
+            c = np.stack([n[lab == i].mean(0) if (lab == i).any() else c[i] for i in range(3)])
+            c /= np.linalg.norm(c, axis=1, keepdims=True) + 1e-6
+        keep = []
+        for i in np.argsort([-(lab == i).sum() for i in range(3)]):
+            if (lab == i).mean() < FACE_MIN:
+                continue
+            if any(np.degrees(np.arccos(np.clip(c[i] @ c[j], -1, 1))) < FACE_MERGE_DEG for j in keep):
+                continue
+            keep.append(i)
+        centers = c[keep]
+        lab_full = np.full((H, W), -1)
+        lab_full[valid] = np.argmax(n @ centers.T, 1)
+        faces = []
+        for i in range(len(centers)):
+            fm = ndimage.binary_opening(lab_full == i, iterations=3)
+            fl, k = ndimage.label(fm)
+            if k:
+                fm = fl == 1 + int(np.argmax(ndimage.sum(fm, fl, range(1, k + 1))))
+            if fm.sum() >= FACE_MIN * S.sum():
+                faces.append(fm)
+        if not faces:
+            log.info("INEGO texture: граней не найдено")
+            return fail
+        if len(faces) > 1:
+            owner = np.argmin(np.stack([ndimage.distance_transform_edt(~f) for f in faces]), 0)
+        else:
+            owner = np.zeros((H, W), int)
+        owner[~S] = -1
+
+        # 2) плоскости и координаты на них (метры)
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        Kp = K.copy()
+        Kp[0] *= W
+        Kp[1] *= H
+        rays = np.stack([(xx + 0.5 - Kp[0, 2]) / Kp[0, 0], (yy + 0.5 - Kp[1, 2]) / Kp[1, 1], np.ones_like(xx)], -1)
+        up = np.array([0, -1, 0], np.float32)
+        UV = np.zeros((H, W, 2), np.float32)
+        for i, fm in enumerate(faces):
+            pts = P[fm & valid]
+            cen = np.median(pts, 0)
+            # нормаль плоскости — средняя нормаль MoGe по грани: надёжнее подгонки по точкам на узких гранях
+            fn = N[fm & valid]
+            fn = fn / (np.linalg.norm(fn, axis=1, keepdims=True) + 1e-6)
+            nf = fn.mean(0)
+            nf /= np.linalg.norm(nf) + 1e-6
+            spread = float(np.degrees(np.arccos(np.clip(fn @ nf, -1, 1))).mean())
+            if spread > PLANE_TOL_DEG:
+                log.info("INEGO texture: грань %d не плоская (нормали ±%.0f°) — генеративный путь", i, spread)
+                return fail
+            if nf @ (-cen) < 0:
+                nf = -nf
+            # плоскость проходит через точки грани: смещение — медиана по ним
+            cen = nf * float(np.median(pts @ nf))
+            v = up - (up @ nf) * nf
+            if np.linalg.norm(v) < 0.3:  # горизонтальная поверхность (пол, терраса): «верх» — от камеры вглубь
+                v = np.array([0, 0, 1], np.float32) - nf[2] * nf
+            v /= np.linalg.norm(v)
+            u = np.cross(v, nf)
+            u /= np.linalg.norm(u)
+            if u[0] < 0:
+                u = -u
+            d = -(nf @ cen)
+            sel = owner == i
+            den = rays[sel] @ nf
+            t = -d / np.where(np.abs(den) < 1e-6, 1e-6, den)
+            X = rays[sel] * t[:, None]
+            UV[sel, 0] = X @ u
+            UV[sel, 1] = X @ v
+            log.info("INEGO texture: грань %d — нормаль %s, %.2f × %.2f м", i, np.round(nf, 2),
+                     np.ptp(UV[sel, 0]), np.ptp(UV[sel, 1]))
+        # сшивка горизонтали на стыках: от крупной грани к соседним
+        order = sorted(range(len(faces)), key=lambda i: -(owner == i).sum())
+        done = {order[0]}
+        for _ in range(len(faces)):
+            for i in order:
+                if i in done:
+                    continue
+                for j in list(done):
+                    ej = ndimage.binary_dilation(owner == i, iterations=2) & (owner == j)
+                    ei = ndimage.binary_dilation(owner == j, iterations=2) & (owner == i)
+                    if ej.sum() > 10 and ei.sum() > 10:
+                        UV[owner == i, 0] += UV[ej, 0].mean() - UV[ei, 0].mean()
+                        done.add(i)
+                        break
+
+        # 3) образец на гранях: повтор, мелкость — уменьшенной копией (по грани)
+        th, tw = tex.shape[:2]
+        ppm = tw / tex_width_m
+        proj = np.zeros_like(src)
+        gx = np.hypot(np.gradient(UV[..., 0], axis=1), np.gradient(UV[..., 1], axis=0))
+        for i in range(len(faces)):
+            sel = owner == i
+            lvl = max(1.0, float(np.median(gx[sel])) * ppm)
+            ts = cv2.resize(tex, (max(8, round(tw / lvl)), max(8, round(th / lvl))), interpolation=cv2.INTER_AREA)
+            p = ppm / lvl
+            mx = (UV[..., 0] * p) % ts.shape[1]
+            my = (-UV[..., 1] * p) % ts.shape[0]
+            wrap = cv2.copyMakeBorder(ts, 2, 2, 2, 2, cv2.BORDER_WRAP)
+            r = cv2.remap(wrap, (mx + 2).astype(np.float32), (my + 2).astype(np.float32), cv2.INTER_LINEAR)
+            proj[sel] = r[sel]
+
+        # 4) свет исходника
+        iid = _decompose((np.clip(src, 0, 1) * 255).astype(np.uint8))
+        alb, shd, rsd = iid[0], iid[1], iid[2]
+        sig = max(1.0, SHADE_SMOOTH * np.ptp(np.nonzero(S)[0]))
+        for i in range(len(faces)):
+            fm = (owner == i).astype(np.float32)
+            den = ndimage.gaussian_filter(fm, sig) + 1e-4
+            for ch in range(3):
+                shd[..., ch] = np.where(owner == i, ndimage.gaussian_filter(shd[..., ch] * fm, sig) / den, shd[..., ch])
+        I = _to_lin(src)
+        cal = float(np.median((I[S].mean(1) + 1e-4) / ((alb * shd + rsd)[S].mean(1) + 1e-4)))
+        t_alb = float(_decompose((np.clip(tex, 0, 1) * 255).astype(np.uint8))[0].mean())
+        k = t_alb / max(1e-4, float(_to_lin(tex).mean()))
+        out = _to_srgb(cal * (_to_lin(proj) * k * shd + rsd))
+        log.info("INEGO texture: %d граней, образец %.2f м, калибровка %.2f, альбедо образца ×%.2f", len(faces),
+                 tex_width_m, cal, k)
+
+        alpha = ndimage.gaussian_filter(S.astype(np.float32), 0.8)[..., None]
+        res = src * (1 - alpha) + out * alpha
+        return (torch.from_numpy(res.astype(np.float32))[None], torch.from_numpy(S.astype(np.float32))[None])
+
+
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject}
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "InegoTextureProject": "INEGO Texture Project (sample texture 1:1 onto planar faces, MoGe-2 + Marigold-IID)",
     "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
     "InegoZoneRestyle": "INEGO Zone Restyle (source content, render light)",

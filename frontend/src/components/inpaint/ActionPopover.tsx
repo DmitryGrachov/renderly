@@ -46,6 +46,9 @@ interface Props {
   /** Образец материала (только «Материалы») */
   texture?: File | null
   onTexture?: (f: File | null) => void
+  /** Ширина образца в сантиметрах (строка поля; пусто — оценит бэкенд) */
+  textureWidth?: string
+  onTextureWidth?: (v: string) => void
   onConfirm: () => void
   onReset: () => void
   /** Позиция «носика» относительно сцены */
@@ -56,7 +59,9 @@ interface Props {
 
 export const POPOVER_WIDTH = 340
 
-export function ActionPopover({ mode, prompt, onPrompt, texture, onTexture, onConfirm, onReset, x, y, placement }: Props) {
+export function ActionPopover({
+  mode, prompt, onPrompt, texture, onTexture, textureWidth, onTextureWidth, onConfirm, onReset, x, y, placement,
+}: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
   const { scene } = useScene()
   const suggestions = mode === 'edit' ? SUGGESTIONS[scene] : mode === 'material' ? MATERIAL_SUGGESTIONS[scene] : REMOVE_SUGGESTIONS[scene]
@@ -108,7 +113,7 @@ export function ActionPopover({ mode, prompt, onPrompt, texture, onTexture, onCo
               ? EDIT_HINT[editKind(prompt) ?? 'none']
               : mode === 'material'
                 ? texture
-                  ? 'Ляжет материал с образца — в натуральном масштабе, по плоскости поверхности'
+                  ? 'Образец ляжет 1 в 1 — по граням, в перспективе и свете кадра'
                   : 'Поверхность сохранит форму, швы и проёмы — сменится только материал'
                 : prompt.trim()
                 ? 'Удалится только это — остальное в выделении останется'
@@ -120,7 +125,9 @@ export function ActionPopover({ mode, prompt, onPrompt, texture, onTexture, onCo
       {mode === 'remove' && (
         <div className="mt-3.5 text-[12px] font-medium text-faint">Что именно удалить? Необязательно</div>
       )}
-      {mode === 'material' && onTexture && <TextureDrop texture={texture ?? null} onTexture={onTexture} />}
+      {mode === 'material' && onTexture && (
+        <TextureDrop texture={texture ?? null} onTexture={onTexture} width={textureWidth ?? ''} onWidth={onTextureWidth} />
+      )}
       <textarea
         ref={input}
         value={prompt}
@@ -175,7 +182,12 @@ const TEXTURE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 const TEXTURE_MAX = 20 * 1024 * 1024
 
 /** Образец материала: перетащить файл или выбрать по клику; превью с кнопкой «убрать». */
-function TextureDrop({ texture, onTexture }: { texture: File | null; onTexture: (f: File | null) => void }) {
+function TextureDrop({ texture, onTexture, width, onWidth }: {
+  texture: File | null
+  onTexture: (f: File | null) => void
+  width: string
+  onWidth?: (v: string) => void
+}) {
   const file = useRef<HTMLInputElement>(null)
   const [over, setOver] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -234,6 +246,22 @@ function TextureDrop({ texture, onTexture }: { texture: File | null; onTexture: 
           onChange={(e) => { take(e.target.files?.[0]); e.target.value = '' }}
         />
       </div>
+      {texture && onWidth && (
+        <label className="mt-2 flex items-center gap-2 text-[12.5px] text-mute">
+          <span className="flex-1">Ширина образца</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            min={1}
+            max={5000}
+            value={width}
+            onChange={(e) => onWidth(e.target.value)}
+            placeholder="авто"
+            className="w-20 rounded-[10px] bg-fg/[0.04] px-2.5 py-1.5 text-right text-[13px] text-ink outline-none ring-accent/40 placeholder:text-faint focus:bg-surface focus:ring-2"
+          />
+          <span>см</span>
+        </label>
+      )}
       {error && <div className="mt-1.5 text-[12px] text-[#ff3b30]">{error}</div>}
     </div>
   )

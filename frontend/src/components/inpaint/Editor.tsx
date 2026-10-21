@@ -48,6 +48,7 @@ export function Editor({ image, onClose }: Props) {
   const [prompt, setPrompt] = useState('')
   // образец материала: остаётся после применения — один образец кладут на несколько поверхностей подряд
   const [texture, setTexture] = useState<File | null>(null)
+  const [textureWidth, setTextureWidth] = useState('')
   const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [versions, setVersions] = useState<Version[]>([{ url: image.url, label: 'Исходник' }])
@@ -299,6 +300,7 @@ export function Editor({ image, onClose }: Props) {
         {
           imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box,
           texture: mode === 'material' ? texture ?? undefined : undefined,
+          textureWidthCm: mode === 'material' && texture && Number(textureWidth) > 0 ? Number(textureWidth) : undefined,
         },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
@@ -592,7 +594,9 @@ export function Editor({ image, onClose }: Props) {
               prompt={prompt}
               onPrompt={setPrompt}
               texture={texture}
-              onTexture={setTexture}
+              onTexture={(f) => { setTexture(f); setTextureWidth('') }}
+              textureWidth={textureWidth}
+              onTextureWidth={setTextureWidth}
               onConfirm={apply}
               onReset={() => clearMask()}
               x={pop.x}

@@ -1103,6 +1103,90 @@ async def _surface(src: Image.Image, core: Image.Image) -> Image.Image:
     return full
 
 
+TEXTURE_WIDTH_SYSTEM = (
+    "You see a photo of a building material used as a repeating texture (bricks, stone, tiles, boards, plaster, "
+    "concrete...). Estimate the real-world width in metres that the whole image covers, from the size of its "
+    "elements: a standard brick is about 0.25 m long and 0.065 m high with 10 mm joints, a facade board 0.1-0.2 m "
+    "wide, a paving slab 0.3-0.6 m, a large porcelain tile 0.6-1.2 m, aggregate stones in concrete 3-15 mm. Count "
+    "the elements across the image. Answer with JSON: "
+    '{"material": "<what it is, 3-10 words>", "elements_across": <number>, "width_m": <number>}'
+)
+TEXTURE_WIDTH_DEFAULT = 1.0  # без DeepSeek или при ошибке: метр — середина типичных образцов
+TEXTURE_MAX_SIDE = 2048  # образец для проекции — в своём разрешении, но не больше
+
+
+async def _texture_width(texture: bytes) -> float:
+    """Ширина образца в метрах (сколько реального материала на картинке) — DeepSeek по одному образцу."""
+    if not DEEPSEEK_API_KEY:
+        return TEXTURE_WIDTH_DEFAULT
+    key = hashlib.sha256(b"texwidth" + texture + llm_model.get().encode()).hexdigest()
+    if key in _described:
+        return _described[key]["width_m"]
+    try:
+        data = json.loads(await _chat(
+            [
+                {"role": "system", "content": TEXTURE_WIDTH_SYSTEM},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": _data_url(texture, 1024)}}]},
+            ],
+            json_mode=True,
+        ))
+        width = float(data.get("width_m") or 0)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Ширина образца не оценена (DeepSeek): %s", e)
+        return TEXTURE_WIDTH_DEFAULT
+    if not 0.02 <= width <= 20:
+        return TEXTURE_WIDTH_DEFAULT
+    log.info("образец: %s, %s элементов поперёк → %.2f м", data.get("material"), data.get("elements_across"), width)
+    _described[key] = {"width_m": width}
+    return width
+
+
+async def _project_texture(src: Image.Image, surface: Image.Image, texture: bytes, width_m: float) -> bytes | None:
+    """Образец на поверхность проекцией 1 в 1 (InegoTextureProject: MoGe-2 + Marigold-IID) — JPEG кадра или None,
+    если поверхность не плоская или геометрия не найдена. Кроп — с контекстом вокруг поверхности, в разрешении
+    исходника: MoGe-2 нужен окружающий кадр для геометрии, проекции — все пиксели."""
+    if not surface.getbbox():
+        return None
+    box = _context_box(surface.getbbox(), *src.size)
+    crop, m = src.crop(box), surface.crop(box)
+    tex = Image.open(io.BytesIO(texture)).convert("RGB")
+    tex.thumbnail((TEXTURE_MAX_SIDE, TEXTURE_MAX_SIDE), Image.LANCZOS)
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        names = [
+            await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for img in (crop, m.convert("RGB"), tex)
+        ]
+        wf = {
+            "img": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
+            "surf": {"class_type": "LoadImageMask", "inputs": {"image": names[1], "channel": "red"}},
+            "tex": {"class_type": "LoadImage", "inputs": {"image": names[2]}},
+            "proj": {
+                "class_type": "InegoTextureProject",
+                "inputs": {"image": ["img", 0], "surface": ["surf", 0], "texture": ["tex", 0], "tex_width_m": width_m},
+            },
+            "applied": {"class_type": "MaskToImage", "inputs": {"mask": ["proj", 1]}},
+            "save": {"class_type": "SaveImage", "inputs": {"images": ["proj", 0], "filename_prefix": "inego/texture"}},
+            "save_m": {"class_type": "SaveImage", "inputs": {"images": ["applied", 0], "filename_prefix": "inego/texmask"}},
+        }
+        try:
+            out = await _run(client, wf)
+        except ComfyError as e:
+            log.warning("Проекция образца не удалась: %s", e)
+            return None
+    if "save" not in out or "save_m" not in out:
+        return None
+    applied = Image.open(io.BytesIO(out["save_m"])).convert("L")
+    if not applied.point(lambda v: 255 if v > 127 else 0).getbbox():
+        return None
+    patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
+    log.info("образец спроецирован: кроп %s, ширина образца %.2f м", box, width_m)
+    result = src.copy()
+    # нода уже свела край со сглаживанием; вклейка — только по поверхности
+    result.paste(patch, box[:2], m.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(EXACT_EDGE)))
+    buf = io.BytesIO()
+    result.save(buf, "JPEG", quality=95)
+    return buf.getvalue()
+
+
 def _touches_edge(keep: Image.Image, box: tuple[int, int, int, int], size: tuple[int, int]) -> str:
     """Стороны кропа (не совпадающие с краем кадра), в которые упирается вклеиваемый объект: «верх, слева»; пусто — нет."""
     import numpy as np
@@ -1488,6 +1572,7 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
     box: list[float] | None = None, material: bool = False, texture: bytes | None = None,
+    texture_width: float | None = None,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1498,6 +1583,15 @@ async def run_edit(
     if seed is None:
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
+    surface = None
+    if material and texture:
+        # образец — проекцией 1 в 1 (InegoTextureProject); не плоская поверхность — генеративный путь ниже
+        surface = await _surface(src, core)
+        width = texture_width or await _texture_width(texture)
+        projected = await _project_texture(src, surface, texture, width)
+        if projected is not None:
+            return projected, seed
+        log.info("проекция образца не удалась — материал по образцу через модель")
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
     # вкладка «Материалы»: запрос — сам материал («дерево — венге»), тип правки задан, рамки нет
     tex = None
@@ -1532,7 +1626,7 @@ async def run_edit(
             core = ImageChops.multiply(extra, _rect_mask([0, (y1 + 2 * (y2 - y1) / 3) / src.size[1], 1, 1], src.size))
     if material:
         # контур поверхности под мазком по исходнику (SAM 2.1): модель правит и вклейка берёт только его
-        core = await _surface(src, core)
+        core = surface if surface is not None else await _surface(src, core)
     r = _Region(src, core, grow, extra, 0.0 if material else EDIT_ROOM if add else EDIT_ROOM_CHANGE)
     r.exact = material
     if model in QWEN21_MODELS:
