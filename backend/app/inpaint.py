@@ -227,6 +227,10 @@ Q2511_REMOVE_PROMPT = (
 # предел совмещения результата родного режима с кропом (доля кадра): сдвиг там — единицы пикселей
 ALIGN_MAX = 0.03
 EXACT_EDGE = 0.8  # сглаживание края вклейки по контуру поверхности (px): только антиалиасинг, без растушёвки
+# «добавить / заменить»: объект сводится со сценой по свету через Marigold-IID (InegoHarmonize) вместо прогона
+# переосвещения через модель. Выключено: на границе солнца и тени средний свет вокруг объекта — не тот, что падает
+# на него (женщина на дорожке у газона вышла серой и холодной вместо освещённой закатом); прогон модели живее
+ADD_HARMONIZE = False
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -949,9 +953,12 @@ class _Region:
         # (тент зонта над окном) _unveil принимал за вуаль и вырезал в нём дыры с окном
         if unveil and not found:
             patch = _unveil(patch, self.crop, self.gen)
+        harmonized = None
         if found:
             obj, shadow = found
-            patch = _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
+            if ADD_HARMONIZE:
+                harmonized = await _harmonize(patch, self.crop, obj, shadow)
+            patch = harmonized or _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
             keep = obj
             # _compose_object уже свёл объект и тень с исходником — вклеивается весь кроп
             alpha = Image.new("L", self.crop.size, 255)
@@ -970,7 +977,7 @@ class _Region:
         obj.paste(keep, self.box[:2])
         if self.source_light:
             result = await _relight_source(result, self.src, obj, self.exact)
-        elif relight:
+        elif relight and harmonized is None:
             # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
             result = await _relight(result, obj, relight, seed + 2, model, self.exact)
         if refine and self.room:
@@ -1033,6 +1040,35 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     result = result.copy()
     result.paste(refined, box[:2], alpha)
     return result
+
+
+async def _harmonize(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image) -> Image.Image | None:
+    """Добавленный объект, сведённый со сценой по свету (InegoHarmonize: Marigold-IID) — кроп исходника + тень по
+    падению освещённости + объект с оттенком и яркостью света сцены. None — не получилось (сборка _compose_object)."""
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        names = [
+            await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png")
+            for img in (patch, crop, obj.convert("RGB"), shadow.convert("RGB"))
+        ]
+        wf = {
+            "gen": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
+            "src": {"class_type": "LoadImage", "inputs": {"image": names[1]}},
+            "obj": {"class_type": "LoadImageMask", "inputs": {"image": names[2], "channel": "red"}},
+            "sh": {"class_type": "LoadImageMask", "inputs": {"image": names[3], "channel": "red"}},
+            "harm": {
+                "class_type": "InegoHarmonize",
+                "inputs": {"generated": ["gen", 0], "source": ["src", 0], "object": ["obj", 0], "shadow": ["sh", 0]},
+            },
+            "save": {"class_type": "SaveImage", "inputs": {"images": ["harm", 0], "filename_prefix": "inego/harmonize"}},
+        }
+        try:
+            out = await _run(client, wf)
+        except ComfyError as e:
+            log.warning("Объект не сведён со сценой по свету: %s", e)
+            return None
+    if "save" not in out:
+        return None
+    return Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
 
 
 async def _relight_source(result: Image.Image, src: Image.Image, area: Image.Image, exact: bool) -> Image.Image:

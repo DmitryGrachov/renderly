@@ -851,6 +851,11 @@ TEX_PREFILTER = 0.6
 # и пределы поправки света
 RELIGHT_SMOOTH = 0.01
 RELIGHT_MIN, RELIGHT_MAX = 0.15, 6.0
+# сведение добавленного объекта (InegoHarmonize): оттенок света — полностью в этих пределах по каналу, яркость —
+# в степени HARM_GAIN_POW (у объекта свои грани к свету) и в пределах
+HARM_TINT_MIN, HARM_TINT_MAX = 0.8, 1.25
+HARM_GAIN_POW = 0.5
+HARM_GAIN_MIN, HARM_GAIN_MAX = 0.7, 1.4
 # уточнение нормали стены по её краям — не больше этого угла (больше — края не те: окно, тень, обрезка)
 REFINE_MAX_DEG = 25
 # соседняя грань с MoGe-углом 90° ± этот допуск к уточнённой — ставится ровно под прямой угол (параллельная — так же)
@@ -1189,6 +1194,95 @@ class InegoRelight:
         return (torch.from_numpy(res.astype(np.float32))[None],)
 
 
+class InegoHarmonize:
+    """Сборка добавленного объекта с исходником по свету (Inpainting «добавить / заменить»): кроп исходника +
+    тень + объект из генерации, сведённый по оттенку и яркости со светом сцены.
+
+    Модель рисует объект в своём свете — теплее или холоднее сцены, ярче или темнее, — и он выглядит вклеенным.
+    Marigold-IID раскладывает исходник и генерацию на альбедо × освещённость:
+      - объект: свет сцены вокруг него (кольцо по исходнику) против света, в котором его нарисовала модель
+        (освещённость генерации на объекте). Оттенок света сводится полностью, яркость — частично (HARM_GAIN_POW):
+        у объекта свои грани, повёрнутые к свету иначе, чем земля и стена рядом;
+      - тень: там, где освещённость генерации ниже исходной, — затемнение исходника на это отношение. Трава и
+        плитка под тенью остаются пикселями фото (раньше тень бралась по яркости, и в неё попадало всё, что модель
+        перекрасила на газоне).
+    Край объекта — как в _compose_object бэкенда: по чуть сжатой маске, без тёмного ореола фона генерации.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "generated": ("IMAGE",),  # кроп генерации
+                "source": ("IMAGE",),  # тот же кроп исходника
+                "object": ("MASK",),
+                "shadow": ("MASK",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    def run(self, generated, source, object, shadow):  # noqa: A002 — имя входа ноды
+        g = generated[0][..., :3].float().cpu().numpy()
+        o = source[0][..., :3].float().cpu().numpy()
+        H, W = o.shape[:2]
+
+        def fit(mk):
+            mk = mk[0].float()[None, None]
+            if mk.shape[-2:] != (H, W):
+                mk = F.interpolate(mk, size=(H, W), mode="bilinear", align_corners=False)
+            return mk[0, 0].numpy() > 0.5
+
+        if g.shape != o.shape:
+            return (generated,)
+        m, sh = fit(object), fit(shadow)
+        if m.sum() < 64:
+            return (source,)
+        ys, xs = np.nonzero(m)
+        size = max(np.ptp(ys) + 1, np.ptp(xs) + 1)
+        _free_vram()
+        d_o = _decompose((np.clip(o, 0, 1) * 255).astype(np.uint8))
+        d_g = _decompose((np.clip(g, 0, 1) * 255).astype(np.uint8))
+
+        def calib(img, d, region):
+            return float(np.median((_to_lin(img)[region].mean(1) + 1e-4) / ((d[0] * d[1] + d[2])[region].mean(1) + 1e-4)))
+
+        everywhere = np.ones_like(m)
+        cal_o, cal_g = calib(o, d_o, everywhere), calib(g, d_g, everywhere)
+        shd_o, shd_g = cal_o * d_o[1], cal_g * d_g[1]
+
+        # тень: отношение гладких освещённостей генерации и исходника (только темнее), вес — по области тени
+        s_lum = max(2.0, size * 0.012)
+        lo = ndimage.gaussian_filter(shd_o.mean(-1), s_lum)
+        lg = ndimage.gaussian_filter(shd_g.mean(-1), s_lum)
+        ratio = np.clip((lg + 1e-4) / (lo + 1e-4), 0.2, 1.0)
+        wgt = np.clip(ndimage.gaussian_filter(sh.astype(np.float32), max(3.0, size * 0.04)) * 1.6, 0, 1)
+        out = _to_lin(o) * (1 - wgt * (1 - ratio))[..., None]
+
+        # объект: свет сцены вокруг против света, в котором он нарисован
+        core = ndimage.binary_erosion(m, iterations=max(1, round(size * 0.02)))
+        if core.sum() < 32:
+            core = m
+        ring = ndimage.binary_dilation(m, iterations=max(4, round(size * 0.15))) & ~ndimage.binary_dilation(
+            m, iterations=max(2, round(size * 0.03))) & ~ndimage.binary_dilation(sh, iterations=2)
+        lin_g = _to_lin(g)
+        if ring.sum() > 64:
+            scene = np.median(shd_o[ring], 0)
+            drawn = np.median(shd_g[core], 0)
+            lum = np.array([0.2126, 0.7152, 0.0722], np.float32)
+            tint = np.clip((scene / (scene @ lum + 1e-4)) / (drawn / (drawn @ lum + 1e-4) + 1e-4), HARM_TINT_MIN, HARM_TINT_MAX)
+            gain = float(np.clip(((scene @ lum) / (drawn @ lum + 1e-4)) ** HARM_GAIN_POW, HARM_GAIN_MIN, HARM_GAIN_MAX))
+            lin_g = lin_g * (tint * gain)[None, None, :]
+            log.info("INEGO harmonize: оттенок света ×%s, яркость ×%.2f", np.round(tint, 2), gain)
+
+        # край — с чуть сжатой маски: пиксели фона из генерации вокруг контура (тёмный ореол) не попадают
+        a = ndimage.gaussian_filter(ndimage.binary_erosion(m, iterations=1).astype(np.float32), max(0.8, size * 0.0015))
+        out = out * (1 - a[..., None]) + lin_g * a[..., None]
+        return (torch.from_numpy(_to_srgb(out).astype(np.float32))[None],)
+
+
 def _scene_up(normals: list, N: np.ndarray, valid_all: np.ndarray) -> np.ndarray:
     """Вертикаль сцены в координатах камеры (OpenCV: y вниз). Камера бывает чуть наклонена — «строго вниз по
     кадру» разворачивал рисунок. Две стены под углом: вертикаль — их общее ребро (ошибки нормалей по курсу
@@ -1290,8 +1384,9 @@ def _match_grain(out: np.ndarray, src: np.ndarray, S: np.ndarray) -> np.ndarray:
     return np.clip(out + noise * add, 0, 1)
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight}
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight, "InegoHarmonize": InegoHarmonize}
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "InegoHarmonize": "INEGO Harmonize (added object: light tint, exposure and shadow from Marigold-IID)",
     "InegoRelight": "INEGO Relight (source lighting onto an edited surface, Marigold-IID)",
     "InegoTextureProject": "INEGO Texture Project (sample texture 1:1 onto planar faces, MoGe-2 + Marigold-IID)",
     "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",
