@@ -1217,20 +1217,63 @@ async def _texture_width(texture: bytes) -> float:
     return width
 
 
-async def _project_texture(src: Image.Image, surface: Image.Image, texture: bytes, width_m: float) -> bytes | None:
+EXR_MAGIC = b"v/1\x01"
+
+
+def decode_map(data: bytes, color: bool) -> Image.Image:
+    """Карта PBR-набора или образец → 8-битная картинка (не больше TEXTURE_MAX_SIDE). EXR (Poly Haven, Quixel и
+    т.п.): цвет хранится линейно — переводится в sRGB; карты данных (нормали, AO, шероховатость) — значения как
+    есть, 0..1 → 0..255. ValueError — не картинка."""
+    if data[:4] == EXR_MAGIC:
+        import tempfile
+
+        import numpy as np
+        import OpenEXR
+
+        with tempfile.NamedTemporaryFile(suffix=".exr") as tmp:
+            tmp.write(data)
+            tmp.flush()
+            with OpenEXR.File(tmp.name) as exr:
+                ch = exr.channels()
+                part = ch.get("RGB") or ch.get("RGBA") or next(iter(ch.values()))
+                px = np.asarray(part.pixels, dtype=np.float32)
+        if px.ndim == 3 and px.shape[-1] == 4:
+            px = px[..., :3]
+        px = np.nan_to_num(px)
+        if color:
+            px = np.clip(px, 0, 1)
+            px = np.where(px <= 0.0031308, px * 12.92, 1.055 * px ** (1 / 2.4) - 0.055)
+        img = Image.fromarray((np.clip(px, 0, 1) * 255 + 0.5).astype(np.uint8))
+    else:
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        except Exception as e:  # noqa: BLE001
+            raise ValueError("не картинка") from e
+    img = img.convert("RGB")
+    img.thumbnail((TEXTURE_MAX_SIDE, TEXTURE_MAX_SIDE), Image.LANCZOS)
+    return img
+
+
+async def _project_texture(
+    src: Image.Image, surface: Image.Image, texture: bytes, width_m: float, pbr: dict | None = None
+) -> bytes | None:
     """Образец на поверхность проекцией 1 в 1 (InegoTextureProject: MoGe-2 + Marigold-IID) — JPEG кадра или None,
     если поверхность не плоская или геометрия не найдена. Кроп — с контекстом вокруг поверхности, в разрешении
-    исходника: MoGe-2 нужен окружающий кадр для геометрии, проекции — все пиксели."""
+    исходника: MoGe-2 нужен окружающий кадр для геометрии, проекции — все пиксели.
+    pbr — карты набора: {"normal": bytes, "ao": bytes, "normal_dx": bool} (рельеф и затенение швов)."""
     if not surface.getbbox():
         return None
+    pbr = pbr or {}
     box = _context_box(surface.getbbox(), *src.size)
     crop, m = src.crop(box), surface.crop(box)
-    tex = Image.open(io.BytesIO(texture)).convert("RGB")
-    tex.thumbnail((TEXTURE_MAX_SIDE, TEXTURE_MAX_SIDE), Image.LANCZOS)
+    tex = decode_map(texture, color=True)
+    maps = {k: decode_map(pbr[k], color=False) for k in ("normal", "ao") if pbr.get(k)}
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         names = [
             await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for img in (crop, m.convert("RGB"), tex)
         ]
+        map_names = {k: await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for k, img in maps.items()}
         wf = {
             "img": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
             "surf": {"class_type": "LoadImageMask", "inputs": {"image": names[1], "channel": "red"}},
@@ -1243,6 +1286,11 @@ async def _project_texture(src: Image.Image, surface: Image.Image, texture: byte
             "save": {"class_type": "SaveImage", "inputs": {"images": ["proj", 0], "filename_prefix": "inego/texture"}},
             "save_m": {"class_type": "SaveImage", "inputs": {"images": ["applied", 0], "filename_prefix": "inego/texmask"}},
         }
+        for k, name in map_names.items():
+            wf[f"map_{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            wf["proj"]["inputs"][k] = [f"map_{k}", 0]
+        if "normal" in map_names:
+            wf["proj"]["inputs"]["normal_dx"] = bool(pbr.get("normal_dx"))
         try:
             out = await _run(client, wf)
         except ComfyError as e:
@@ -1254,7 +1302,8 @@ async def _project_texture(src: Image.Image, surface: Image.Image, texture: byte
     if not applied.point(lambda v: 255 if v > 127 else 0).getbbox():
         return None
     patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
-    log.info("образец спроецирован: кроп %s, ширина образца %.2f м", box, width_m)
+    log.info("образец спроецирован: кроп %s, ширина образца %.2f м, карты набора: %s", box, width_m,
+             ", ".join(map_names) or "нет")
     result = src.copy()
     # нода уже свела край со сглаживанием; вклейка — только по поверхности
     result.paste(patch, box[:2], m.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(EXACT_EDGE)))
@@ -1648,7 +1697,7 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
     box: list[float] | None = None, material: bool = False, texture: bytes | None = None,
-    texture_width: float | None = None,
+    texture_width: float | None = None, pbr: dict | None = None,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1660,11 +1709,14 @@ async def run_edit(
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
     surface = None
+    if material and texture and texture[:4] == EXR_MAGIC:
+        # цвет набора в EXR — дальше везде (DeepSeek, модель) как обычная картинка
+        texture = to_png(decode_map(texture, color=True))
     if material and texture:
         # образец — проекцией 1 в 1 (InegoTextureProject); не плоская поверхность — генеративный путь ниже
         surface = await _surface(src, core)
         width = texture_width or await _texture_width(texture)
-        projected = await _project_texture(src, surface, texture, width)
+        projected = await _project_texture(src, surface, texture, width, pbr)
         if projected is not None:
             return projected, seed
         log.info("проекция образца не удалась — материал по образцу через модель")

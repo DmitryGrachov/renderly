@@ -34,6 +34,10 @@ export interface InpaintRequest {
   texture?: Blob
   /** Сколько сантиметров материала на образце поперёк; пусто — оценит бэкенд */
   textureWidthCm?: number
+  /** Карты PBR-набора к образцу: нормали (формат DirectX — normalDx) и AO */
+  textureNormal?: Blob
+  textureAo?: Blob
+  normalDx?: boolean
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -80,6 +84,10 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   if (req.texture && req.mode === 'material') {
     body.append('texture', req.texture, 'texture')
     if (req.textureWidthCm) body.append('texture_width', String(req.textureWidthCm))
+    // имя файла с расширением: бэкенд узнаёт EXR по содержимому, но имя помогает в логах
+    if (req.textureNormal) body.append('texture_normal', req.textureNormal, (req.textureNormal as File).name ?? 'normal')
+    if (req.textureAo) body.append('texture_ao', req.textureAo, (req.textureAo as File).name ?? 'ao')
+    body.append('normal_format', req.normalDx ? 'dx' : 'gl')
   }
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления

@@ -4,7 +4,7 @@ import { Check, Columns2, Download, Eye, History, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
-import { ActionPopover, POPOVER_WIDTH } from './ActionPopover'
+import { ActionPopover, NO_MAPS, POPOVER_WIDTH, isMapFile, type MaterialMaps } from './ActionPopover'
 import { inpaint, planInpaint, type InpaintMode } from '../../lib/inpaint'
 import { PlanBox, type Box as PlanRect } from './PlanBox'
 import type { StudioImage } from '../../lib/types'
@@ -57,7 +57,8 @@ export function Editor({ image, onClose }: Props) {
   const [lasso, setLasso] = useState<Pt[]>([])
   const [prompt, setPrompt] = useState('')
   // образец материала: остаётся после применения — один образец кладут на несколько поверхностей подряд
-  const [texture, setTexture] = useState<File | null>(null)
+  const [maps, setMaps] = useState<MaterialMaps>(NO_MAPS)
+  const texture = maps.color
   const [textureWidth, setTextureWidth] = useState('')
   const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -447,6 +448,9 @@ export function Editor({ image, onClose }: Props) {
         {
           imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box,
           texture: mode === 'material' ? texture ?? undefined : undefined,
+          textureNormal: mode === 'material' ? maps.normal ?? undefined : undefined,
+          textureAo: mode === 'material' ? maps.ao ?? undefined : undefined,
+          normalDx: maps.normalDx,
           textureWidthCm: mode === 'material' && texture && Number(textureWidth) > 0 ? Number(textureWidth) : undefined,
         },
         (progress, stage) => setBusy({ progress, stage }),
@@ -545,7 +549,8 @@ export function Editor({ image, onClose }: Props) {
         onDrop={(e) => {
           e.preventDefault()
           const f = e.dataTransfer.files[0]
-          if (mode === 'material' && f && ['image/jpeg', 'image/png', 'image/webp'].includes(f.type) && f.size <= 20 * 1024 * 1024) setTexture(f)
+          // брошенный мимо ячеек файл — цвет материала (набор начинается с него)
+          if (mode === 'material' && f && isMapFile(f) && f.size <= 64 * 1024 * 1024) { setMaps({ ...NO_MAPS, color: f }); setTextureWidth('') }
         }}
       >
         {/* изображение + маска */}
@@ -774,8 +779,8 @@ export function Editor({ image, onClose }: Props) {
               mode={mode}
               prompt={prompt}
               onPrompt={setPrompt}
-              texture={texture}
-              onTexture={(f) => { setTexture(f); setTextureWidth('') }}
+              maps={maps}
+              onMaps={(m) => { if (m.color !== maps.color) setTextureWidth(''); setMaps(m) }}
               textureWidth={textureWidth}
               onTextureWidth={setTextureWidth}
               onConfirm={apply}

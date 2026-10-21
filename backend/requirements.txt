@@ -10,3 +10,5 @@ email-validator>=2.1
 pillow>=10.4
 numpy>=1.26
 scipy>=1.11
+# карты PBR-наборов в EXR (Poly Haven и т.п.)
+OpenEXR>=3.3

@@ -43,9 +43,9 @@ interface Props {
   mode: InpaintMode
   prompt: string
   onPrompt: (v: string) => void
-  /** Образец материала (только «Материалы») */
-  texture?: File | null
-  onTexture?: (f: File | null) => void
+  /** Образец материала и карты PBR-набора (только «Материалы») */
+  maps?: MaterialMaps
+  onMaps?: (m: MaterialMaps) => void
   /** Ширина образца в сантиметрах (строка поля; пусто — оценит бэкенд) */
   textureWidth?: string
   onTextureWidth?: (v: string) => void
@@ -60,7 +60,7 @@ interface Props {
 export const POPOVER_WIDTH = 340
 
 export function ActionPopover({
-  mode, prompt, onPrompt, texture, onTexture, textureWidth, onTextureWidth, onConfirm, onReset, x, y, placement,
+  mode, prompt, onPrompt, maps, onMaps, textureWidth, onTextureWidth, onConfirm, onReset, x, y, placement,
 }: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
   const { scene } = useScene()
@@ -69,6 +69,7 @@ export function ActionPopover({
     if (mode !== 'remove') input.current?.focus({ preventScroll: true })
   }, [mode])
 
+  const texture = maps?.color ?? null
   const canConfirm = mode === 'remove' || prompt.trim().length > 0 || (mode === 'material' && !!texture)
 
   return (
@@ -125,8 +126,8 @@ export function ActionPopover({
       {mode === 'remove' && (
         <div className="mt-3.5 text-[12px] font-medium text-faint">Что именно удалить? Необязательно</div>
       )}
-      {mode === 'material' && onTexture && (
-        <TextureDrop texture={texture ?? null} onTexture={onTexture} width={textureWidth ?? ''} onWidth={onTextureWidth} />
+      {mode === 'material' && maps && onMaps && (
+        <TextureDrop maps={maps} onMaps={onMaps} width={textureWidth ?? ''} onWidth={onTextureWidth} />
       )}
       <textarea
         ref={input}
@@ -179,75 +180,145 @@ export function ActionPopover({
 }
 
 const TEXTURE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
-const TEXTURE_MAX = 20 * 1024 * 1024
+const TEXTURE_MAX = 64 * 1024 * 1024 // карта 4K в EXR — 25-30 МБ
 
-/** Образец материала: перетащить файл или выбрать по клику; превью с кнопкой «убрать». */
-function TextureDrop({ texture, onTexture, width, onWidth }: {
-  texture: File | null
-  onTexture: (f: File | null) => void
-  width: string
-  onWidth?: (v: string) => void
+/** Карты материала: цвет (BaseColor или фото образца) и необязательные карты PBR-набора. */
+export interface MaterialMaps {
+  color: File | null
+  normal: File | null
+  ao: File | null
+  /** Карта нормалей в формате DirectX (зелёный канал перевёрнут); по умолчанию OpenGL */
+  normalDx: boolean
+}
+export const NO_MAPS: MaterialMaps = { color: null, normal: null, ao: null, normalDx: false }
+
+const isExr = (f: File) => f.name.toLowerCase().endsWith('.exr')
+export const isMapFile = (f: File) => TEXTURE_TYPES.includes(f.type) || isExr(f)
+
+/** Ячейка одной карты: перетащить файл или выбрать по клику; превью (у EXR — подпись), «убрать». */
+function MapSlot({ file, onFile, title, hint, compact, onError, children }: {
+  file: File | null
+  onFile: (f: File | null) => void
+  title: string
+  hint: string
+  compact?: boolean
+  onError: (e: string | null) => void
+  children?: React.ReactNode
 }) {
-  const file = useRef<HTMLInputElement>(null)
+  const input = useRef<HTMLInputElement>(null)
   const [over, setOver] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const preview = useMemo(() => (texture ? URL.createObjectURL(texture) : null), [texture])
+  const preview = useMemo(() => (file && !isExr(file) ? URL.createObjectURL(file) : null), [file])
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview) }, [preview])
 
   function take(f: File | undefined) {
     if (!f) return
-    if (!TEXTURE_TYPES.includes(f.type)) return setError('Нужна картинка: JPG, PNG или WebP')
-    if (f.size > TEXTURE_MAX) return setError('Файл больше 20 МБ')
-    setError(null)
-    onTexture(f)
+    if (!isMapFile(f)) return onError('Нужна картинка: JPG, PNG, WebP или EXR')
+    if (f.size > TEXTURE_MAX) return onError('Файл больше 64 МБ')
+    onError(null)
+    onFile(f)
   }
 
+  const thumb = compact ? 'size-9 rounded-[8px]' : 'size-12 rounded-[10px]'
   return (
-    <div className="mt-3.5">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => file.current?.click()}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.current?.click() } }}
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true) }}
-        onDragLeave={() => setOver(false)}
-        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(false); take(e.dataTransfer.files[0]) }}
-        className={`flex cursor-pointer items-center gap-3 rounded-[14px] p-2 transition-colors ${
-          over ? 'bg-[#f59e0b]/15 ring-2 ring-[#f59e0b]' : texture ? 'bg-fg/[0.04]' : 'border border-dashed border-fg/20 bg-fg/[0.03] hover:bg-fg/[0.07]'
-        }`}
-      >
-        {preview ? (
-          <img src={preview} alt="" className="size-12 shrink-0 rounded-[10px] object-cover ring-1 ring-fg/10" />
-        ) : (
-          <span className="grid size-12 shrink-0 place-items-center rounded-[10px] bg-fg/[0.05] text-mute">
-            <ImagePlus className="size-5" strokeWidth={1.75} />
-          </span>
-        )}
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-medium text-ink">{texture ? texture.name : 'Образец материала'}</div>
-          <div className="text-[12px] leading-snug text-faint">
-            {texture ? 'Нажмите, чтобы заменить' : 'Перетащите текстуру сюда или выберите файл'}
-          </div>
-        </div>
-        {texture && (
-          <button
-            aria-label="Убрать образец"
-            onClick={(e) => { e.stopPropagation(); onTexture(null) }}
-            className="grid size-7 shrink-0 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.08] hover:text-ink"
-          >
-            <X className="size-3.5" />
-          </button>
-        )}
-        <input
-          ref={file}
-          type="file"
-          accept={TEXTURE_TYPES.join(',')}
-          className="hidden"
-          onChange={(e) => { take(e.target.files?.[0]); e.target.value = '' }}
-        />
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => input.current?.click()}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.current?.click() } }}
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true) }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(false); take(e.dataTransfer.files[0]) }}
+      className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-[14px] p-2 transition-colors ${
+        over ? 'bg-[#f59e0b]/15 ring-2 ring-[#f59e0b]' : file ? 'bg-fg/[0.04]' : 'border border-dashed border-fg/20 bg-fg/[0.03] hover:bg-fg/[0.07]'
+      }`}
+    >
+      {preview ? (
+        <img src={preview} alt="" className={`${thumb} shrink-0 object-cover ring-1 ring-fg/10`} />
+      ) : (
+        <span className={`${thumb} grid shrink-0 place-items-center bg-fg/[0.05] text-mute`}>
+          {file ? <span className="text-[10px] font-semibold">EXR</span> : <ImagePlus className={compact ? 'size-4' : 'size-5'} strokeWidth={1.75} />}
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className={`truncate font-medium text-ink ${compact ? 'text-[12px]' : 'text-[13px]'}`}>{title}</div>
+        <div className={`truncate leading-snug text-faint ${compact ? 'text-[11px]' : 'text-[12px]'}`}>{file ? file.name : hint}</div>
+        {children}
       </div>
-      {texture && onWidth && (
-        <label className="mt-2 flex items-center gap-2 text-[12.5px] text-mute">
+      {file && (
+        <button
+          aria-label={`Убрать: ${title}`}
+          onClick={(e) => { e.stopPropagation(); onFile(null) }}
+          className="grid size-6 shrink-0 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.08] hover:text-ink"
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+      <input
+        ref={input}
+        type="file"
+        accept={[...TEXTURE_TYPES, '.exr'].join(',')}
+        className="hidden"
+        onChange={(e) => { take(e.target.files?.[0]); e.target.value = '' }}
+      />
+    </div>
+  )
+}
+
+/** Образец материала: цвет и (после него) карты PBR-набора — каждая в своей ячейке, без угадывания по имени. */
+function TextureDrop({ maps, onMaps, width, onWidth }: {
+  maps: MaterialMaps
+  onMaps: (m: MaterialMaps) => void
+  width: string
+  onWidth?: (v: string) => void
+}) {
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <div className="mt-3.5 flex flex-col gap-1.5">
+      <MapSlot
+        file={maps.color}
+        onFile={(f) => onMaps(f ? { ...maps, color: f } : NO_MAPS)}
+        title="Цвет материала"
+        hint="BaseColor или фото образца — перетащите сюда"
+        onError={setError}
+      />
+      {maps.color && (
+        <div className="grid grid-cols-2 gap-1.5">
+          <MapSlot
+            compact
+            file={maps.normal}
+            onFile={(f) => onMaps({ ...maps, normal: f })}
+            title="Нормали"
+            hint="рельеф"
+            onError={setError}
+          >
+            {maps.normal && (
+              <div className="mt-0.5 flex gap-0.5" onClick={(e) => e.stopPropagation()}>
+                {(['gl', 'dx'] as const).map((fmt) => (
+                  <button
+                    key={fmt}
+                    onClick={() => onMaps({ ...maps, normalDx: fmt === 'dx' })}
+                    className={`rounded-full px-1.5 py-px text-[10px] font-semibold transition-colors ${
+                      maps.normalDx === (fmt === 'dx') ? 'bg-ink text-on-ink' : 'bg-fg/[0.06] text-mute hover:text-ink'
+                    }`}
+                  >
+                    {fmt === 'gl' ? 'OpenGL' : 'DirectX'}
+                  </button>
+                ))}
+              </div>
+            )}
+          </MapSlot>
+          <MapSlot
+            compact
+            file={maps.ao}
+            onFile={(f) => onMaps({ ...maps, ao: f })}
+            title="AO"
+            hint="тень в швах"
+            onError={setError}
+          />
+        </div>
+      )}
+      {maps.color && onWidth && (
+        <label className="mt-0.5 flex items-center gap-2 text-[12.5px] text-mute">
           <span className="flex-1">Ширина образца</span>
           <input
             type="number"
@@ -262,7 +333,7 @@ function TextureDrop({ texture, onTexture, width, onWidth }: {
           <span>см</span>
         </label>
       )}
-      {error && <div className="mt-1.5 text-[12px] text-[#ff3b30]">{error}</div>}
+      {error && <div className="text-[12px] text-[#ff3b30]">{error}</div>}
     </div>
   )
 }
