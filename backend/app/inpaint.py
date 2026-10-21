@@ -26,10 +26,11 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, to_png
 from .comfy import build_qwen21_workflow as img2img_workflow
+from .comfy import build_workflow as flux_img2img_workflow
 from .comfy import fit_size as _fit16
 from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
-    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT,
+    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
@@ -225,11 +226,13 @@ HARMONIZE_REMOVED = (
     "sharpness, noise and grain as its surroundings, with no trace, outline or smudge. Everything else in <image1> "
     "stays exactly as it is, nothing added, removed or moved."
 )
+# FLUX.2 klein рисует «noise and grain» буквально — «наждачкой» по стенам; для него — без них
+HARMONIZE_FLUX_DROP = (", noise and grain", " noise, grain,")
 # защита сцены после пересчёта (guard_scene): структурное изменение — расхождение средних частот кадра больше
 # этого (0..1); кусок не меньше этой доли кадра; правка с запасом этой доли не проверяется (кроме удаления)
 GUARD_DIFF = 0.09
 GUARD_MIN = 0.0004
-GUARD_MARGIN = 0.03
+GUARD_MARGIN = 0.006
 # из пересчитанного кадра берётся правка и полоса вокруг неё — доля размера правки (не меньше 1% кадра)
 HARMONIZE_BAND = 0.25
 EDIT_MARK = True
@@ -980,7 +983,7 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj)
+            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1085,8 +1088,9 @@ def restore_colour(after: Image.Image, before: Image.Image, area: Image.Image) -
 
 
 def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | None, removed: bool) -> Image.Image:
-    """Удаление после пересчёта: модель могла нарисовать удалённое снова (дерево вернулось на место). Где кадр
-    изменился структурно — появился или пропал объект, — возвращается кадр до пересчёта. Сравниваются средние
+    """Структура вне правки после пересчёта: модель могла нарисовать удалённое снова (дерево вернулось на место)
+    или продолжить новый материал на соседнюю поверхность. Где кадр изменился структурно — появился или пропал
+    объект, рисунок, — возвращается кадр до пересчёта. Сравниваются средние
     частоты (размытие минус сильное размытие): сдвиг тона и зерна — законная часть согласования — не в счёт.
     Для правок, кроме удаления, область правки не проверяется (её меняют намеренно)."""
     import numpy as np
@@ -1105,6 +1109,7 @@ def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | Non
     changed = np.abs(mid(a) - mid(b)).max(-1) > GUARD_DIFF
     changed = ndimage.binary_opening(changed, iterations=2)
     if area is not None and not removed:
+        # сама правка (и её край) меняется намеренно
         m = np.asarray(area.convert("L").resize(after.size)) > 127
         changed &= ~ndimage.binary_dilation(m, iterations=max(2, round(GUARD_MARGIN * size)))
     lab, n = ndimage.label(changed)
@@ -1123,34 +1128,55 @@ def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | Non
 
 
 async def harmonize_frame(
-    result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None
+    result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None,
+    model: str = QWEN21_TURBO_MODEL,
 ) -> Image.Image:
     """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
     совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
     правка с полосой вокруг (_paste_band). area — правленая область: её цвет и тон возвращаются к тем, что были до
     пересчёта (restore_colour); у удаления — защита от «вернувшегося» объекта (guard_scene). Кадр — в исходный
-    размер (апскейл — дальше отдельно). Не получилось — результат правки как есть."""
+    размер (апскейл — дальше отдельно). Не получилось — результат правки как есть.
+    model — модель правки: FLUX.2 klein пересчитывает сам (img2img страницы Img to Img + InegoAlign), остальные —
+    Qwen-Image-2.1 Turbo."""
     w, h = result.size
-    gw, gh = fit_size(w, h, QWEN21_MEGAPIXELS)
+    flux = model in FLUX_MODELS
+    gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else QWEN21_MEGAPIXELS)
+    prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
+    if flux:
+        for word in HARMONIZE_FLUX_DROP:
+            prompt = prompt.replace(word, "")
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         try:
-            await _check_model(client, QWEN21_TURBO_MODEL)
+            await _check_model(client, model if flux else QWEN21_TURBO_MODEL)
             name = await _upload(client, to_png(result.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-            prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
-            out = await _run(client, img2img_workflow(name, prompt, seed, None))
+            if flux:
+                # klein: картинка — «image 1» (ReferenceLatent), полный шум; совмещение кадра — как у 2.1, иначе
+                # полоса вклеивается со сдвигом
+                wf = flux_img2img_workflow(name, gw, gh, prompt.replace("<image1>", "image 1"), 1.0, seed, None, model=model)
+                wf["align"] = {
+                    "class_type": "InegoAlign",
+                    "inputs": {"image": wf["save"]["inputs"]["images"], "source": ["src_img", 0],
+                               "max_scale": 0.08, "max_shift": 0.08},
+                }
+                wf["save"]["inputs"]["images"] = ["align", 0]
+            else:
+                wf = img2img_workflow(name, prompt, seed, None)
+            out = await _run(client, wf)
         except ComfyError as e:
             log.warning("Пересчёт кадра не удался, остаётся правка как есть: %s", e)
             return result
     if "save" not in out:
         return result
-    log.info("кадр пересчитан целиком: %dx%d → %dx%d, вписано: %s", w, h, gw, gh, subject)
+    log.info("кадр пересчитан целиком (%s): %dx%d → %dx%d, вписано: %s", model if flux else QWEN21_TURBO_MODEL,
+             w, h, gw, gh, subject)
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
     if area is None:
         return frame
     frame = _paste_band(frame, result, area)
-    if removed:
-        frame = guard_scene(frame, result, area, removed)
-    else:
+    # полоса вокруг правки — только свет и тени: новые объекты и рисунок в ней (плитка, поползшая на соседнюю
+    # стену у klein) возвращаются; у удаления проверяется и сама область
+    frame = guard_scene(frame, result, area, removed)
+    if not removed:
         frame = restore_colour(frame, result, area)
     return frame
 
@@ -1773,6 +1799,7 @@ async def run_edit(
         if projected is not None:
             frame = await harmonize_frame(
                 projected, seed + 3, f"the {material_name} cladding just applied to a surface", area=surface,
+                model=model,
             )
             buf = io.BytesIO()
             frame.save(buf, "JPEG", quality=95)
