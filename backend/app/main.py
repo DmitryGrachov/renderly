@@ -1,10 +1,12 @@
 import asyncio
+import io
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from PIL import Image
 
 from . import comfy
 from . import inpaint as inpainting
@@ -150,6 +152,8 @@ async def inpaint(
     prompt: str | None = Form(None, max_length=300),
     # рамка объекта «x1,y1,x2,y2» в долях кадра, поправленная на канвасе (добавить / заменить); пусто — от DeepSeek
     box: str | None = Form(None, max_length=100),
+    # образец материала (вкладка «Материалы»): текстура, которую перетащили в окно
+    texture: UploadFile | None = File(None),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
@@ -166,13 +170,22 @@ async def inpaint(
         raise HTTPException(400, f"Unknown mode: {mode}")
     if mode == "edit" and not (prompt and prompt.strip()):
         raise HTTPException(400, "Опишите, что должно появиться в области")
-    if mode == "material" and not (prompt and prompt.strip()):
-        raise HTTPException(400, "Опишите материал")
+    texture_bytes = await texture.read() if texture is not None and mode == "material" else None
+    if texture_bytes is not None and len(texture_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(400, "Текстура больше 20 МБ")
+    if texture_bytes:
+        try:
+            Image.open(io.BytesIO(texture_bytes)).verify()
+        except Exception as e:  # noqa: BLE001 — не картинка
+            raise HTTPException(400, "Текстура: нужен файл изображения (JPG, PNG, WebP)") from e
+    if mode == "material" and not (prompt and prompt.strip()) and not texture_bytes:
+        raise HTTPException(400, "Опишите материал или добавьте текстуру")
 
     try:
         if mode in ("edit", "material"):
             result, used_seed = await inpainting.run_edit(
-                await image.read(), await mask.read(), prompt, seed, model, _parse_box(box), material=mode == "material"
+                await image.read(), await mask.read(), prompt or "", seed, model, _parse_box(box),
+                material=mode == "material", texture=texture_bytes or None,
             )
         else:
             result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)

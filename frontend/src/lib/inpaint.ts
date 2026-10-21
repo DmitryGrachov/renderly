@@ -30,6 +30,8 @@ export interface InpaintRequest {
   llm?: string
   /** Рамка объекта [x1, y1, x2, y2] в долях кадра, поправленная на канвасе (добавить / заменить) */
   box?: [number, number, number, number]
+  /** Образец материала (вкладка «Материалы»): текстура, которую перетащили в окно */
+  texture?: Blob
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -73,6 +75,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   if (req.model) body.append('model', req.model)
   if (req.llm) body.append('llm', req.llm)
   if (req.box) body.append('box', req.box.map((v) => v.toFixed(4)).join(','))
+  if (req.texture && req.mode === 'material') body.append('texture', req.texture, 'texture')
 
   // Бэкенд не стримит прогресс: плавно ведём шкалу к 95% за ~типичное время удаления
   const expected = req.model === 'qwen-edit-2511' ? 60000 : req.model === 'qwen-image-2.1' ? 50000 : req.model === 'qwen-image-2.1-turbo' ? 35000 : 12000

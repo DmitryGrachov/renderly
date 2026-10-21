@@ -46,6 +46,8 @@ export function Editor({ image, onClose }: Props) {
   const [drawing, setDrawing] = useState(false)
   const [lasso, setLasso] = useState<Pt[]>([])
   const [prompt, setPrompt] = useState('')
+  // образец материала: остаётся после применения — один образец кладут на несколько поверхностей подряд
+  const [texture, setTexture] = useState<File | null>(null)
   const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [versions, setVersions] = useState<Version[]>([{ url: image.url, label: 'Исходник' }])
@@ -294,11 +296,14 @@ export function Editor({ image, onClose }: Props) {
     try {
       const text = prompt.trim()
       const url = await inpaint(
-        { imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box },
+        {
+          imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box,
+          texture: mode === 'material' ? texture ?? undefined : undefined,
+        },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )
-      const label = mode === 'remove' ? (text ? `Удаление · ${text}` : 'Удаление') : mode === 'material' ? `Материал · ${text}` : text
+      const label = mode === 'remove' ? (text ? `Удаление · ${text}` : 'Удаление') : mode === 'material' ? `Материал · ${text || (texture ? 'по образцу' : '')}` : text
       charge('inpaint', `Inpainting · ${label.toLowerCase()}`)
       setVersions((v) => [...v.slice(0, current + 1), { url, mode, label }])
       setCurrent((c) => c + 1)
@@ -356,7 +361,7 @@ export function Editor({ image, onClose }: Props) {
     const by = top + bbox.y / k
     const bw = bbox.w / k
     const bh = bbox.h / k
-    const est = mode === 'remove' ? 230 : 250
+    const est = mode === 'remove' ? 230 : mode === 'material' ? 330 : 250
     let placement: 'top' | 'bottom' = 'bottom'
     let y = by + bh + 14
     if (y + est > stage.h - 8) {
@@ -384,6 +389,13 @@ export function Editor({ image, onClose }: Props) {
           panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : ''
         }`}
         {...panHandlers}
+        // файл, брошенный мимо поля образца, браузер открыл бы вместо страницы; в «Материалах» это и есть образец
+        onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }}
+        onDrop={(e) => {
+          e.preventDefault()
+          const f = e.dataTransfer.files[0]
+          if (mode === 'material' && f && ['image/jpeg', 'image/png', 'image/webp'].includes(f.type) && f.size <= 20 * 1024 * 1024) setTexture(f)
+        }}
       >
         {/* изображение + маска */}
         <div className="absolute" style={{ left, top, width: dispW, height: dispH }}>
@@ -579,6 +591,8 @@ export function Editor({ image, onClose }: Props) {
               mode={mode}
               prompt={prompt}
               onPrompt={setPrompt}
+              texture={texture}
+              onTexture={setTexture}
               onConfirm={apply}
               onReset={() => clearMask()}
               x={pop.x}

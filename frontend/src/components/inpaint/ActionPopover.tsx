@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'motion/react'
-import { ArrowUp, BrickWall, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowUp, BrickWall, ImagePlus, Sparkles, Trash2, X } from 'lucide-react'
 import { editKind, type InpaintMode } from '../../lib/inpaint'
 
 import { useScene, type Scene } from '../../lib/scene'
@@ -43,6 +43,9 @@ interface Props {
   mode: InpaintMode
   prompt: string
   onPrompt: (v: string) => void
+  /** Образец материала (только «Материалы») */
+  texture?: File | null
+  onTexture?: (f: File | null) => void
   onConfirm: () => void
   onReset: () => void
   /** Позиция «носика» относительно сцены */
@@ -53,7 +56,7 @@ interface Props {
 
 export const POPOVER_WIDTH = 340
 
-export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y, placement }: Props) {
+export function ActionPopover({ mode, prompt, onPrompt, texture, onTexture, onConfirm, onReset, x, y, placement }: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
   const { scene } = useScene()
   const suggestions = mode === 'edit' ? SUGGESTIONS[scene] : mode === 'material' ? MATERIAL_SUGGESTIONS[scene] : REMOVE_SUGGESTIONS[scene]
@@ -61,7 +64,7 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
     if (mode !== 'remove') input.current?.focus({ preventScroll: true })
   }, [mode])
 
-  const canConfirm = mode === 'remove' || prompt.trim().length > 0
+  const canConfirm = mode === 'remove' || prompt.trim().length > 0 || (mode === 'material' && !!texture)
 
   return (
     <motion.div
@@ -104,7 +107,9 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
             {mode === 'edit'
               ? EDIT_HINT[editKind(prompt) ?? 'none']
               : mode === 'material'
-                ? 'Поверхность сохранит форму, швы и проёмы — сменится только материал'
+                ? texture
+                  ? 'Ляжет материал с образца — в натуральном масштабе, по плоскости поверхности'
+                  : 'Поверхность сохранит форму, швы и проёмы — сменится только материал'
                 : prompt.trim()
                 ? 'Удалится только это — остальное в выделении останется'
                 : 'Всё выделенное и его тень заменит окружающий фон'}
@@ -115,14 +120,19 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
       {mode === 'remove' && (
         <div className="mt-3.5 text-[12px] font-medium text-faint">Что именно удалить? Необязательно</div>
       )}
+      {mode === 'material' && onTexture && <TextureDrop texture={texture ?? null} onTexture={onTexture} />}
       <textarea
         ref={input}
         value={prompt}
         onChange={(e) => onPrompt(e.target.value)}
         rows={mode === 'remove' ? 1 : 2}
         maxLength={300}
-        placeholder={mode === 'edit' ? PLACEHOLDER[scene] : mode === 'material' ? MATERIAL_PLACEHOLDER[scene] : 'Например: люди — без уточнения удалится всё'}
-        className={`${mode === 'remove' ? 'mt-1.5' : 'mt-3.5'} w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2`}
+        placeholder={
+          mode === 'edit' ? PLACEHOLDER[scene]
+            : mode === 'material' ? (texture ? 'Уточнение, необязательно: например, доски вертикально' : MATERIAL_PLACEHOLDER[scene])
+            : 'Например: люди — без уточнения удалится всё'
+        }
+        className={`${mode === 'remove' ? 'mt-1.5' : mode === 'material' ? 'mt-2' : 'mt-3.5'} w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2`}
       />
       <div className="mt-2 flex flex-wrap gap-1.5">
         {suggestions.map((s) => (
@@ -158,5 +168,73 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         </motion.button>
       </div>
     </motion.div>
+  )
+}
+
+const TEXTURE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+const TEXTURE_MAX = 20 * 1024 * 1024
+
+/** Образец материала: перетащить файл или выбрать по клику; превью с кнопкой «убрать». */
+function TextureDrop({ texture, onTexture }: { texture: File | null; onTexture: (f: File | null) => void }) {
+  const file = useRef<HTMLInputElement>(null)
+  const [over, setOver] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const preview = useMemo(() => (texture ? URL.createObjectURL(texture) : null), [texture])
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview) }, [preview])
+
+  function take(f: File | undefined) {
+    if (!f) return
+    if (!TEXTURE_TYPES.includes(f.type)) return setError('Нужна картинка: JPG, PNG или WebP')
+    if (f.size > TEXTURE_MAX) return setError('Файл больше 20 МБ')
+    setError(null)
+    onTexture(f)
+  }
+
+  return (
+    <div className="mt-3.5">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => file.current?.click()}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.current?.click() } }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true) }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(false); take(e.dataTransfer.files[0]) }}
+        className={`flex cursor-pointer items-center gap-3 rounded-[14px] p-2 transition-colors ${
+          over ? 'bg-[#f59e0b]/15 ring-2 ring-[#f59e0b]' : texture ? 'bg-fg/[0.04]' : 'border border-dashed border-fg/20 bg-fg/[0.03] hover:bg-fg/[0.07]'
+        }`}
+      >
+        {preview ? (
+          <img src={preview} alt="" className="size-12 shrink-0 rounded-[10px] object-cover ring-1 ring-fg/10" />
+        ) : (
+          <span className="grid size-12 shrink-0 place-items-center rounded-[10px] bg-fg/[0.05] text-mute">
+            <ImagePlus className="size-5" strokeWidth={1.75} />
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-medium text-ink">{texture ? texture.name : 'Образец материала'}</div>
+          <div className="text-[12px] leading-snug text-faint">
+            {texture ? 'Нажмите, чтобы заменить' : 'Перетащите текстуру сюда или выберите файл'}
+          </div>
+        </div>
+        {texture && (
+          <button
+            aria-label="Убрать образец"
+            onClick={(e) => { e.stopPropagation(); onTexture(null) }}
+            className="grid size-7 shrink-0 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.08] hover:text-ink"
+          >
+            <X className="size-3.5" />
+          </button>
+        )}
+        <input
+          ref={file}
+          type="file"
+          accept={TEXTURE_TYPES.join(',')}
+          className="hidden"
+          onChange={(e) => { take(e.target.files?.[0]); e.target.value = '' }}
+        />
+      </div>
+      {error && <div className="mt-1.5 text-[12px] text-[#ff3b30]">{error}</div>}
+    </div>
   )
 }

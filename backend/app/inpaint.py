@@ -428,7 +428,7 @@ def build_qwen_workflow(
 
 def build_qwen21_workflow(
     crop: str, mask: str, prompt: str, seed: int, prefix: str, reference: str | None = None, denoise: float = 1.0,
-    native: bool = False, base: bool = False,
+    native: bool = False, base: bool = False, texture: str | None = None,
 ) -> dict:
     """То же на Qwen-Image-2.1: картинки — в TextEncodeQwenImage21 (<image1> — кроп, <image2> — подсказка),
     латент <image1> (кроп кратен 32 — размер сохраняется) с шумом только под маской. Turbo — 8 шагов по своему
@@ -457,6 +457,10 @@ def build_qwen21_workflow(
         # кадр целиком и сама сохраняет остальное, а вклейка берёт только область правки
         wf["mask_img"] = {"class_type": "LoadImage", "inputs": {"image": mask}}
         images["images.image_2"] = ["mask_img", 0]
+        if texture:
+            # <image3> — образец материала (вкладка «Материалы»)
+            wf["tex_img"] = {"class_type": "LoadImage", "inputs": {"image": texture}}
+            images["images.image_3"] = ["tex_img", 0]
     elif reference:
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
         images["images.image_2"] = ["ref_img", 0]
@@ -512,7 +516,7 @@ def _align(wf: dict) -> None:
 
 def build_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, model: str, prefix: str,
-    reference: str | None = None, steps: int = TOTAL_STEPS, native: bool = False,
+    reference: str | None = None, steps: int = TOTAL_STEPS, native: bool = False, texture: str | None = None,
 ) -> dict:
     """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
     if model == QWEN_EDIT_MODEL:
@@ -521,7 +525,8 @@ def build_workflow(
         # прогон с маской второй картинкой (native) — всегда Turbo: базовая принимала белое маски буквально и рисовала
         # объект на белом прямоугольнике. Базовая (qwen-image-2.1) — во втором прогоне по шуму под объектом: фактура
         return build_qwen21_workflow(
-            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL and not native
+            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL and not native,
+            texture,
         )
     files = FLUX_MODELS[model]
     wf: dict = {
@@ -890,7 +895,7 @@ class _Region:
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
         unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
-        relight: str | None = None,
+        relight: str | None = None, texture: Image.Image | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
 
@@ -916,8 +921,13 @@ class _Region:
             ref_name = None
             if reference is not None:
                 ref_name = await _upload(client, to_png(reference.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+            tex_name = None
+            if texture is not None:
+                # образец материала — своим размером (кратен 32), третьей картинкой
+                tex_name = await _upload(client, to_png(texture), f"{uuid.uuid4().hex}.png")
             out = await _run(
-                client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, prefix, ref_name, native=native)
+                client,
+                build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, prefix, ref_name, native=native, texture=tex_name),
             )
         if "save" not in out:
             raise ComfyError("ComfyUI не вернул результат")
@@ -1208,14 +1218,21 @@ Q21_TASK = {
 }
 
 
-async def rewrite_q21(crop: Image.Image, mask: Image.Image, task: str, request: str) -> str | None:
+async def rewrite_q21(
+    crop: Image.Image, mask: Image.Image, task: str, request: str, texture: bytes | None = None
+) -> str | None:
     """Запрос для Qwen-Image-2.1 так, как его пишет официальный переписчик: DeepSeek с их системным промптом,
     картинками <image1> (кроп) и <image2> (ч/б маска) и инструкцией пользователя. None — переписать не удалось."""
     if not DEEPSEEK_API_KEY:
         return None
     instruction = f"{Q21_TASK[task]}: «{request}»"
+    if texture:
+        instruction = (
+            "<image3> is a sample photo of the new material: the marked surface gets exactly this material at true "
+            "real-world scale. " + instruction
+        )
     crop_png, mask_png = to_png(crop), to_png(mask.convert("RGB"))
-    key = hashlib.sha256(crop_png + mask_png + instruction.encode() + llm_model.get().encode()).hexdigest()
+    key = hashlib.sha256(crop_png + mask_png + instruction.encode() + llm_model.get().encode() + (texture or b"")).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]["prompt"]
@@ -1226,6 +1243,7 @@ async def rewrite_q21(crop: Image.Image, mask: Image.Image, task: str, request: 
             "content": [
                 {"type": "image_url", "image_url": {"url": _data_url(crop_png, 1536)}},
                 {"type": "image_url", "image_url": {"url": _data_url(mask_png, 1024)}},
+            ] + ([{"type": "image_url", "image_url": {"url": _data_url(texture, TEXTURE_SIDE)}}] if texture else []) + [
                 {"type": "text", "text": instruction},
             ],
         },
@@ -1297,6 +1315,21 @@ MATERIAL_PROMPT = (
     "surface stay exactly as before.{keep}"
 )
 MATERIAL_KEEP = " {keep} stay exactly as they are, in front of the new material."
+# образец материала (текстура, которую перетащили во вкладке «Материалы»): DeepSeek описывает материал с него
+TEXTURE_RULE = (
+    " Image 3 is a sample photo of the new material supplied by the user: the new material is exactly this one. "
+    "Describe it in \"material\" from image 3: its colour with hex codes, pattern, grain, element shapes and their "
+    "real size, joints and finish, as a material laid on the surface at true real-world scale, not at the scale of "
+    "the photo. Anything else in image 3 (background, objects, light) is not part of the material."
+)
+# в запрос Qwen-2.1: образец — третьей картинкой
+Q21_TEXTURE = (
+    " The new material is exactly the material shown in the sample photo <image3>: the same colour, pattern, grain, "
+    "element shapes, joints and surface finish, laid on the marked surface at true real-world scale (not at the "
+    "scale of the photo), following its plane and perspective. <image3> is only a material sample; nothing else "
+    "from it appears in the result."
+)
+TEXTURE_SIDE = 768  # длинная сторона образца для модели и DeepSeek: хватает фактуре, не съедает видеопамять
 # материалы и поверхности: запрос про них — смена материала той же поверхности, а не новый объект.
 # «дерево» здесь не в списке: «замени дерево на фонарь» — про растение; «камень на дерево» ловится по «камень»
 MATERIAL_WORDS = re.compile(
@@ -1326,7 +1359,9 @@ def parse_kind(request: str) -> str | None:
     return None
 
 
-async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | None = None) -> dict:
+async def describe_edit(
+    frame: bytes, close: bytes, request: str, kind: str | None = None, texture: bytes | None = None
+) -> dict:
     """План правки по всему кадру: что появится и какого реального размера, где, как выглядит кадр, рамка объекта.
 
     Без DeepSeek или при ошибке — запрос как есть, без рамки (рисуется в выделении).
@@ -1341,12 +1376,17 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
     }
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(frame + b"edit" + request.encode() + (kind or "").encode() + llm_model.get().encode()).hexdigest()
+    key = hashlib.sha256(
+        frame + b"edit" + request.encode() + (kind or "").encode() + llm_model.get().encode() + (texture or b"")
+    ).hexdigest()
     if key in _described:
         _described.move_to_end(key)
         return _described[key]
     messages = [
-        {"role": "system", "content": EDIT_SYSTEM + (MATERIAL_SYSTEM if kind == "material" else "")},
+        {
+            "role": "system",
+            "content": EDIT_SYSTEM + (MATERIAL_SYSTEM if kind == "material" else "") + (TEXTURE_RULE if texture else ""),
+        },
         {
             "role": "user",
             "content": [
@@ -1355,7 +1395,10 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
                 {"type": "image_url", "image_url": {"url": _data_url(frame, 1536)}},
                 {"type": "text", "text": "Image 2 (close-up of the area):"},
                 {"type": "image_url", "image_url": {"url": _data_url(close, 1024)}},
-            ],
+            ] + ([
+                {"type": "text", "text": "Image 3 (sample photo of the new material):"},
+                {"type": "image_url", "image_url": {"url": _data_url(texture, TEXTURE_SIDE)}},
+            ] if texture else []),
         },
     ]
     try:
@@ -1405,14 +1448,14 @@ def _rect_mask(box: list[float], size: tuple[int, int]) -> Image.Image:
 
 
 async def _plan(
-    src: Image.Image, core: Image.Image, request: str, kind: str | None = None
+    src: Image.Image, core: Image.Image, request: str, kind: str | None = None, texture: bytes | None = None
 ) -> tuple[dict, Image.Image | None]:
     """Разбор правки DeepSeek (кэшируется) и рамка объекта в натуральную величину у выделения (None — «изменить»).
     kind — тип, заданный режимом (вкладка «Материалы» — material); иначе — по словам запроса."""
     close_box = _context_box(core.getbbox(), *src.size)
     what = await describe_edit(
         _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(),
-        kind or parse_kind(request),
+        kind or parse_kind(request), texture,
     )
     if what.get("kind") == "change" or not what.get("box"):
         return what, None
@@ -1436,7 +1479,7 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
-    box: list[float] | None = None, material: bool = False,
+    box: list[float] | None = None, material: bool = False, texture: bytes | None = None,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1449,9 +1492,21 @@ async def run_edit(
     src, core, grow = _load(image, mask, EDIT_GROW)
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
     # вкладка «Материалы»: запрос — сам материал («дерево — венге»), тип правки задан, рамки нет
-    if material:
-        request = f"Смени материал выделенной поверхности на: {request.strip()}"
-    what, extra = await _plan(src, core, request, "material" if material else None)
+    tex = None
+    if material and texture:
+        # образец материала, перетащенный во вкладку «Материалы»: в DeepSeek, переписчик и модель (<image3>)
+        tex = Image.open(io.BytesIO(texture)).convert("RGB")
+        tex.thumbnail((TEXTURE_SIDE, TEXTURE_SIDE), Image.LANCZOS)
+        tex = tex.resize((max(32, round(tex.width / 32) * 32), max(32, round(tex.height / 32) * 32)), Image.LANCZOS)
+        texture = to_png(tex)
+        request = "Смени материал выделенной поверхности на материал с образца" + (
+            f": {request.strip()}" if request and request.strip() else ""
+        )
+    else:
+        texture = None
+        if material:
+            request = f"Смени материал выделенной поверхности на: {request.strip()}"
+    what, extra = await _plan(src, core, request, "material" if material else None, texture)
     add = what.get("kind") != "change"
     if add and box:
         # рамка, поправленная пользователем на канвасе
@@ -1482,11 +1537,14 @@ async def run_edit(
         # переписчик Qwen в исполнении DeepSeek, шаблон — запасной вариант
         material = material or parse_kind(request) == "material"
         prompt = await rewrite_q21(
-            r.crop, r.mask, "add" if extra is not None else "change", request.strip() + (MATERIAL_NOTE if material else "")
+            r.crop, r.mask, "add" if extra is not None else "change", request.strip() + (MATERIAL_NOTE if material else ""),
+            texture,
         ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
         prompt += " " + Q21_MASK_TRACE + (Q21_MASK_TRACE_ADD if extra is not None else "")
         # переписчик пишет, что поменять, а о свете кадра молчит — измеренный DeepSeek свет отдельной фразой
         prompt += f" It is lit like the rest of <image1>: {what['look']}."
+        if tex is not None:
+            prompt += Q21_TEXTURE
     elif native:
         # 2511: место и размер — красным контуром на Picture 2
         prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
@@ -1514,5 +1572,5 @@ async def run_edit(
     relight = RELIGHT_PROMPT.format(subject=subject, subject_cap=subject[:1].upper() + subject[1:], look=light)
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
-        relight=relight,
+        relight=relight, texture=tex if model in QWEN21_MODELS else None,
     ), seed
