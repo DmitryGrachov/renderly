@@ -1286,18 +1286,19 @@ KIND_RULE = {
     "material": (
         "The user asked to change the MATERIAL or finish of the surface in the highlighted area: kind is \"change\". "
         "It is the same surface with the same shape, size, edges and joints, only covered with the new material; "
-        "nothing is added in front of it. In Russian material requests «дерево» means wood or timber cladding, "
-        "never a tree."
+        "nothing is added in front of it."
     ),
 }
+# только если в запросе есть «дерево»: оговорка в любом запросе тянула описание к дереву (образец бетона → доски)
+WOOD_RULE = " In this Russian request «дерево» means wood or timber cladding, never a tree."
 # смена материала — основной сценарий: DeepSeek описывает новый материал так, чтобы модель положила его в масштабе,
 # по плоскости и до настоящих краёв поверхности (модели «венге» мало: ни размера доски, ни направления, ни швов)
 MATERIAL_SYSTEM = (
     " This is a MATERIAL change: the highlighted surface keeps its geometry and gets the new material. Also return "
-    '"material": "<40-90 words: the new material for an image model: what it is (e.g. horizontal wenge timber '
-    "cladding boards), its colour with hex codes and natural variation, pattern and grain, the real size of its "
-    "elements in metres and how many of them fit along a nearby reference (boards 0.14 m wide, about 15 across the "
-    "2.1 m door height), orientation and laying pattern, joints and gaps, finish and sheen (matte, oiled, polished), "
+    '"material": "<40-90 words: the new material for an image model: what it is (e.g. vertical larch boards, '
+    "exposed-aggregate concrete, large-format porcelain tiles), its colour with hex codes and natural variation, pattern and grain, the real size of its "
+    "elements in metres and how many of them fit along a nearby reference such as the 2.1 m door height, "
+    "orientation and laying pattern, joints and gaps, finish and sheen (matte, oiled, polished), "
     "how it turns corners and meets window reveals, the plinth and the eaves (trims, mitred corners). If the user "
     'named a colour, a species or a pattern, keep it exactly>", '
     '"surface": "<8-25 words: which surfaces get it, by landmarks of image 1 (e.g. the plinth wall below the front '
@@ -1317,7 +1318,10 @@ MATERIAL_PROMPT = (
 MATERIAL_KEEP = " {keep} stay exactly as they are, in front of the new material."
 # образец материала (текстура, которую перетащили во вкладке «Материалы»): DeepSeek описывает материал с него
 TEXTURE_RULE = (
-    " Image 3 is a sample photo of the new material supplied by the user: the new material is exactly this one. "
+    " Image 3 is a sample photo of the new material supplied by the user: the new material is exactly this one, "
+    "whatever the request words say. First look at image 3 carefully and return "
+    '"sample": "<10-25 words: what image 3 really shows: material type, colour, pattern>"; "material" describes '
+    "this same material and never another one. "
     "Describe it in \"material\" from image 3: its colour with hex codes, pattern, grain, element shapes and their "
     "real size, joints and finish, as a material laid on the surface at true real-world scale, not at the scale of "
     "the photo. Anything else in image 3 (background, objects, light) is not part of the material."
@@ -1339,9 +1343,9 @@ MATERIAL_WORDS = re.compile(
 )
 # переписчику Qwen-2.1: та же оговорка — он тоже читал «дерево» как растение
 MATERIAL_NOTE = (
-    " (this is a material change of the same surface: its shape, size and edges stay, only the material changes; "
-    "«дерево» here means wood, not a tree)"
+    " (this is a material change of the same surface: its shape, size and edges stay, only the material changes)"
 )
+WOOD_NOTE = " («дерево» here means wood, not a tree)"
 
 
 def parse_kind(request: str) -> str | None:
@@ -1390,7 +1394,11 @@ async def describe_edit(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"User request: «{request}»" + (f" {KIND_RULE[kind]}" if kind else "")},
+                {
+                    "type": "text",
+                    "text": f"User request: «{request}»" + (f" {KIND_RULE[kind]}" if kind else "")
+                    + (WOOD_RULE if kind == "material" and "дерев" in request.lower() else ""),
+                },
                 {"type": "text", "text": "Image 1 (whole frame, area highlighted in red):"},
                 {"type": "image_url", "image_url": {"url": _data_url(frame, 1536)}},
                 {"type": "text", "text": "Image 2 (close-up of the area):"},
@@ -1415,7 +1423,7 @@ async def describe_edit(
         }
         if box:
             result["box"] = box
-        for k in ("material", "surface", "keep_in_surface"):
+        for k in ("material", "surface", "keep_in_surface", "sample"):
             v = " ".join(str(data.get(k) or "").split()).rstrip(".")
             if kind == "material" and v and v.lower() not in ("null", "none", "nothing"):
                 result[k] = v
@@ -1507,6 +1515,8 @@ async def run_edit(
         if material:
             request = f"Смени материал выделенной поверхности на: {request.strip()}"
     what, extra = await _plan(src, core, request, "material" if material else None, texture)
+    if what.get("sample"):
+        log.info("образец материала (DeepSeek): %s", what["sample"])
     add = what.get("kind") != "change"
     if add and box:
         # рамка, поправленная пользователем на канвасе
@@ -1537,7 +1547,8 @@ async def run_edit(
         # переписчик Qwen в исполнении DeepSeek, шаблон — запасной вариант
         material = material or parse_kind(request) == "material"
         prompt = await rewrite_q21(
-            r.crop, r.mask, "add" if extra is not None else "change", request.strip() + (MATERIAL_NOTE if material else ""),
+            r.crop, r.mask, "add" if extra is not None else "change", request.strip() + (MATERIAL_NOTE if material else "")
+            + (WOOD_NOTE if material and "дерев" in request.lower() else ""),
             texture,
         ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
         prompt += " " + Q21_MASK_TRACE + (Q21_MASK_TRACE_ADD if extra is not None else "")
