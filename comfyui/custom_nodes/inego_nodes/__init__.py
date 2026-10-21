@@ -728,8 +728,116 @@ class InegoObjectMask:
         return (torch.from_numpy(obj.astype(np.float32))[None], torch.from_numpy(shadow.astype(np.float32))[None])
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign}
+class InegoSurfaceMask:
+    """Точный контур поверхности под мазком пользователя — для смены материала (Inpainting «Материалы»).
+
+    Мазок кистью грубый: задевает угол стены, подоконник, отлив, и модель перекрашивала их тоже — облицовка меняла
+    размер и «съезжала» с примыканий. Здесь SAM 2.1 по исходнику (точки внутри мазка + его рамка) даёт контур
+    самой поверхности: окна, отливы и всё, что в неё врезано, остаются дырами. Берётся вариант, лучше всего
+    совпадающий с мазком, и он подрезается мазком с запасом (поверхность за пределами мазка не трогается).
+    Если SAM промахнулся (покрыл меньше половины мазка или расползся далеко за него) — возвращается сам мазок.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),  # исходный кроп
+                "stroke": ("MASK",),  # мазок пользователя
+                "reach": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 0.3, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    def run(self, image, stroke, reach):
+        rgb = _to_uint8(image[0])
+        h, w = rgb.shape[:2]
+        m = stroke[0].float()[None, None]
+        if m.shape[-2:] != (h, w):
+            m = F.interpolate(m, size=(h, w), mode="bilinear", align_corners=False)
+        s = m[0, 0].numpy() > 0.5
+        if s.sum() < 64:
+            return (stroke,)
+        ys, xs = np.nonzero(s)
+        bw, bh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+        # точки-кандидаты — по сетке внутри мазка, подальше от его края (край мазка часто уже на соседней поверхности).
+        # Каждая точка — отдельный запрос: все точки в одном запросе SAM склеивал в одну маску всё, на что они
+        # попали (колонна + дверь и стена за ней кусками)
+        inner = ndimage.binary_erosion(s, iterations=max(1, round(0.12 * min(bw, bh))))
+        if inner.sum() < 16:
+            inner = s
+        iy, ix = np.nonzero(inner)
+        pts = set()
+        for gy in np.linspace(0.1, 0.9, 4):
+            for gx in np.linspace(0.1, 0.9, 4):
+                ty, tx = iy.min() + gy * (iy.max() - iy.min()), ix.min() + gx * (ix.max() - ix.min())
+                k = int(np.argmin((iy - ty) ** 2 + (ix - tx) ** 2))
+                pts.add((float(ix[k]), float(iy[k])))
+        pts = sorted(pts)
+
+        processor, model = _sam()
+        model.to(_device())
+        try:
+            inputs = processor(
+                images=rgb, input_points=[[[list(p)] for p in pts]], input_labels=[[[1] for _ in pts]],
+                return_tensors="pt",
+            ).to(_device())
+            with torch.no_grad():
+                out = model(**inputs, multimask_output=True)
+            ms = processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0].numpy() > 0
+            sc = out.iou_scores[0].float().cpu().numpy()
+        finally:
+            model.to("cpu")
+        ms = ms.reshape(-1, h, w)
+        sc = sc.reshape(-1)
+        near = ndimage.binary_dilation(s, iterations=max(2, round(reach * max(bw, bh))))
+        ssum = s.sum()
+
+        def rate(i):
+            # мазок грубый и обычно шире поверхности: важно, чтобы контур лежал внутри мазка (не вылезал на соседей),
+            # а не чтобы покрыл весь мазок. Колонна в широком мазке — треть мазка, но вся внутри; «колонна + стена
+            # за ней» покрывает больше, но наполовину снаружи
+            inside = (ms[i] & near).sum() / max(1, ms[i].sum())
+            return ((ms[i] & s).sum() / ssum) * inside ** 2 + 0.1 * sc[i]
+
+        best = max(range(len(sc)), key=rate)
+        inside = (ms[best] & near).sum() / max(1, ms[best].sum())
+        surface = _clean_surface(ms[best] & near, s)
+        covered = (surface & s).sum() / ssum
+        log.info(
+            "INEGO surface: %d точек × 3 варианта, SAM score %.2f, внутри мазка %.0f%% контура, мазок покрыт на %.0f%%",
+            len(pts), sc[best], 100 * inside, 100 * covered,
+        )
+        if inside < 0.7 or covered < 0.1:
+            log.info("INEGO surface: SAM промахнулся — остаётся мазок")
+            return (stroke,)
+        return (torch.from_numpy(surface.astype(np.float32))[None],)
+
+
+def _clean_surface(m: np.ndarray, stroke: np.ndarray) -> np.ndarray:
+    """Маска поверхности без «крапинок»: только куски, связанные с мазком и не мельче 2% маски; дырки мельче 1%
+    маски заливаются (текстура камня, швы), крупные — окна, двери — остаются."""
+    lab, n = ndimage.label(m)
+    if not n:
+        return m
+    sizes = ndimage.sum(m, lab, range(1, n + 1))
+    on_stroke = ndimage.sum(stroke, lab, range(1, n + 1))
+    keep = [i + 1 for i in range(n) if on_stroke[i] > 0 and sizes[i] >= 0.02 * m.sum()]
+    m = np.isin(lab, keep)
+    holes = ndimage.binary_fill_holes(m) & ~m
+    hl, hn = ndimage.label(holes)
+    if hn:
+        hs = ndimage.sum(holes, hl, range(1, hn + 1))
+        m |= np.isin(hl, [i + 1 for i in range(hn) if hs[i] < 0.01 * m.sum()])
+    return ndimage.binary_opening(m, iterations=1)
+
+
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask}
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
     "InegoZoneRestyle": "INEGO Zone Restyle (source content, render light)",
     "InegoSkyMatch": "INEGO Sky Match (sky colour from reference)",

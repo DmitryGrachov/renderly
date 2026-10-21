@@ -107,10 +107,10 @@ EDIT_SYSTEM = (
     '"subject": "<3-12 words: the edited element as it is after the edit, e.g. the white plastered walls of the '
     'house, the red car by the kerb>", '
     '"light_on_subject": "<25-60 words: how the light of this frame falls on the edited element at its spot, judged '
-    'by the real brightness and colour of the surfaces there and of neighbours facing the same way: which of its '
-    'faces or parts are in direct light and the exact tint the light gives them (e.g. warm golden-peach), which are '
-    'in shade and its colour (e.g. cool blue-grey, much darker), where it darkens (under the eaves, in corners, at '
-    'the ground), what it reflects>", '
+    'by the real brightness of the surfaces there and of neighbours facing the same way: which of its faces or parts '
+    'are in direct light and how much brighter they are, the slight warm or cool cast the light adds, which are in '
+    'shade and how much darker, where it darkens (under the eaves, in corners, at the ground). Describe only light '
+    'and brightness, never a colour of the element itself: its own colour stays as the user asked>", '
     '"kind": "add" if a new element appears, "change" if the same thing changes material, colour, species or '
     'style, "replace" if it becomes a different kind of object, '
     '"box": [x1, y1, x2, y2] in image 1, x as thousandths of its width and y as thousandths of its height}'
@@ -153,6 +153,9 @@ REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечи
 # рисуется заново). Частичный шум не годится: модель редактирования воспроизводит <image1> и на 6 шагах из 8
 RELIGHT_PROMPT = (
     "Relight {subject} in image 1 so it looks photographed in the same shot as the rest of the scene: {look}. "
+    "The material keeps its own colour, tone and darkness exactly as in image 1: on lit faces it is the same material "
+    "only brighter with a slight cast of the light, in shade the same material only darker; the light never "
+    "repaints it in another colour. "
     "Its parts facing the light take the brightness and colour tint of the light falling there, parts facing away or "
     "in shadow are darker and take the colour of the ambient and sky light, with soft darkening in corners, under "
     "overhangs and at contacts, cast shadows of the same direction and softness as elsewhere in the photo, "
@@ -221,6 +224,9 @@ Q2511_REMOVE_PROMPT = (
     "only that continuing background. Picture 2 is only a guide: the result is based on the clean Picture 1 and "
     "the red outline leaves no trace. Everything outside the outlined area stays exactly as in Picture 1."
 )
+# предел совмещения результата родного режима с кропом (доля кадра): сдвиг там — единицы пикселей
+ALIGN_MAX = 0.03
+EXACT_EDGE = 0.8  # сглаживание края вклейки по контуру поверхности (px): только антиалиасинг, без растушёвки
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -416,6 +422,7 @@ def build_qwen_workflow(
     if native:
         for k in ("diffdiff", "noise_lat", "mask"):  # заморозка латента по маске родному режиму не нужна
             wf.pop(k)
+        _align(wf)
     return wf
 
 
@@ -488,7 +495,19 @@ def build_qwen21_workflow(
     if native:
         for k in ("diffdiff", "noise_lat", "mask", "src_lat"):  # заморозка латента по маске родному режиму не нужна
             wf.pop(k)
+        _align(wf)
     return wf
+
+
+def _align(wf: dict) -> None:
+    """Родной режим перерисовывает кроп целиком, и модель чуть сдвигает и масштабирует кадр (на единицы пикселей):
+    вклейка по маске расходилась с исходником на краю выделения — облицовка «съезжала» с угла и цоколя.
+    InegoAlign (как в img2img) возвращает результат на место кропа до вклейки."""
+    wf["align"] = {
+        "class_type": "InegoAlign",
+        "inputs": {"image": ["decode", 0], "source": ["src_img", 0], "max_scale": ALIGN_MAX, "max_shift": ALIGN_MAX},
+    }
+    wf["save"]["inputs"]["images"] = ["align", 0]
 
 
 def build_workflow(
@@ -863,6 +882,9 @@ class _Region:
             x1, y1, x2, y2 = extra.getbbox()
             self.anchor = _grow(mask, max(grow, round(ANCHOR_REACH * max(x2 - x1, y2 - y1)))).crop(self.box)
         self.room = bool(room)
+        # смена материала: маска — точный контур поверхности (_surface), вклейка строго по нему, без запаса и
+        # растушёвки наружу — размеры и примыкания остаются от исходника
+        self.exact = False
         self.gen_size = fit_size(*self.crop.size, INPAINT_MEGAPIXELS)
 
     async def generate(
@@ -924,15 +946,19 @@ class _Region:
         else:
             # целиком — только выделение пользователя: рамка объекта приблизительна и может захватить соседей
             # (собака рядом с новой машиной); из неё и запаса берутся только изменения, связанные с выделением
-            keep = _changed(self.crop, patch, self.core, self.gen, self.anchor) if self.room else self.mask
-            alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
+            if self.exact:
+                keep = self.mask
+                alpha = keep.filter(ImageFilter.GaussianBlur(EXACT_EDGE))
+            else:
+                keep = _changed(self.crop, patch, self.core, self.gen, self.anchor) if self.room else self.mask
+                alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
         result.paste(patch, self.box[:2], alpha)
         obj = Image.new("L", self.src.size, 0)
         obj.paste(keep, self.box[:2])
         if relight:
             # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
-            result = await _relight(result, obj, relight, seed + 2, model)
+            result = await _relight(result, obj, relight, seed + 2, model, self.exact)
         if refine and self.room:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         buf = io.BytesIO()
@@ -995,7 +1021,9 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     return result
 
 
-async def _relight(result: Image.Image, area: Image.Image, prompt: str, seed: int, model: str) -> Image.Image:
+async def _relight(
+    result: Image.Image, area: Image.Image, prompt: str, seed: int, model: str, exact: bool = False
+) -> Image.Image:
     """Прогон переосвещения: свет правки сводится с кадром.
 
     Правку модель рисует отдельно от кадра, и вклеенное выглядит наклейкой: ровно залитая белая стена без солнца и
@@ -1028,8 +1056,41 @@ async def _relight(result: Image.Image, area: Image.Image, prompt: str, seed: in
         return result
     patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
     result = result.copy()
-    result.paste(patch, box[:2], m.filter(ImageFilter.GaussianBlur(band / 2)))
+    # exact (смена материала) — строго по контуру поверхности, кромка не задевает соседей
+    paste = area.crop(box).filter(ImageFilter.GaussianBlur(EXACT_EDGE)) if exact else m.filter(ImageFilter.GaussianBlur(band / 2))
+    result.paste(patch, box[:2], paste)
     return result
+
+
+async def _surface(src: Image.Image, core: Image.Image) -> Image.Image:
+    """Точный контур поверхности под мазком (InegoSurfaceMask: SAM 2.1 по исходнику) в размере исходника.
+    Считается по кропу с контекстом вокруг мазка — в его разрешении, а не по уменьшенному кадру."""
+    box = _context_box(core.getbbox(), *src.size)
+    crop, stroke = src.crop(box), core.crop(box)
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        img_name = await _upload(client, to_png(crop), f"{uuid.uuid4().hex}.png")
+        stroke_name = await _upload(client, to_png(stroke.convert("RGB")), f"{uuid.uuid4().hex}.png")
+        wf = {
+            "img": {"class_type": "LoadImage", "inputs": {"image": img_name}},
+            "stroke": {"class_type": "LoadImageMask", "inputs": {"image": stroke_name, "channel": "red"}},
+            "surface": {"class_type": "InegoSurfaceMask", "inputs": {"image": ["img", 0], "stroke": ["stroke", 0], "reach": 0.04}},
+            "out": {"class_type": "MaskToImage", "inputs": {"mask": ["surface", 0]}},
+            "save": {"class_type": "SaveImage", "inputs": {"images": ["out", 0], "filename_prefix": "inego/surface"}},
+        }
+        try:
+            out = await _run(client, wf)
+        except ComfyError as e:
+            log.warning("Контур поверхности не получен, остаётся мазок: %s", e)
+            return core
+    if "save" not in out:
+        return core
+    m = Image.open(io.BytesIO(out["save"])).convert("L").resize(crop.size, Image.BILINEAR).point(lambda v: 255 if v > 127 else 0)
+    if not m.getbbox():
+        return core
+    full = Image.new("L", src.size, 0)
+    full.paste(m, box[:2])
+    log.info("контур поверхности: мазок %d px → поверхность %d px", sum(core.histogram()[128:]), sum(full.histogram()[128:]))
+    return full
 
 
 def _touches_edge(keep: Image.Image, box: tuple[int, int, int, int], size: tuple[int, int]) -> str:
@@ -1404,7 +1465,11 @@ async def run_edit(
         else:
             x1, y1, x2, y2 = extra.getbbox()
             core = ImageChops.multiply(extra, _rect_mask([0, (y1 + 2 * (y2 - y1) / 3) / src.size[1], 1, 1], src.size))
-    r = _Region(src, core, grow, extra, EDIT_ROOM if add else EDIT_ROOM_CHANGE)
+    if material:
+        # контур поверхности под мазком по исходнику (SAM 2.1): модель правит и вклейка берёт только его
+        core = await _surface(src, core)
+    r = _Region(src, core, grow, extra, 0.0 if material else EDIT_ROOM if add else EDIT_ROOM_CHANGE)
+    r.exact = material
     if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
