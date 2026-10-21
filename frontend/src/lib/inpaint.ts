@@ -101,6 +101,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   try {
     const res = await fetch('/api/inpaint', { method: 'POST', body, signal })
     if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
+    if (res.status === 413) throw new Error('Файлы слишком большие для отправки — уменьшите карты набора (например, 2K вместо 4K)')
     if (!res.ok) {
       const detail = await res.json().then((j) => j.detail as string).catch(() => '')
       throw new Error(detail || `Сервер ответил ${res.status}`)
