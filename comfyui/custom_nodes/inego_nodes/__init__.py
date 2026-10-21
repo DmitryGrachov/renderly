@@ -860,6 +860,15 @@ HARM_GAIN_MIN, HARM_GAIN_MAX = 0.7, 1.4
 REFINE_MAX_DEG = 25
 # соседняя грань с MoGe-углом 90° ± этот допуск к уточнённой — ставится ровно под прямой угол (параллельная — так же)
 SNAP_DEG = 20
+# точка схода горизонталей грани (LSD + RANSAC): отрезок — не короче этой доли грани и не круче этого угла к
+# горизонтали кадра; отрезок «указывает» на точку при отклонении меньше VP_TOL; поддержка — суммарная длина
+# согласных отрезков, не меньше этой доли размера грани
+VP_MIN_SEG = 0.025
+VP_MAX_TILT = 35
+VP_TOL = 1.5
+VP_MIN_SUPPORT = 0.3
+ASSIGN_PLANE_REL = 0.03  # «на плоскости грани»: отклонение точки меньше этой доли расстояния до камеры
+SNAP_SUPPORT = 1.5  # поддержка (длина согласных отрезков / размер грани) опорной грани для «под прямым углом»
 
 
 def _moge():
@@ -1005,11 +1014,6 @@ class InegoTextureProject:
         if not faces:
             log.info("INEGO texture: граней не найдено")
             return fail
-        if len(faces) > 1:
-            owner = np.argmin(np.stack([ndimage.distance_transform_edt(~f) for f in faces]), 0)
-        else:
-            owner = np.zeros((H, W), int)
-        owner[~S] = -1
 
         # 2) плоскости и координаты на них (метры)
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -1036,13 +1040,17 @@ class InegoTextureProject:
         # MoGe ошибался в повороте грани на 10-15°, и ряды кладки сходились круче подоконника. Сначала крупные
         # грани; узкую (край короткий), стоящую к уточнённой примерно под прямым углом, — ставим ровно под 90°
         walls = [i for i in range(len(faces)) if abs(normals[i] @ up) < 0.5]
-        refined = {}
+        gray = (np.clip(src @ np.array([0.299, 0.587, 0.114], np.float32), 0, 1) * 255).astype(np.uint8)
+        refined, support = {}, {}
         for i in sorted(walls, key=lambda i: -faces[i].sum()):
-            r = _refine_normal(faces[i], normals[i], up, Kp)
+            r = _refine_normal(faces[i], normals[i], up, Kp, gray)
             if r is not None:
-                refined[i] = r
-        if refined:
-            ref_i = max(refined, key=lambda i: faces[i].sum())
+                refined[i], support[i] = r
+        # опора для «под прямым углом» — только надёжно уточнённая грань (много согласных отрезков): от грани,
+        # уточнённой по пяти коротким штрихам, ошибка уходила на соседнюю
+        strong = [i for i in refined if support[i] >= SNAP_SUPPORT]
+        if strong:
+            ref_i = max(strong, key=lambda i: support[i] * faces[i].sum())
             ref_n = refined[ref_i]
             for i in walls:
                 if i in refined:
@@ -1054,6 +1062,7 @@ class InegoTextureProject:
                     log.info("INEGO texture: грань %d — под прямым углом к грани %d (MoGe: %.0f°)", i, ref_i, ang)
                 elif ang < SNAP_DEG:
                     refined[i] = ref_n if ref_n @ normals[i] > 0 else -ref_n
+        owner = _assign_faces(faces, [refined.get(i, normals[i]) for i in range(len(faces))], P, N, valid, S)
         UV = np.zeros((H, W, 2), np.float32)
         for i, fm in enumerate(faces):
             pts = P[fm & valid]
@@ -1307,42 +1316,119 @@ def _scene_up(normals: list, N: np.ndarray, valid_all: np.ndarray) -> np.ndarray
     return up
 
 
-def _edge_line(fm: np.ndarray, top: bool):
-    """Прямая по верхнему (нижнему) краю грани: по столбцам — крайний пиксель, устойчивая подгонка с отбросом
-    выбросов (окна, стыки). Однородная прямая (a, b, c) и её длина по x; None — край не прямой или короткий."""
-    cols = np.nonzero(fm.any(0))[0]
-    if len(cols) < 40:
-        return None
-    ys = np.array([np.nonzero(fm[:, x])[0][0 if top else -1] for x in cols], np.float32)
-    xs = cols.astype(np.float32)
-    keep = np.ones(len(xs), bool)
-    for _ in range(4):
-        k, b = np.polyfit(xs[keep], ys[keep], 1)
-        r = np.abs(ys - (k * xs + b))
-        thr = max(1.5, np.percentile(r[keep], 70) * 2)
-        keep = r < thr
-        if keep.sum() < 0.5 * len(xs):
-            return None
-    span = np.ptp(xs[keep])
-    if span < 0.3 * len(cols) or np.median(r[keep]) > 2.5:
-        return None
-    p1 = np.array([xs[keep].min(), k * xs[keep].min() + b, 1.0])
-    p2 = np.array([xs[keep].max(), k * xs[keep].max() + b, 1.0])
-    return np.cross(p1, p2), span
+def _assign_faces(faces: list, normals: list, P: np.ndarray, N: np.ndarray, valid: np.ndarray, S: np.ndarray) -> np.ndarray:
+    """Чья грань каждый пиксель поверхности: та, с чьей нормалью совпадает его нормаль и на чьей плоскости лежит его
+    3D-точка. Раньше спорные пиксели доставались ближайшей на кадре грани, и полосу под окном резало по диагонали
+    (граница равных расстояний) — на одной полосе две плоскости, доски с изломом. Метки сглаживаются, мелкие
+    островки уходят соседям; пиксели без геометрии — ближайшей грани."""
+    H, W = S.shape
+    if len(faces) == 1:
+        owner = np.zeros((H, W), int)
+        owner[~S] = -1
+        return owner
+    Pn = np.where(np.isfinite(P), P, 0)
+    depth = np.linalg.norm(Pn, axis=-1) + 1e-6
+    Nn = np.where(np.isfinite(N), N, 0)
+    Nn = Nn / (np.linalg.norm(Nn, axis=-1, keepdims=True) + 1e-6)
+    cos_tol = 1 - np.cos(np.radians(FACE_MERGE_DEG))
+    costs = []
+    for fm, nf in zip(faces, normals):
+        off = float(np.median(P[fm & valid] @ nf))
+        dist = np.abs(Pn @ nf - off) / (ASSIGN_PLANE_REL * depth)
+        costs.append(dist + (1 - Nn @ nf) / cos_tol)
+    owner = np.argmin(np.stack(costs), 0)
+    # пиксели без геометрии — ближайшей грани по уже размеченным
+    if (S & ~valid).any():
+        known = S & valid
+        _, (iy, ix) = ndimage.distance_transform_edt(~known, return_indices=True)
+        owner = np.where(known, owner, owner[iy, ix])
+    # сглаживание: метка — та, чья доля в окрестности больше
+    sig = max(1.5, 0.01 * max(H, W))
+    onehot = np.stack([ndimage.gaussian_filter(((owner == i) & S).astype(np.float32), sig) for i in range(len(faces))])
+    owner = np.argmax(onehot, 0)
+    owner[~S] = -1
+    return owner
 
 
-def _refine_normal(fm: np.ndarray, nf: np.ndarray, up: np.ndarray, Kp: np.ndarray) -> np.ndarray | None:
-    """Нормаль стены, уточнённая по её краям на кадре: верх и низ грани (подоконник и земля, карниз и цоколь) —
-    образы параллельных горизонталей, их точка схода VP задаёт горизонталь грани: u = K⁻¹·VP. Вертикаль сцены для
-    этого не нужна (вариант через одну прямую и вертикаль ошибался на десятки градусов от наклона камеры в пару
-    градусов). Оба края не найдены, или результат дальше REFINE_MAX_DEG от MoGe — None."""
+def _horizontal_vp(gray: np.ndarray, fm: np.ndarray) -> np.ndarray | None:
+    """Точка схода горизонталей грани (однородная) по отрезкам на исходнике: LSD внутри грани и по её краю —
+    подоконник, линия земли, верх колонны и швы старого материала (у камня, кирпича, сайдинга они горизонтальны).
+    RANSAC: точка, на которую указывает больше всего длины отрезков; уточнение — наименьшие квадраты по ним.
+    Г-образной грани (колонна + полоса под окном) так же хватает, как прямоугольной. None — отрезков мало."""
+    import cv2
+
+    ys, xs = np.nonzero(fm)
+    size = max(np.ptp(ys), np.ptp(xs)) + 1
+    region = ndimage.binary_dilation(fm, iterations=max(3, round(size * 0.01)))
+    det = cv2.createLineSegmentDetector()
+    # отрезки фото и края самой маски грани: контур SAM точен, его верх и низ — подоконник и земля, даже когда на
+    # фото между камнем и плиткой контраста нет и LSD их не видит
+    found = [f for f in (det.detect(gray)[0], det.detect((fm * 255).astype(np.uint8))[0]) if f is not None]
+    if not found:
+        return None
+    segs = []
+    for x1, y1, x2, y2 in np.concatenate([np.asarray(f).reshape(-1, 4) for f in found]):
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        if length < max(10.0, VP_MIN_SEG * size):
+            continue
+        if np.degrees(np.arctan2(abs(y2 - y1), abs(x2 - x1))) > VP_MAX_TILT:
+            continue  # вертикали и крутые диагонали — не горизонтали грани
+        t = np.linspace(0, 1, 7)
+        px = np.clip(np.round(x1 + t * (x2 - x1)).astype(int), 0, fm.shape[1] - 1)
+        py = np.clip(np.round(y1 + t * (y2 - y1)).astype(int), 0, fm.shape[0] - 1)
+        if region[py, px].mean() < 0.8:
+            continue
+        line = np.cross([x1, y1, 1.0], [x2, y2, 1.0])
+        line /= np.hypot(line[0], line[1]) + 1e-9
+        segs.append((line, np.array([(x1 + x2) / 2, (y1 + y2) / 2]), np.array([x2 - x1, y2 - y1]) / length, length))
+    if len(segs) < 3:
+        return None
+    lines = np.stack([s[0] for s in segs])
+    mids = np.stack([s[1] for s in segs])
+    dirs = np.stack([s[2] for s in segs])
+    lens = np.array([s[3] for s in segs])
+
+    def inliers(vp):
+        # угол между отрезком и направлением от его середины к точке схода
+        if abs(vp[2]) > 1e-9:
+            to = vp[:2] / vp[2] - mids
+        else:
+            to = np.tile(vp[:2], (len(mids), 1))
+        to /= np.linalg.norm(to, axis=1, keepdims=True) + 1e-9
+        return np.degrees(np.arccos(np.clip(np.abs((to * dirs).sum(1)), 0, 1))) < VP_TOL
+
+    rng = np.random.default_rng(0)
+    p = lens / lens.sum()
+    best, best_score = None, 0.0
+    for _ in range(400):
+        i, j = rng.choice(len(segs), 2, replace=False, p=p)
+        vp = np.cross(lines[i], lines[j])
+        if np.linalg.norm(vp) < 1e-12:
+            continue
+        inl = inliers(vp)
+        score = lens[inl].sum()
+        if score > best_score:
+            best, best_score = inl, score
+    if best is None or best.sum() < 3 or best_score < VP_MIN_SUPPORT * size:
+        return None
+    _, _, vt = np.linalg.svd(lines[best] * lens[best, None])
+    log.info("INEGO texture: точка схода по %d отрезкам (%.0f px)", int(best.sum()), best_score)
+    return vt[-1], best_score / size
+
+
+def _refine_normal(
+    fm: np.ndarray, nf: np.ndarray, up: np.ndarray, Kp: np.ndarray, gray: np.ndarray
+) -> tuple[np.ndarray, float] | None:
+    """Нормаль стены, уточнённая по точке схода её горизонталей на кадре (_horizontal_vp): u = K⁻¹·VP — направление
+    горизонтали грани. Вертикаль сцены для этого не нужна (вариант через одну прямую и вертикаль ошибался на
+    десятки градусов от наклона камеры в пару градусов). Точка не найдена или дальше REFINE_MAX_DEG от MoGe — None."""
     u0 = np.cross(up, nf)
     u0 /= np.linalg.norm(u0) + 1e-6
-    top, bottom = _edge_line(fm, True), _edge_line(fm, False)
-    if top is None or bottom is None:
-        log.info("INEGO texture: край грани не прямой (верх %s, низ %s) — нормаль MoGe", top is not None, bottom is not None)
+    found = _horizontal_vp(gray, fm)
+    if found is None:
+        log.info("INEGO texture: горизонталей у грани мало — нормаль MoGe")
         return None
-    vp = np.cross(top[0], bottom[0])
+    vp, support = found
     u = np.linalg.inv(Kp) @ vp
     if np.linalg.norm(u) < 1e-12:
         return None
@@ -1354,10 +1440,10 @@ def _refine_normal(fm: np.ndarray, nf: np.ndarray, up: np.ndarray, Kp: np.ndarra
     n_new = n_new if n_new @ nf > 0 else -n_new
     ang = float(np.degrees(np.arccos(np.clip(n_new @ nf, -1, 1))))
     if ang > REFINE_MAX_DEG:
-        log.info("INEGO texture: края грани расходятся с MoGe на %.0f° — оставляю нормаль MoGe", ang)
+        log.info("INEGO texture: горизонтали грани расходятся с MoGe на %.0f° — оставляю нормаль MoGe", ang)
         return None
-    log.info("INEGO texture: нормаль грани уточнена по точке схода краёв на %.1f°", ang)
-    return n_new.astype(np.float32)
+    log.info("INEGO texture: нормаль грани уточнена по точке схода на %.1f°", ang)
+    return n_new.astype(np.float32), support
 
 
 def _match_grain(out: np.ndarray, src: np.ndarray, S: np.ndarray) -> np.ndarray:
