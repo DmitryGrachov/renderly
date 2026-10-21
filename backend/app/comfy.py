@@ -51,7 +51,6 @@ from .config import (
     QWEN21,
     QWEN21_BASE_STEPS,
     QWEN21_REFINE,
-    QWEN21_MODEL,
     QWEN21_MODELS,
     QWEN21_RENDER_MEGAPIXELS,
     QWEN21_ZONE_STEPS,
@@ -400,8 +399,6 @@ async def _check_model(client: httpx.AsyncClient, model: str) -> None:
     elif model in QWEN21_MODELS:
         q = QWEN21
         need = (("diffusion_models", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]))
-        if model == QWEN21_MODEL:
-            need += (("diffusion_models", q["unet_base"]),)
     else:
         files = FLUX_MODELS[model]
         need = (("diffusion_models", files["unet"]), ("text_encoders", files["text_encoder"]))
@@ -518,10 +515,8 @@ async def run_img2img(
 
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         await _check_model(client, model)
-        # доводка базовой Qwen-Image-2.1 — только в режиме качества (qwen-image-2.1), не в Turbo
-        qwen21_refine = model == QWEN21_MODEL and QWEN21_REFINE > 0
-        if family == "qwen21":
-            log.info("Qwen-Image-2.1: Turbo%s", f" + доводка базовой ({QWEN21_REFINE:g})" if qwen21_refine else "")
+        # Qwen-Image-2.1 — везде Turbo: базовая модель уводила кадр (камера, газон в луг, новые дома на фоне)
+        qwen21_refine = False
         src_fit = src.resize((width, height), Image.LANCZOS)
         source_name = await _upload(client, to_png(src_fit), f"{uuid.uuid4().hex}.png")
         ref_name = sky_name = None

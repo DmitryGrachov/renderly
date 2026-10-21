@@ -31,7 +31,7 @@ from .comfy import build_workflow as flux_img2img_workflow
 from .comfy import fit_size as _fit16
 from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
-    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_REFINE, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
+    QWEN21_MEGAPIXELS, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
@@ -535,7 +535,7 @@ def build_workflow(
         # прогон с маской второй картинкой (native) — всегда Turbo: базовая принимала белое маски буквально и рисовала
         # объект на белом прямоугольнике. Базовая (qwen-image-2.1) — во втором прогоне по шуму под объектом: фактура
         return build_qwen21_workflow(
-            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, model == QWEN21_MODEL and not native,
+            crop, mask, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, False,
             texture,
         )
     files = FLUX_MODELS[model]
@@ -1151,9 +1151,8 @@ async def harmonize_frame(
             prompt = prompt.replace(word, "")
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         try:
-            # 2.1: как Img to Img — проход Turbo и доводка базовой (фактура, листва); 2511 и Turbo — только Turbo
-            refine = model == QWEN21_MODEL and QWEN21_REFINE > 0
-            await _check_model(client, model if flux else QWEN21_MODEL if refine else QWEN21_TURBO_MODEL)
+            # Qwen — пересчёт на 2.1 Turbo (как Img to Img); базовая модель уводила кадр
+            await _check_model(client, model if flux else QWEN21_TURBO_MODEL)
             name = await _upload(client, to_png(result.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
             if flux:
                 # klein: картинка — «image 1» (ReferenceLatent), полный шум; совмещение кадра — как у 2.1, иначе
@@ -1166,7 +1165,7 @@ async def harmonize_frame(
                 }
                 wf["save"]["inputs"]["images"] = ["align", 0]
             else:
-                wf = img2img_workflow(name, prompt, seed, None, refine=refine)
+                wf = img2img_workflow(name, prompt, seed, None)
             out = await _run(client, wf)
         except ComfyError as e:
             log.warning("Пересчёт кадра не удался, остаётся правка как есть: %s", e)
@@ -1174,7 +1173,7 @@ async def harmonize_frame(
     if "save" not in out:
         return result
     log.info("кадр пересчитан целиком (%s): %dx%d → %dx%d, вписано: %s",
-             model if flux else "2.1 Turbo + базовая" if refine else "2.1 Turbo", w, h, gw, gh, subject)
+             model if flux else "2.1 Turbo", w, h, gw, gh, subject)
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
     if area is None:
         return frame
