@@ -68,6 +68,8 @@ services:
       QWEN_EDIT: ${QWEN_EDIT:-true}
       # Qwen-Image-2.1 Turbo для Inpainting (~17 ГБ); false — не скачивать
       QWEN21: ${QWEN21:-true}
+      # базовая Qwen-Image-2.1 (~7.3 ГБ) — выключена, везде работает Turbo; true — скачать
+      QWEN21_BASE: ${QWEN21_BASE:-false}
     volumes:
       - comfy_models:/opt/ComfyUI/models
       - comfy_output:/opt/ComfyUI/output
