@@ -12,6 +12,7 @@
 Тень: маска протягивается вниз (SHADOW_DOWN) под контактную тень, заметную тень за обводкой DeepSeek отдаёт рамкой.
 """
 
+import asyncio
 import hashlib
 from pathlib import Path
 import io
@@ -34,6 +35,7 @@ from .config import (
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
+from .scene import PHOTO_REAL, describe_scene, scene_text
 
 CONTEXT = 1.0  # контекст вокруг маски: столько же от её размера с каждой стороны
 MIN_CROP = 512  # минимальная сторона кропа в пикселях исходника — модели нужен контекст
@@ -905,7 +907,7 @@ class _Region:
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
         unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
-        texture: Image.Image | None = None, harmonize: tuple[str, bool] | None = None,
+        texture: Image.Image | None = None, harmonize: tuple[str, bool] | None = None, scene: dict | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
 
@@ -983,7 +985,7 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model)
+            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model, scene=scene)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1129,7 +1131,7 @@ def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | Non
 
 async def harmonize_frame(
     result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None,
-    model: str = QWEN21_TURBO_MODEL,
+    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None,
 ) -> Image.Image:
     """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
     совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
@@ -1142,6 +1144,8 @@ async def harmonize_frame(
     flux = model in FLUX_MODELS
     gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else QWEN21_MEGAPIXELS)
     prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
+    # сцена — в какую фотографию вписывать; ультрареализм — всегда
+    prompt += (" The photograph: " + scene_text(scene) if scene else "") + " " + PHOTO_REAL
     if flux:
         for word in HARMONIZE_FLUX_DROP:
             prompt = prompt.replace(word, "")
@@ -1417,6 +1421,7 @@ async def run_remove(
         seed = random.randrange(2**48)
     # маска протягивается вниз — под контактную тень у ног, колёс и основания
     src, core, grow = _load(image, mask, 0.04, SHADOW_DOWN)
+    scene_task = asyncio.create_task(describe_scene(src))
     r = _Region(src, core, grow)
     if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
@@ -1447,7 +1452,8 @@ async def run_remove(
     unleak = model == QWEN_EDIT_MODEL
     removed = what["background"]
     return await r.generate(
-        prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native, harmonize=(removed, True)
+        prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native, harmonize=(removed, True),
+        scene=await scene_task,
     ), seed
 
 
@@ -1651,8 +1657,18 @@ def parse_kind(request: str) -> str | None:
     return None
 
 
+# сцена в плане правки: новое — правдоподобный вариант именно для этой сцены
+SCENE_RULE = (
+    " A measured description of the scene of image 1 is given. Everything new must belong to this scene: its "
+    "architectural and landscape style, era, region, materials palette, upkeep and mood — choose the variant that "
+    "would really be photographed here (e.g. the car, people, plants and furniture typical for this place), lit by "
+    "its light and seen through its camera. The result is always an ultra-realistic unretouched photograph."
+)
+
+
 async def describe_edit(
-    frame: bytes, close: bytes, request: str, kind: str | None = None, texture: bytes | None = None
+    frame: bytes, close: bytes, request: str, kind: str | None = None, texture: bytes | None = None,
+    scene: dict | None = None,
 ) -> dict:
     """План правки по всему кадру: что появится и какого реального размера, где, как выглядит кадр, рамка объекта.
 
@@ -1669,6 +1685,7 @@ async def describe_edit(
         return fallback
     key = hashlib.sha256(
         frame + b"edit" + request.encode() + (kind or "").encode() + llm_model.get().encode() + (texture or b"")
+        + json.dumps(scene or {}, sort_keys=True).encode()
     ).hexdigest()
     if key in _described:
         _described.move_to_end(key)
@@ -1676,7 +1693,8 @@ async def describe_edit(
     messages = [
         {
             "role": "system",
-            "content": EDIT_SYSTEM + (MATERIAL_SYSTEM if kind == "material" else "") + (TEXTURE_RULE if texture else ""),
+            "content": EDIT_SYSTEM + (MATERIAL_SYSTEM if kind == "material" else "") + (TEXTURE_RULE if texture else "")
+            + (SCENE_RULE if scene else ""),
         },
         {
             "role": "user",
@@ -1686,6 +1704,9 @@ async def describe_edit(
                     "text": f"User request: «{request}»" + (f" {KIND_RULE[kind]}" if kind else "")
                     + (WOOD_RULE if kind == "material" and "дерев" in request.lower() else ""),
                 },
+            ] + ([
+                {"type": "text", "text": "Scene of image 1 (measured): " + json.dumps(scene, ensure_ascii=False)},
+            ] if scene else []) + [
                 {"type": "text", "text": "Image 1 (whole frame, area highlighted in red):"},
                 {"type": "image_url", "image_url": {"url": _data_url(frame, 1536)}},
                 {"type": "text", "text": "Image 2 (close-up of the area):"},
@@ -1743,14 +1764,15 @@ def _rect_mask(box: list[float], size: tuple[int, int]) -> Image.Image:
 
 
 async def _plan(
-    src: Image.Image, core: Image.Image, request: str, kind: str | None = None, texture: bytes | None = None
+    src: Image.Image, core: Image.Image, request: str, kind: str | None = None, texture: bytes | None = None,
+    scene: dict | None = None,
 ) -> tuple[dict, Image.Image | None]:
     """Разбор правки DeepSeek (кэшируется) и рамка объекта в натуральную величину у выделения (None — «изменить»).
     kind — тип, заданный режимом (вкладка «Материалы» — material); иначе — по словам запроса."""
     close_box = _context_box(core.getbbox(), *src.size)
     what = await describe_edit(
         _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(),
-        kind or parse_kind(request), texture,
+        kind or parse_kind(request), texture, scene,
     )
     if what.get("kind") == "change" or not what.get("box"):
         return what, None
@@ -1763,7 +1785,8 @@ async def _plan(
 async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
     """План правки для показа на канвасе: тип и рамка объекта (доли кадра), которую пользователь может поправить."""
     src, core, _ = _load(image, mask, EDIT_GROW)
-    what, extra = await _plan(src, core, request)
+    # та же сцена, что в run_edit (кэш по картинке): план правки берётся из кэша, без второго запроса
+    what, extra = await _plan(src, core, request, scene=await describe_scene(src))
     box = None
     if extra is not None:
         x1, y1, x2, y2 = extra.getbbox()
@@ -1786,6 +1809,8 @@ async def run_edit(
     if seed is None:
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
+    # разбор сцены — параллельно с остальным (кэш по картинке)
+    scene_task = asyncio.create_task(describe_scene(src))
     surface = None
     if material and texture and texture[:4] == EXR_MAGIC:
         # цвет набора в EXR — дальше везде (DeepSeek, модель) как обычная картинка
@@ -1799,7 +1824,7 @@ async def run_edit(
         if projected is not None:
             frame = await harmonize_frame(
                 projected, seed + 3, f"the {material_name} cladding just applied to a surface", area=surface,
-                model=model,
+                model=model, scene=await scene_task,
             )
             buf = io.BytesIO()
             frame.save(buf, "JPEG", quality=95)
@@ -1821,7 +1846,11 @@ async def run_edit(
         texture = None
         if material:
             request = f"Смени материал выделенной поверхности на: {request.strip()}"
-    what, extra = await _plan(src, core, request, "material" if material else None, texture)
+    scene = await scene_task
+    what, extra = await _plan(src, core, request, "material" if material else None, texture, scene)
+    if scene:
+        # свет, цветокор и камера кадра — для запроса генерации (подробнее «look» из плана)
+        what = what | {"look": scene_text(scene, ("light", "atmosphere", "colour_grade", "camera"))}
     if what.get("sample"):
         log.info("образец материала (DeepSeek): %s", what["sample"])
     add = what.get("kind") != "change"
@@ -1863,7 +1892,7 @@ async def run_edit(
         ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
         prompt += " " + Q21_MASK_TRACE + (Q21_MASK_TRACE_ADD if extra is not None else "")
         # переписчик пишет, что поменять, а о свете кадра молчит — измеренный DeepSeek свет отдельной фразой
-        prompt += f" It is lit like the rest of <image1>: {what['look']}."
+        prompt += f" It is photographed in the same shot as the rest of <image1>: {what['look']}"
         if tex is not None:
             prompt += Q21_TEXTURE
     elif native:
@@ -1890,5 +1919,5 @@ async def run_edit(
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
         texture=tex if model in QWEN21_MODELS else None,
-        harmonize=(f"{subject} was just {'added' if add else 'changed'}", False),
+        harmonize=(f"{subject} was just {'added' if add else 'changed'}", False), scene=scene,
     ), seed

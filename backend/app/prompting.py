@@ -115,15 +115,16 @@ PHOTOREAL = (
     "falloff and faint vignetting, true dynamic range and fine sensor grain."
 )
 # для правок Inpainting: то, что добавлено или изменено, — снято той же камерой в том же кадре
+# (без «noise / grain»: Qwen-2.1 и FLUX.2 klein рисуют их буквально)
 REALISM_EDIT = (
     " Everything new is a real photographed thing from the same shot, as an unretouched photograph: true-to-life "
     "materials with real micro-texture and subtle wear, people with natural skin texture, visible pores, slight "
     "asymmetry and relaxed natural poses, fabric with real folds, the same lens sharpness, depth of field, "
-    "dynamic range, noise and fine sensor grain as the rest of the photo."
+    "dynamic range and colour grading as the rest of the photo."
 )
 REALISM_REMOVE = (
     " The filled area reads as the same unretouched photograph: the same real surface texture, wear, "
-    "noise and fine sensor grain as its surroundings."
+    "sharpness and light as its surroundings."
 )
 FINAL_LOCK = "The building itself stays exactly as in image 1: only the world around it and the light change."
 
