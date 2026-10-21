@@ -218,12 +218,20 @@ HARMONIZE_PROMPT = (
 )
 # возврат тона правленой области после пересчёта: контраст яркости — не больше чем во столько раз
 RESTORE_CONTRAST = 1.4
+# удаление: удалённое не называется — упоминание («дерево было убрано») 2.1 читает как просьбу его нарисовать
 HARMONIZE_REMOVED = (
-    "Re-render <image1> as one coherent unretouched photograph taken in a single shot. {subject}: the filled area "
-    "shows only that continuing background and looks untouched — the same texture, lines, perspective, light, "
-    "shadows, colour grading, sharpness, noise and grain as its surroundings, with no trace, outline or smudge. "
-    "Everything else in <image1> stays exactly as it is, nothing added, removed or moved."
+    "Re-render <image1> as one coherent unretouched photograph taken in a single shot. In it, {subject} continues "
+    "seamlessly and looks untouched — the same texture, lines, perspective, light, shadows, colour grading, "
+    "sharpness, noise and grain as its surroundings, with no trace, outline or smudge. Everything else in <image1> "
+    "stays exactly as it is, nothing added, removed or moved."
 )
+# защита сцены после пересчёта (guard_scene): структурное изменение — расхождение средних частот кадра больше
+# этого (0..1); кусок не меньше этой доли кадра; правка с запасом этой доли не проверяется (кроме удаления)
+GUARD_DIFF = 0.09
+GUARD_MIN = 0.0004
+GUARD_MARGIN = 0.03
+# из пересчитанного кадра берётся правка и полоса вокруг неё — доля размера правки (не меньше 1% кадра)
+HARMONIZE_BAND = 0.25
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -1076,13 +1084,52 @@ def restore_colour(after: Image.Image, before: Image.Image, area: Image.Image) -
     return img
 
 
+def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | None, removed: bool) -> Image.Image:
+    """Удаление после пересчёта: модель могла нарисовать удалённое снова (дерево вернулось на место). Где кадр
+    изменился структурно — появился или пропал объект, — возвращается кадр до пересчёта. Сравниваются средние
+    частоты (размытие минус сильное размытие): сдвиг тона и зерна — законная часть согласования — не в счёт.
+    Для правок, кроме удаления, область правки не проверяется (её меняют намеренно)."""
+    import numpy as np
+    from scipy import ndimage
+
+    w, h = after.size
+    size = max(w, h)
+    a = np.asarray(before.resize(after.size), dtype=np.float32) / 255
+    b = np.asarray(after, dtype=np.float32) / 255
+    fine, broad = (max(1.5, 0.003 * size),) * 2 + (0,), (0.03 * size,) * 2 + (0,)
+
+    def mid(x):
+        g = ndimage.gaussian_filter(x, fine)
+        return g - ndimage.gaussian_filter(g, broad)
+
+    changed = np.abs(mid(a) - mid(b)).max(-1) > GUARD_DIFF
+    changed = ndimage.binary_opening(changed, iterations=2)
+    if area is not None and not removed:
+        m = np.asarray(area.convert("L").resize(after.size)) > 127
+        changed &= ~ndimage.binary_dilation(m, iterations=max(2, round(GUARD_MARGIN * size)))
+    lab, n = ndimage.label(changed)
+    if not n:
+        return after
+    sizes = ndimage.sum(changed, lab, range(1, n + 1))
+    keep = [i + 1 for i in range(n) if sizes[i] >= GUARD_MIN * w * h]
+    if not keep:
+        return after
+    revert = ndimage.binary_dilation(np.isin(lab, keep), iterations=max(2, round(0.006 * size)))
+    wgt = np.clip(ndimage.gaussian_filter(revert.astype(np.float32), max(1.5, 0.004 * size)) * 1.5, 0, 1)[..., None]
+    log.info("защита сцены: возвращено %d мест (%.1f%% кадра), где пересчёт изменил структуру", len(keep),
+             100 * revert.mean())
+    out = b * (1 - wgt) + a * wgt
+    return Image.fromarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8))
+
+
 async def harmonize_frame(
     result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None
 ) -> Image.Image:
-    """Пересчёт всего кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img,
-    с совмещением кадра InegoAlign): правка вписывается в кадр целиком. Кадр — в исходный размер (апскейл —
-    дальше отдельно). area — правленая область: её цвет и тон возвращаются к тем, что были до пересчёта
-    (restore_colour). Не получилось — результат правки как есть."""
+    """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
+    совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
+    правка с полосой вокруг (_paste_band). area — правленая область: её цвет и тон возвращаются к тем, что были до
+    пересчёта (restore_colour); у удаления — защита от «вернувшегося» объекта (guard_scene). Кадр — в исходный
+    размер (апскейл — дальше отдельно). Не получилось — результат правки как есть."""
     w, h = result.size
     gw, gh = fit_size(w, h, QWEN21_MEGAPIXELS)
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
@@ -1098,9 +1145,35 @@ async def harmonize_frame(
         return result
     log.info("кадр пересчитан целиком: %dx%d → %dx%d, вписано: %s", w, h, gw, gh, subject)
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
-    if area is not None and not removed:
+    if area is None:
+        return frame
+    frame = _paste_band(frame, result, area)
+    if removed:
+        frame = guard_scene(frame, result, area, removed)
+    else:
         frame = restore_colour(frame, result, area)
     return frame
+
+
+def _paste_band(frame: Image.Image, before: Image.Image, area: Image.Image) -> Image.Image:
+    """Из пересчитанного кадра берётся только правка с широкой полосой вокруг (края, тени, переходы) — остальное
+    из кадра до пересчёта. Пересчёт всего кадра у 2.1 стирал и дорисовывал чужие объекты (два деревца справа
+    пропали, удалённое вернулось), а модели весь кадр нужен как контекст — поэтому пересчитывается он весь."""
+    import numpy as np
+    from scipy import ndimage
+
+    m = np.asarray(area.convert("L").resize(frame.size)) > 127
+    if not m.any():
+        return before
+    ys, xs = np.nonzero(m)
+    size = max(frame.size)
+    band = max(round(HARMONIZE_BAND * max(np.ptp(ys), np.ptp(xs))), round(0.01 * size), 2)
+    grown = ndimage.binary_dilation(m, iterations=band)
+    wgt = np.maximum(ndimage.gaussian_filter(grown.astype(np.float32), band / 2), m.astype(np.float32))[..., None]
+    a = np.asarray(before.resize(frame.size), dtype=np.float32)
+    b = np.asarray(frame, dtype=np.float32)
+    log.info("из пересчёта взята правка с полосой %d px (%.1f%% кадра)", band, 100 * grown.mean())
+    return Image.fromarray(np.clip(a * (1 - wgt) + b * wgt, 0, 255).astype(np.uint8))
 
 
 async def _relight_source(result: Image.Image, src: Image.Image, area: Image.Image, exact: bool) -> Image.Image:
@@ -1346,7 +1419,7 @@ async def run_remove(
     )
     # 2511 видит красный контур — зачистка, если он протечёт
     unleak = model == QWEN_EDIT_MODEL
-    removed = f"{what['object']} was just removed and the area now shows {what['background']}"
+    removed = what["background"]
     return await r.generate(
         prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native, harmonize=(removed, True)
     ), seed
