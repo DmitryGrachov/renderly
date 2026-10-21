@@ -819,11 +819,15 @@ class InegoSurfaceMask:
 
 
 def _straighten(m: np.ndarray, rgb: np.ndarray) -> np.ndarray:
-    """Прямые края маски поверхности — по прямым кадра. SAM на мелком участке кадра даёт рваный край (зубцы под
-    подоконником), а у архитектуры края прямые: подоконник, угол колонны, линия земли. Отрезки LSD вдоль края —
-    с фото (настоящая граница) и с размытой маски (её усреднённая прямая там, где на фото контраста нет); в узкой
-    полосе вдоль каждого край ставится ровно по прямой, сторона «внутри» — где маски больше. Кривые края (арки)
-    не трогаются: прямых вдоль них нет."""
+    """Прямые края маски поверхности — по прямым кадра. SAM на мелком участке кадра даёт рваный край («лесенка»
+    под подоконником), а у архитектуры края прямые: подоконник, угол колонны, линия земли.
+
+    Кандидаты — отрезки LSD вдоль края маски: с фото (настоящая граница) и с размытой маски (её усреднённая прямая
+    там, где на фото контраста нет). Близкий к краю отрезок — с узкой полосой; длинный, от которого «лесенка»
+    отходит дальше (до STRAIGHT_FAR), — с полосой на её глубину. Сначала ближайший к краю (из пачки параллельных
+    линий подоконника — его нижняя кромка, а не верх), прямые фото — раньше прямых маски; уже выпрямленное
+    следующие не перекраивают. В полосе край ставится ровно по прямой, сторона «внутри» — где маски больше: зубцы
+    срезаются, ямки заливаются. Кривые края (арки) не трогаются: прямых вдоль них нет."""
     import cv2
 
     ys, xs = np.nonzero(m)
@@ -831,41 +835,47 @@ def _straighten(m: np.ndarray, rgb: np.ndarray) -> np.ndarray:
         return m
     size = max(np.ptp(ys), np.ptp(xs)) + 1
     tol = max(2.5, STRAIGHT_TOL * size)
+    far = max(2 * tol, STRAIGHT_FAR * size)
     H, W = m.shape
     edge = m ^ ndimage.binary_erosion(m)
-    near_edge = ndimage.distance_transform_edt(~edge) <= tol
+    dist = ndimage.distance_transform_edt(~edge)
     det = cv2.createLineSegmentDetector()
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     soft = (ndimage.gaussian_filter(m.astype(np.float32), max(1.0, tol / 2)) * 255).astype(np.uint8)
     segs = []
-    for found in (det.detect(gray)[0], det.detect(soft)[0]):
+    for source, found in ((0, det.detect(gray)[0]), (1, det.detect(soft)[0])):
         if found is None:
             continue
         for x1, y1, x2, y2 in np.asarray(found).reshape(-1, 4):
             length = float(np.hypot(x2 - x1, y2 - y1))
             if length < max(12.0, STRAIGHT_MIN_SEG * size):
                 continue
-            t = np.linspace(0, 1, 12)
+            t = np.linspace(0, 1, 16)
             px = np.clip(np.round(x1 + t * (x2 - x1)).astype(int), 0, W - 1)
             py = np.clip(np.round(y1 + t * (y2 - y1)).astype(int), 0, H - 1)
-            if near_edge[py, px].mean() < 0.75:
+            dd = dist[py, px]
+            if (dd <= tol).mean() >= 0.75:
+                width = tol
+            elif length >= STRAIGHT_LONG * size and np.percentile(dd, 80) <= far:
+                width = min(far, float(np.percentile(dd, 90)) + 2)
+            else:
                 continue  # не вдоль края маски: шов внутри, соседняя поверхность
-            segs.append((length, x1, y1, x2, y2))
+            # приоритет: ближе к краю; прямые маски — после прямых фото (они лишь среднее «лесенки»)
+            key = float(np.median(dd)) + (far / 2 if source else 0)
+            segs.append((key, -length, width, x1, y1, x2, y2))
     if not segs:
         return m
     out = m.copy()
-    # добавлять можно только у исходного края (полдопуска): прямая за углом (свес подоконника) и край тени в щели
-    # у стены не тянут маску наружу
-    grow_ok = ndimage.binary_dilation(m, iterations=max(1, int(round(tol / 2))))
+    done = np.zeros_like(m)
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
     fixed = 0
-    # длинные — главные: короткие поверх них не перекраивают уже выпрямленное
-    for length, x1, y1, x2, y2 in sorted(segs, reverse=True)[:STRAIGHT_MAX_SEGS]:
+    for _, neg_len, width, x1, y1, x2, y2 in sorted(segs)[:STRAIGHT_MAX_SEGS]:
+        length = -neg_len
         d = np.array([x2 - x1, y2 - y1], np.float32) / length
         nrm = np.array([-d[1], d[0]], np.float32)
         along = (xx - x1) * d[0] + (yy - y1) * d[1]
         across = (xx - x1) * nrm[0] + (yy - y1) * nrm[1]
-        band = (np.abs(across) <= tol) & (along >= 0) & (along <= length)
+        band = (np.abs(across) <= width) & (along >= 0) & (along <= length)
         if band.sum() < 10:
             continue
         # где маска — по ту сторону прямой
@@ -874,9 +884,11 @@ def _straighten(m: np.ndarray, rgb: np.ndarray) -> np.ndarray:
         if abs(pos - neg) < 0.4:
             continue  # прямая не разделяет маску и фон — это не край
         inside = (across > 0) if pos > neg else (across < 0)
-        out[band] = inside[band] & grow_ok[band]
+        new = band & ~done
+        out[new] = inside[new]
+        done |= band
         fixed += 1
-    log.info("INEGO surface: край выпрямлен по %d прямым (допуск %.1f px)", fixed, tol)
+    log.info("INEGO surface: край выпрямлен по %d прямым (полоса %.1f…%.1f px)", fixed, tol, far)
     return out
 
 
@@ -903,6 +915,9 @@ def _clean_surface(m: np.ndarray, stroke: np.ndarray) -> np.ndarray:
 STRAIGHT_TOL = 0.012
 STRAIGHT_MIN_SEG = 0.05
 STRAIGHT_MAX_SEGS = 40
+# длинный отрезок (не короче этой доли), от которого «лесенка» SAM отходит дальше узкой полосы — до этой доли размера
+STRAIGHT_LONG = 0.08
+STRAIGHT_FAR = 0.02
 
 MOGE_ID = "Ruicheng/moge-2-vitl-normal"
 IID_ID = "prs-eth/marigold-iid-lighting-v1-1"
