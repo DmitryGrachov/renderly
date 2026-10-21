@@ -98,3 +98,5 @@ SKY_MATCH = float(os.getenv("SKY_MATCH", "0"))
 LOCAL_LIGHT = float(os.getenv("LOCAL_LIGHT", "0.6"))
 # Inpainting: площадь кропа вокруг маски в мегапикселях (мелкий объект получает полное разрешение модели)
 INPAINT_MEGAPIXELS = float(os.getenv("INPAINT_MEGAPIXELS", "1.0"))
+# кроп правки на FLUX.2 klein (Мп): BFL рекомендует до 2 Мп; 1.5 — как Img to Img, помещается в 16 ГБ с 9B
+FLUX_INPAINT_MEGAPIXELS = float(os.getenv("FLUX_INPAINT_MEGAPIXELS", "1.5"))

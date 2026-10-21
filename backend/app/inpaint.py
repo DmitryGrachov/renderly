@@ -30,7 +30,7 @@ from .comfy import build_qwen21_workflow as img2img_workflow
 from .comfy import build_workflow as flux_img2img_workflow
 from .comfy import fit_size as _fit16
 from .config import (
-    COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
+    COMFYUI_URL, DEFAULT_MODEL, FLUX_INPAINT_MEGAPIXELS, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
     QWEN21_MEGAPIXELS, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
     QWEN_EDIT_MODEL, log,
 )
@@ -235,6 +235,8 @@ HARMONIZE_FLUX_DROP = (", noise and grain", " noise, grain,")
 GUARD_DIFF = 0.09
 GUARD_MIN = 0.0004
 GUARD_MARGIN = 0.006
+# добавленный объект: пересчёт изменил структуру больше чем на эту долю его площади — объект «растворился»
+KEEP_OBJECT_CHANGED = 0.35
 # из пересчитанного кадра берётся правка и полоса вокруг неё — доля размера правки (не меньше 1% кадра)
 HARMONIZE_BAND = 0.25
 EDIT_MARK = True
@@ -985,7 +987,9 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model, scene=scene)
+            result = await harmonize_frame(
+                result, seed + 3, *harmonize, area=obj, model=model, scene=scene, added=bool(refine and self.room),
+            )
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1129,9 +1133,40 @@ def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | Non
     return Image.fromarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8))
 
 
+def keep_object(after: Image.Image, before: Image.Image, area: Image.Image) -> Image.Image:
+    """Добавленный объект после пересчёта кадра: img2img иногда «растворяет» мелкий новый объект (от женщины на
+    дорожке остались полупрозрачные ноги). Если внутри объекта пересчёт изменил структуру больше чем на
+    KEEP_OBJECT_CHANGED площади, объект возвращается из кадра до пересчёта (свет вокруг — из пересчёта)."""
+    import numpy as np
+    from scipy import ndimage
+
+    w, h = after.size
+    size = max(w, h)
+    m = np.asarray(area.convert("L").resize(after.size)) > 127
+    if m.sum() < 64:
+        return after
+    a = np.asarray(before.resize(after.size), dtype=np.float32) / 255
+    b = np.asarray(after, dtype=np.float32) / 255
+    fine, broad = (max(1.5, 0.003 * size),) * 2 + (0,), (0.03 * size,) * 2 + (0,)
+
+    def mid(x):
+        g = ndimage.gaussian_filter(x, fine)
+        return g - ndimage.gaussian_filter(g, broad)
+
+    changed = np.abs(mid(a) - mid(b)).max(-1) > GUARD_DIFF
+    frac = float(changed[m].mean())
+    if frac < KEEP_OBJECT_CHANGED:
+        return after
+    zone = ndimage.binary_dilation(m, iterations=max(2, round(0.004 * size)))
+    wgt = np.clip(ndimage.gaussian_filter(zone.astype(np.float32), max(1.0, 0.002 * size)) * 1.5, 0, 1)[..., None]
+    log.info("защита объекта: пересчёт изменил %.0f%% его площади — объект из кадра до пересчёта", 100 * frac)
+    out = b * (1 - wgt) + a * wgt
+    return Image.fromarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8))
+
+
 async def harmonize_frame(
     result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None,
-    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None,
+    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None, added: bool = False,
 ) -> Image.Image:
     """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
     совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
@@ -1145,7 +1180,8 @@ async def harmonize_frame(
     gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else QWEN21_MEGAPIXELS)
     prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
     # сцена — в какую фотографию вписывать; ультрареализм — всегда
-    prompt += (" The photograph: " + scene_text(scene) if scene else "") + " " + PHOTO_REAL
+    keys = ("light", "colour_grade", "camera", "mood") if flux else ("light", "atmosphere", "colour_grade", "camera", "mood")
+    prompt += (" The photograph: " + scene_text(scene, keys) if scene else "") + " " + PHOTO_REAL
     if flux:
         for word in HARMONIZE_FLUX_DROP:
             prompt = prompt.replace(word, "")
@@ -1181,6 +1217,8 @@ async def harmonize_frame(
     # полоса вокруг правки — только свет и тени: новые объекты и рисунок в ней (плитка, поползшая на соседнюю
     # стену у klein) возвращаются; у удаления проверяется и сама область
     frame = guard_scene(frame, result, area, removed)
+    if added:
+        frame = keep_object(frame, result, area)
     if not removed:
         frame = restore_colour(frame, result, area)
     return frame
@@ -1426,6 +1464,8 @@ async def run_remove(
     r = _Region(src, core, grow)
     if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
+    elif model in FLUX_MODELS:
+        r.gen_size = fit_size(*r.crop.size, FLUX_INPAINT_MEGAPIXELS)
     cw, ch = r.crop.size
 
     what = await describe_removal(to_png(r.crop), _highlight(r.crop, r.mask), (hint or "").strip())
@@ -1851,7 +1891,9 @@ async def run_edit(
     what, extra = await _plan(src, core, request, "material" if material else None, texture, scene)
     if scene:
         # свет, цветокор и камера кадра — для запроса генерации (подробнее «look» из плана)
-        what = what | {"look": scene_text(scene, ("light", "atmosphere", "colour_grade", "camera"))}
+        # klein обучен на ~512 токенах, важное — в начале запроса (BFL): ему только свет и цветокор
+        keys = ("light", "colour_grade") if model in FLUX_MODELS else ("light", "atmosphere", "colour_grade", "camera")
+        what = what | {"look": scene_text(scene, keys)}
     if what.get("sample"):
         log.info("образец материала (DeepSeek): %s", what["sample"])
     add = what.get("kind") != "change"
@@ -1877,6 +1919,8 @@ async def run_edit(
     r.source_light = not add
     if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
+    elif model in FLUX_MODELS:
+        r.gen_size = fit_size(*r.crop.size, FLUX_INPAINT_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
     # дорожки на земле); место задаёт область генерации — рамка в натуральную величину, размер — текст инструкции.
     # Разметка остаётся только для «изменить» и когда рамки нет: там она показывает, что именно меняется
