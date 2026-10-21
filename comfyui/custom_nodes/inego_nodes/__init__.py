@@ -952,7 +952,10 @@ VP_MAX_TILT = 35
 VP_TOL = 1.5
 VP_MIN_SUPPORT = 0.3
 ASSIGN_PLANE_REL = 0.03  # «на плоскости грани»: отклонение точки меньше этой доли расстояния до камеры
-SNAP_SUPPORT = 1.5  # поддержка (длина согласных отрезков / размер грани) опорной грани для «под прямым углом»
+SNAP_SUPPORT = 1.5
+# уточнение грани по точке схода — только при такой опоре: согласных отрезков и их длины / размер грани
+VP_MIN_INLIERS = 6
+REFINE_MIN_SUPPORT = 1.0  # поддержка (длина согласных отрезков / размер грани) опорной грани для «под прямым углом»
 
 
 def _moge():
@@ -1137,7 +1140,7 @@ class InegoTextureProject:
             ref_i = max(strong, key=lambda i: support[i] * faces[i].sum())
             ref_n = refined[ref_i]
             for i in walls:
-                if i in refined:
+                if i in strong:
                     continue
                 ang = float(np.degrees(np.arccos(np.clip(abs(normals[i] @ ref_n), -1, 1))))
                 if abs(ang - 90) < SNAP_DEG:
@@ -1146,6 +1149,25 @@ class InegoTextureProject:
                     log.info("INEGO texture: грань %d — под прямым углом к грани %d (MoGe: %.0f°)", i, ref_i, ang)
                 elif ang < SNAP_DEG:
                     refined[i] = ref_n if ref_n @ normals[i] > 0 else -ref_n
+        elif len(walls) >= 2:
+            # надёжной опоры нет: соседние стены, которые MoGe ставит примерно под прямым углом (колонна, угол
+            # дома), — ровно под 90°, симметрично от их биссектрисы
+            a_i, b_i = sorted(walls, key=lambda i: -faces[i].sum())[:2]
+            a, b = refined.get(a_i, normals[a_i]), refined.get(b_i, normals[b_i])
+            ang = float(np.degrees(np.arccos(np.clip(abs(normals[a_i] @ normals[b_i]), -1, 1))))
+            if abs(ang - 90) < SNAP_DEG:
+                ha, hb = a - (a @ up) * up, b - (b @ up) * up
+                ha /= np.linalg.norm(ha) + 1e-6
+                hb /= np.linalg.norm(hb) + 1e-6
+                mid = ha + hb
+                mid /= np.linalg.norm(mid) + 1e-6
+                side = np.cross(up, mid)
+                side /= np.linalg.norm(side) + 1e-6
+                c45 = np.float32(np.sqrt(0.5))
+                for i, h in ((a_i, ha), (b_i, hb)):
+                    sgn = 1.0 if h @ side > 0 else -1.0
+                    refined[i] = (c45 * mid + sgn * c45 * side).astype(np.float32)
+                log.info("INEGO texture: грани %d и %d — ровно под прямым углом (MoGe: %.0f°)", a_i, b_i, ang)
         owner = _assign_faces(faces, [refined.get(i, normals[i]) for i in range(len(faces))], P, N, valid, S)
         UV = np.zeros((H, W, 2), np.float32)
         for i, fm in enumerate(faces):
@@ -1497,7 +1519,7 @@ def _horizontal_vp(gray: np.ndarray, fm: np.ndarray) -> np.ndarray | None:
         return None
     _, _, vt = np.linalg.svd(lines[best] * lens[best, None])
     log.info("INEGO texture: точка схода по %d отрезкам (%.0f px)", int(best.sum()), best_score)
-    return vt[-1], best_score / size
+    return vt[-1], best_score / size, int(best.sum())
 
 
 def _refine_normal(
@@ -1512,7 +1534,11 @@ def _refine_normal(
     if found is None:
         log.info("INEGO texture: горизонталей у грани мало — нормаль MoGe")
         return None
-    vp, support = found
+    vp, support, count = found
+    if count < VP_MIN_INLIERS or support < REFINE_MIN_SUPPORT:
+        # узкая грань колонны: 4 коротких штриха поворачивали её на 15-25°, и две стороны колонны сходились под 41°
+        log.info("INEGO texture: опора точки схода слабая (%d отрезков, %.1f) — нормаль MoGe", count, support)
+        return None
     u = np.linalg.inv(Kp) @ vp
     if np.linalg.norm(u) < 1e-12:
         return None
