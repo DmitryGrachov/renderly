@@ -890,6 +890,8 @@ class _Region:
         # смена материала: маска — точный контур поверхности (_surface), вклейка строго по нему, без запаса и
         # растушёвки наружу — размеры и примыкания остаются от исходника
         self.exact = False
+        # «изменить» и материалы: свет правки — с исходника через Marigold-IID (_relight_source), а не прогоном Qwen
+        self.source_light = False
         self.gen_size = fit_size(*self.crop.size, INPAINT_MEGAPIXELS)
 
     async def generate(
@@ -966,7 +968,9 @@ class _Region:
         result.paste(patch, self.box[:2], alpha)
         obj = Image.new("L", self.src.size, 0)
         obj.paste(keep, self.box[:2])
-        if relight:
+        if self.source_light:
+            result = await _relight_source(result, self.src, obj, self.exact)
+        elif relight:
             # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
             result = await _relight(result, obj, relight, seed + 2, model, self.exact)
         if refine and self.room:
@@ -1028,6 +1032,42 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     alpha = ImageChops.lighter(_grow(keep, grow).filter(ImageFilter.GaussianBlur(max(1, grow / 2))), keep)
     result = result.copy()
     result.paste(refined, box[:2], alpha)
+    return result
+
+
+async def _relight_source(result: Image.Image, src: Image.Image, area: Image.Image, exact: bool) -> Image.Image:
+    """Свет исходника на изменённой поверхности (InegoRelight: Marigold-IID) — для «изменить» и материалов.
+
+    Поверхность та же, значит и свет на ней тот же, что на фото: освещённость результата заменяется освещённостью
+    исходника, фактура генерации остаётся. Не получилось — результат как есть (без переосвещения)."""
+    bbox = area.getbbox()
+    if not bbox:
+        return result
+    box = _context_box(bbox, *result.size)
+    crop, before, m = result.crop(box), src.crop(box), area.crop(box)
+    if not exact:
+        # «изменить» без точного контура: свет — и на узкую кромку вокруг, шва нет
+        m = _grow(m, max(2, round(RELIGHT_BAND * max(bbox[2] - bbox[0], bbox[3] - bbox[1]))))
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        names = [await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for img in (crop, before, m.convert("RGB"))]
+        wf = {
+            "img": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
+            "src": {"class_type": "LoadImage", "inputs": {"image": names[1]}},
+            "mask": {"class_type": "LoadImageMask", "inputs": {"image": names[2], "channel": "red"}},
+            "relight": {"class_type": "InegoRelight", "inputs": {"image": ["img", 0], "source": ["src", 0], "mask": ["mask", 0]}},
+            "save": {"class_type": "SaveImage", "inputs": {"images": ["relight", 0], "filename_prefix": "inego/srclight"}},
+        }
+        try:
+            out = await _run(client, wf)
+        except ComfyError as e:
+            log.warning("Свет исходника не перенесён: %s", e)
+            return result
+    if "save" not in out:
+        return result
+    patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
+    result = result.copy()
+    result.paste(patch, box[:2], m.filter(ImageFilter.GaussianBlur(EXACT_EDGE)))
+    log.info("свет исходника на изменённой поверхности: кроп %s", box)
     return result
 
 
@@ -1629,6 +1669,9 @@ async def run_edit(
         core = surface if surface is not None else await _surface(src, core)
     r = _Region(src, core, grow, extra, 0.0 if material else EDIT_ROOM if add else EDIT_ROOM_CHANGE)
     r.exact = material
+    # «изменить» и материалы: поверхность та же — свет с исходника (Marigold-IID); «добавить / заменить» —
+    # новый объект со своей формой, его свет сводит прогон переосвещения через модель
+    r.source_light = not add
     if model in QWEN21_MODELS:
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и

@@ -847,6 +847,10 @@ PLANE_TOL_DEG = 14
 SHADE_SMOOTH = 0.006
 # предфильтр образца — доля шага выборки: 1.0 — без муара, но вдвое мягче; 0.6 — резко, муара на кладке нет
 TEX_PREFILTER = 0.6
+# переосвещение правки по исходнику (InegoRelight): сглаживание карт освещённости (доля высоты поверхности)
+# и пределы поправки света
+RELIGHT_SMOOTH = 0.01
+RELIGHT_MIN, RELIGHT_MAX = 0.15, 6.0
 # уточнение нормали стены по её краям — не больше этого угла (больше — края не те: окно, тень, обрезка)
 REFINE_MAX_DEG = 25
 # соседняя грань с MoGe-углом 90° ± этот допуск к уточнённой — ставится ровно под прямой угол (параллельная — так же)
@@ -1125,6 +1129,66 @@ class InegoTextureProject:
         return (torch.from_numpy(res.astype(np.float32))[None], torch.from_numpy(S.astype(np.float32))[None])
 
 
+class InegoRelight:
+    """Свет исходника на изменённой поверхности (Inpainting «изменить» и материалы текстом), без генерации.
+
+    Геометрия поверхности при смене материала или цвета та же, значит и свет на ней тот же, что на фото. Модель
+    же рисует новый материал в своём свете: белая стена — плоской заливкой, венге — с синей тенью. Marigold-IID
+    раскладывает и исходник, и результат на альбедо × освещённость; освещённость результата заменяется
+    освещённостью исходника. Меняется только отношение гладких карт освещённости, поэтому вся мелкая фактура
+    генерации (волокна, зерно, швы) остаётся в полном разрешении. Заменяет прогон переосвещения через Qwen:
+    секунды вместо минуты, свет совпадает с фото, цвет материала не уходит.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),  # кроп с вклеенной правкой
+                "source": ("IMAGE",),  # тот же кроп до правки
+                "mask": ("MASK",),  # изменённая поверхность
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "inego"
+
+    def run(self, image, source, mask):
+        gen = image[0][..., :3].float().cpu().numpy()
+        src = source[0][..., :3].float().cpu().numpy()
+        H, W = gen.shape[:2]
+        m = mask[0].float()[None, None]
+        if m.shape[-2:] != (H, W):
+            m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)
+        S = m[0, 0].numpy() > 0.5
+        if S.sum() < 256 or src.shape != gen.shape:
+            return (image,)
+        _free_vram()
+        d_src = _decompose((np.clip(src, 0, 1) * 255).astype(np.uint8))
+        d_gen = _decompose((np.clip(gen, 0, 1) * 255).astype(np.uint8))
+        # гладкие карты освещённости по поверхности (нормированная свёртка — соседние поверхности не подмешиваются):
+        # швы старого материала и фактура нового в них не попадают
+        sig = max(1.5, RELIGHT_SMOOTH * np.ptp(np.nonzero(S)[0]))
+        fm = S.astype(np.float32)
+        den = ndimage.gaussian_filter(fm, sig) + 1e-4
+
+        def smooth(x):
+            return np.stack([ndimage.gaussian_filter(x[..., c] * fm, sig) / den for c in range(3)], -1)
+
+        s_src, s_gen = smooth(d_src[1]), smooth(d_gen[1])
+        # общий уровень: разложения — каждое со своим множителем, сводим их по фото
+        cal_src = float(np.median((_to_lin(src)[S].mean(1) + 1e-4) / ((d_src[0] * d_src[1] + d_src[2])[S].mean(1) + 1e-4)))
+        cal_gen = float(np.median((_to_lin(gen)[S].mean(1) + 1e-4) / ((d_gen[0] * d_gen[1] + d_gen[2])[S].mean(1) + 1e-4)))
+        ratio = np.clip((cal_src * s_src + 1e-4) / (cal_gen * s_gen + 1e-4), RELIGHT_MIN, RELIGHT_MAX)
+        out = _to_srgb(_to_lin(gen) * ratio)
+        log.info("INEGO relight: поверхность %.1f%%, свет ×%.2f..%.2f (медиана %.2f)", 100 * S.mean(),
+                 float(ratio[S].min()), float(ratio[S].max()), float(np.median(ratio[S])))
+        alpha = ndimage.gaussian_filter(fm, 0.8)[..., None]
+        res = gen * (1 - alpha) + out * alpha
+        return (torch.from_numpy(res.astype(np.float32))[None],)
+
+
 def _scene_up(normals: list, N: np.ndarray, valid_all: np.ndarray) -> np.ndarray:
     """Вертикаль сцены в координатах камеры (OpenCV: y вниз). Камера бывает чуть наклонена — «строго вниз по
     кадру» разворачивал рисунок. Две стены под углом: вертикаль — их общее ребро (ошибки нормалей по курсу
@@ -1226,8 +1290,9 @@ def _match_grain(out: np.ndarray, src: np.ndarray, S: np.ndarray) -> np.ndarray:
     return np.clip(out + noise * add, 0, 1)
 
 
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject}
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight}
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "InegoRelight": "INEGO Relight (source lighting onto an edited surface, Marigold-IID)",
     "InegoTextureProject": "INEGO Texture Project (sample texture 1:1 onto planar faces, MoGe-2 + Marigold-IID)",
     "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",
     "InegoKeepZones": "INEGO Keep Zones (sky / background / surroundings)",
