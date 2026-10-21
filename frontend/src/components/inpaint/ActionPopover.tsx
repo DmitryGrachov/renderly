@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { motion } from 'motion/react'
-import { ArrowUp, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowUp, BrickWall, Sparkles, Trash2 } from 'lucide-react'
 import { editKind, type InpaintMode } from '../../lib/inpaint'
 
 import { useScene, type Scene } from '../../lib/scene'
@@ -17,10 +17,21 @@ const REMOVE_SUGGESTIONS: Record<Scene, string[]> = {
   interior: ['Люди', 'Мебель', 'Декор', 'Растения', 'Провода', 'Светильник'],
 }
 
+// материал для выделенной поверхности: тип, цвет, рисунок — поверхность сохраняет форму, швы и проёмы
+const MATERIAL_SUGGESTIONS: Record<Scene, string[]> = {
+  exterior: ['Дерево — венге', 'Белая штукатурка', 'Клинкерный кирпич', 'Натуральный камень', 'Архитектурный бетон', 'Тёмный металл'],
+  interior: ['Дубовый паркет', 'Белая штукатурка', 'Микроцемент', 'Мрамор', 'Керамогранит', 'Деревянные панели'],
+}
+
 const EDIT_HINT = {
   none: 'Начните с «добавь» или «измени» — так точнее',
   add: 'Добавится новый объект в натуральную величину',
   change: 'Изменится выделенное: материал и цвет — на месте, другой объект — в своём размере',
+}
+
+const MATERIAL_PLACEHOLDER: Record<Scene, string> = {
+  exterior: 'Например: вертикальная доска из лиственницы, серая',
+  interior: 'Например: светлый дуб ёлочкой, матовый лак',
 }
 
 const PLACEHOLDER: Record<Scene, string> = {
@@ -45,9 +56,9 @@ export const POPOVER_WIDTH = 340
 export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y, placement }: Props) {
   const input = useRef<HTMLTextAreaElement>(null)
   const { scene } = useScene()
-  const suggestions = mode === 'edit' ? SUGGESTIONS[scene] : REMOVE_SUGGESTIONS[scene]
+  const suggestions = mode === 'edit' ? SUGGESTIONS[scene] : mode === 'material' ? MATERIAL_SUGGESTIONS[scene] : REMOVE_SUGGESTIONS[scene]
   useEffect(() => {
-    if (mode === 'edit') input.current?.focus({ preventScroll: true })
+    if (mode !== 'remove') input.current?.focus({ preventScroll: true })
   }, [mode])
 
   const canConfirm = mode === 'remove' || prompt.trim().length > 0
@@ -78,17 +89,23 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         <span
           className="grid size-9 shrink-0 place-items-center rounded-full text-white"
           style={{
-            background: mode === 'edit' ? 'linear-gradient(135deg,#5a9bff,#6a5cff)' : 'linear-gradient(135deg,#ff6b6b,#ff3b5c)',
+            background: mode === 'edit' ? 'linear-gradient(135deg,#5a9bff,#6a5cff)'
+              : mode === 'material' ? 'linear-gradient(135deg,#fbbf24,#f59e0b)'
+              : 'linear-gradient(135deg,#ff6b6b,#ff3b5c)',
           }}
         >
-          {mode === 'edit' ? <Sparkles className="size-4" /> : <Trash2 className="size-4" />}
+          {mode === 'edit' ? <Sparkles className="size-4" /> : mode === 'material' ? <BrickWall className="size-4" /> : <Trash2 className="size-4" />}
         </span>
         <div className="min-w-0 pt-0.5">
-          <div className="text-[15px] font-semibold tracking-[-0.01em]">{mode === 'edit' ? 'Что сделать с областью?' : 'Удалить выделенное?'}</div>
+          <div className="text-[15px] font-semibold tracking-[-0.01em]">
+            {mode === 'edit' ? 'Что сделать с областью?' : mode === 'material' ? 'Какой материал положить?' : 'Удалить выделенное?'}
+          </div>
           <div className="text-[12.5px] leading-snug text-mute">
             {mode === 'edit'
               ? EDIT_HINT[editKind(prompt) ?? 'none']
-              : prompt.trim()
+              : mode === 'material'
+                ? 'Поверхность сохранит форму, швы и проёмы — сменится только материал'
+                : prompt.trim()
                 ? 'Удалится только это — остальное в выделении останется'
                 : 'Всё выделенное и его тень заменит окружающий фон'}
           </div>
@@ -102,10 +119,10 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
         ref={input}
         value={prompt}
         onChange={(e) => onPrompt(e.target.value)}
-        rows={mode === 'edit' ? 2 : 1}
+        rows={mode === 'remove' ? 1 : 2}
         maxLength={300}
-        placeholder={mode === 'edit' ? PLACEHOLDER[scene] : 'Например: люди — без уточнения удалится всё'}
-        className={`${mode === 'edit' ? 'mt-3.5' : 'mt-1.5'} w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2`}
+        placeholder={mode === 'edit' ? PLACEHOLDER[scene] : mode === 'material' ? MATERIAL_PLACEHOLDER[scene] : 'Например: люди — без уточнения удалится всё'}
+        className={`${mode === 'remove' ? 'mt-1.5' : 'mt-3.5'} w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2`}
       />
       <div className="mt-2 flex flex-wrap gap-1.5">
         {suggestions.map((s) => (
@@ -130,10 +147,10 @@ export function ActionPopover({ mode, prompt, onPrompt, onConfirm, onReset, x, y
           onClick={onConfirm}
           disabled={!canConfirm}
           className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-[13.5px] font-medium text-white transition-all duration-200 disabled:bg-fg/[0.08] disabled:text-faint ${
-            mode === 'edit' ? 'bg-accent hover:bg-accent-hover' : 'bg-[#ff3b30] hover:bg-[#ff2d20]'
+            mode === 'edit' ? 'bg-accent hover:bg-accent-hover' : mode === 'material' ? 'bg-[#f59e0b] hover:bg-[#e8900a]' : 'bg-[#ff3b30] hover:bg-[#ff2d20]'
           }`}
         >
-          {mode === 'edit' ? (
+          {mode !== 'remove' ? (
             <>Применить <ArrowUp className="size-3.5" strokeWidth={2.5} /></>
           ) : (
             <><Trash2 className="size-3.5" /> Удалить</>

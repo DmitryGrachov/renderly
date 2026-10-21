@@ -298,7 +298,7 @@ export function Editor({ image, onClose }: Props) {
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
       )
-      const label = mode === 'remove' ? (text ? `Удаление · ${text}` : 'Удаление') : text
+      const label = mode === 'remove' ? (text ? `Удаление · ${text}` : 'Удаление') : mode === 'material' ? `Материал · ${text}` : text
       charge('inpaint', `Inpainting · ${label.toLowerCase()}`)
       setVersions((v) => [...v.slice(0, current + 1), { url, mode, label }])
       setCurrent((c) => c + 1)
@@ -356,7 +356,7 @@ export function Editor({ image, onClose }: Props) {
     const by = top + bbox.y / k
     const bw = bbox.w / k
     const bh = bbox.h / k
-    const est = mode === 'edit' ? 250 : 230
+    const est = mode === 'remove' ? 230 : 250
     let placement: 'top' | 'bottom' = 'bottom'
     let y = by + bh + 14
     if (y + est > stage.h - 8) {
@@ -522,7 +522,7 @@ export function Editor({ image, onClose }: Props) {
               >
                 {tool === 'hand'
                   ? 'Перетаскивайте изображение · колесо — масштаб'
-                  : `${tool === 'lasso' ? 'Обведите' : 'Закрасьте'} ${mode === 'edit' ? 'область, которую нужно изменить' : 'объект, который нужно удалить'}`}
+                  : `${tool === 'lasso' ? 'Обведите' : 'Закрасьте'} ${mode === 'edit' ? 'область, которую нужно изменить' : mode === 'material' ? 'поверхность, которой нужно сменить материал' : 'объект, который нужно удалить'}`}
               </motion.div>
             )}
           </AnimatePresence>

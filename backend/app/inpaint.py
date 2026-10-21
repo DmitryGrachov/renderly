@@ -31,7 +31,7 @@ from .config import (
     QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN_EDIT,
     QWEN_EDIT_MODEL, log,
 )
-from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model
+from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
 
 CONTEXT = 1.0  # контекст вокруг маски: столько же от её размера с каждой стороны
 MIN_CROP = 512  # минимальная сторона кропа в пикселях исходника — модели нужен контекст
@@ -101,7 +101,16 @@ EDIT_SYSTEM = (
     'under this light>", '
     '"location": "<5-20 words: where it stands, by landmarks of image 1; never mention the red highlight, '
     'ellipse, outline or any marking — the image model does not see it>", '
-    '"look": "<25-60 words: the measured light, shadows, colour grading, atmosphere and optics of the frame>", '
+    '"look": "<25-60 words: the measured light, shadows, colour grading, atmosphere and optics of the frame: '
+    'where the light comes from relative to the camera, its colour, which faces are lit and which are in shade, '
+    'the colour of the shade>", '
+    '"subject": "<3-12 words: the edited element as it is after the edit, e.g. the white plastered walls of the '
+    'house, the red car by the kerb>", '
+    '"light_on_subject": "<25-60 words: how the light of this frame falls on the edited element at its spot, judged '
+    'by the real brightness and colour of the surfaces there and of neighbours facing the same way: which of its '
+    'faces or parts are in direct light and the exact tint the light gives them (e.g. warm golden-peach), which are '
+    'in shade and its colour (e.g. cool blue-grey, much darker), where it darkens (under the eaves, in corners, at '
+    'the ground), what it reflects>", '
     '"kind": "add" if a new element appears, "change" if the same thing changes material, colour, species or '
     'style, "replace" if it becomes a different kind of object, '
     '"box": [x1, y1, x2, y2] in image 1, x as thousandths of its width and y as thousandths of its height}'
@@ -140,6 +149,22 @@ REFINE_PROMPT = (
     "in image 1."
 )
 REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечит полупрозрачность и шлейфы; на 6 уже меняется цвет одежды
+# прогон «переосвещения»: свет правки сводится с кадром отдельной правкой «relight» (как в img2img, где свет
+# рисуется заново). Частичный шум не годится: модель редактирования воспроизводит <image1> и на 6 шагах из 8
+RELIGHT_PROMPT = (
+    "Relight {subject} in image 1 so it looks photographed in the same shot as the rest of the scene: {look}. "
+    "Its parts facing the light take the brightness and colour tint of the light falling there, parts facing away or "
+    "in shadow are darker and take the colour of the ambient and sky light, with soft darkening in corners, under "
+    "overhangs and at contacts, cast shadows of the same direction and softness as elsewhere in the photo, "
+    "reflections of the surroundings on glossy surfaces, and the same exposure, white balance, contrast, sharpness "
+    "and texture as the surrounding photo. {subject_cap} keeps its shape, edges, position, material, own colour and "
+    "details; only its lighting changes."
+)
+Q21_RELIGHT_MASK = (
+    " The region to relight is marked white in the mask <image2>; everything outside it stays exactly as in "
+    "<image1>; the mask is only a guide and leaves no trace."
+)
+RELIGHT_BAND = 0.03  # запас вокруг правки (доля её размера): свет ложится и на кромку, шва нет
 REFINE_PAD = 0.15  # поле вокруг объекта (доля его размера) — контекст для света и резкости
 # запас вверх для второго прогона (доля высоты объекта): если в первом не было головы, ей должно быть где появиться
 REFINE_HEADROOM = 0.15
@@ -843,8 +868,11 @@ class _Region:
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
         unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
+        relight: str | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
+
+        relight — запрос прогона переосвещения (_relight): свет вклеенной правки сводится с кадром.
 
         native (Qwen-Image-2.1): маска уходит модели второй картинкой — чёткая ч/б область правки (self.mask:
         выделение + рамка объекта), а не мягкая маска шума.
@@ -900,9 +928,12 @@ class _Region:
             alpha = ImageChops.lighter(_grow(keep, feather).filter(ImageFilter.GaussianBlur(feather / 2)), keep)
         result = self.src.copy()
         result.paste(patch, self.box[:2], alpha)
+        obj = Image.new("L", self.src.size, 0)
+        obj.paste(keep, self.box[:2])
+        if relight:
+            # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
+            result = await _relight(result, obj, relight, seed + 2, model)
         if refine and self.room:
-            obj = Image.new("L", self.src.size, 0)
-            obj.paste(keep, self.box[:2])
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
@@ -961,6 +992,43 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     alpha = ImageChops.lighter(_grow(keep, grow).filter(ImageFilter.GaussianBlur(max(1, grow / 2))), keep)
     result = result.copy()
     result.paste(refined, box[:2], alpha)
+    return result
+
+
+async def _relight(result: Image.Image, area: Image.Image, prompt: str, seed: int, model: str) -> Image.Image:
+    """Прогон переосвещения: свет правки сводится с кадром.
+
+    Правку модель рисует отдельно от кадра, и вклеенное выглядит наклейкой: ровно залитая белая стена без солнца и
+    тени, объект в своём свете. В img2img так не бывает — свет рисуется заново по всему кадру. Здесь кроп с правкой
+    уже вклеенной уходит модели ещё раз с правкой «переосвети это как остальной кадр» (свет кадра измерил DeepSeek):
+    форма, материал и цвет остаются, солнце, тень, оттенок и экспозиция сходятся с окружением. На 2.1 — родной
+    режим (маска вторым входом, Turbo), иначе — шум под маской. Вклеивается только правка с узкой кромкой.
+    """
+    bbox = area.getbbox()
+    if not bbox:
+        return result
+    w, h = result.size
+    box = _context_box(bbox, w, h)
+    crop = result.crop(box)
+    band = max(4, round(RELIGHT_BAND * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+    m = _grow(area.crop(box), band)
+    native = model in QWEN21_MODELS
+    if native:
+        prompt = q21_tags(prompt) + Q21_RELIGHT_MASK
+    gw, gh = fit_size(*crop.size, QWEN21_MEGAPIXELS if native else INPAINT_MEGAPIXELS)
+    log.info("переосвещение %s: кроп %s → %dx%d\n%s", model, box, gw, gh, prompt)
+    mask = m.resize((gw, gh), Image.BILINEAR)
+    if not native:
+        mask = mask.filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * EDIT_EDGE))))
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+        mask_name = await _upload(client, to_png(mask.convert("RGB")), f"{uuid.uuid4().hex}.png")
+        out = await _run(client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, "relight", native=native))
+    if "save" not in out:
+        return result
+    patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
+    result = result.copy()
+    result.paste(patch, box[:2], m.filter(ImageFilter.GaussianBlur(band / 2)))
     return result
 
 
@@ -1136,15 +1204,62 @@ KIND_RULE = {
         "a different kind of object (the old one disappears completely, the new one gets its own true size at the "
         "same spot)."
     ),
+    "material": (
+        "The user asked to change the MATERIAL or finish of the surface in the highlighted area: kind is \"change\". "
+        "It is the same surface with the same shape, size, edges and joints, only covered with the new material; "
+        "nothing is added in front of it. In Russian material requests «дерево» means wood or timber cladding, "
+        "never a tree."
+    ),
 }
+# смена материала — основной сценарий: DeepSeek описывает новый материал так, чтобы модель положила его в масштабе,
+# по плоскости и до настоящих краёв поверхности (модели «венге» мало: ни размера доски, ни направления, ни швов)
+MATERIAL_SYSTEM = (
+    " This is a MATERIAL change: the highlighted surface keeps its geometry and gets the new material. Also return "
+    '"material": "<40-90 words: the new material for an image model: what it is (e.g. horizontal wenge timber '
+    "cladding boards), its colour with hex codes and natural variation, pattern and grain, the real size of its "
+    "elements in metres and how many of them fit along a nearby reference (boards 0.14 m wide, about 15 across the "
+    "2.1 m door height), orientation and laying pattern, joints and gaps, finish and sheen (matte, oiled, polished), "
+    "how it turns corners and meets window reveals, the plinth and the eaves (trims, mitred corners). If the user "
+    'named a colour, a species or a pattern, keep it exactly>", '
+    '"surface": "<8-25 words: which surfaces get it, by landmarks of image 1 (e.g. the plinth wall below the front '
+    'windows between the downpipe and the porch)>", '
+    '"keep_in_surface": "<things set into or in front of that surface that stay as they are: windows, frames, '
+    'doors, sills, downpipes, lamps, vents, signs>" or null. '
+    "The user's brush stroke is rough: inside the highlight the material covers that surface completely, up to its "
+    "real edges, corners and openings, and never spreads onto other surfaces or materials the stroke touches."
+)
+# в запрос генерации: где и как лежит новый материал
+MATERIAL_PROMPT = (
+    " The new material, covering {surface} inside the marked region completely, up to its real edges, corners and "
+    "openings and stopping there, without spilling onto other surfaces: {material}. It lies flat on the existing surface plane, follows its perspective and vanishing lines at "
+    "true real-world scale, and turns the corners with proper trims; the shape, size, edges and openings of the "
+    "surface stay exactly as before.{keep}"
+)
+MATERIAL_KEEP = " {keep} stay exactly as they are, in front of the new material."
+# материалы и поверхности: запрос про них — смена материала той же поверхности, а не новый объект.
+# «дерево» здесь не в списке: «замени дерево на фонарь» — про растение; «камень на дерево» ловится по «камень»
+MATERIAL_WORDS = re.compile(
+    r"камен|камн|кирпич|плитк|плитн|штукатур|бетон|облицов|отделк|фасад|цокол|стен|кровл|крыш|черепиц|металл|"
+    r"сайдинг|панел|мрамор|гранит|травертин|клинкер|ламел|вагонк|имитац|покрыт|материал|"
+    r"(stone|brick|tiles?|plaster|stucco|concrete|cladding|facade|wall|roof|siding|panels?|marble|material)"
+)
+# переписчику Qwen-2.1: та же оговорка — он тоже читал «дерево» как растение
+MATERIAL_NOTE = (
+    " (this is a material change of the same surface: its shape, size and edges stay, only the material changes; "
+    "«дерево» here means wood, not a tree)"
+)
 
 
 def parse_kind(request: str) -> str | None:
-    """«добавь …» → add, «измени / замени / перекрась …» → change, иначе None (решает DeepSeek)."""
-    words = request.strip().lower().replace("ё", "е").split(maxsplit=1)
+    """«добавь …» → add, «измени / замени / перекрась …» → change (material — если речь о материале или
+    поверхности: «камень на дерево»), иначе None (решает DeepSeek)."""
+    text = request.strip().lower().replace("ё", "е")
+    words = text.split(maxsplit=1)
     first = words[0].strip(",.:;!") if words else ""
     if first in ADD_WORDS:
         return "add"
+    if MATERIAL_WORDS.search(text):
+        return "material"
     if first in CHANGE_WORDS:
         return "change"
     return None
@@ -1159,7 +1274,9 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
         "instruction": request,
         "location": "in the marked area",
         "look": "the same light, shadows, colour grading and atmosphere as image 1",
-        "kind": kind or "add",
+        "kind": "change" if kind == "material" else kind or "add",
+        "subject": "the edited element",
+        "light_on_subject": "",
     }
     if not DEEPSEEK_API_KEY:
         return fallback
@@ -1168,7 +1285,7 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
         _described.move_to_end(key)
         return _described[key]
     messages = [
-        {"role": "system", "content": EDIT_SYSTEM},
+        {"role": "system", "content": EDIT_SYSTEM + (MATERIAL_SYSTEM if kind == "material" else "")},
         {
             "role": "user",
             "content": [
@@ -1185,7 +1302,8 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
         # иначе объект рисуется размером с выделение
         for attempt in range(2):
             data = json.loads(await _chat(messages, json_mode=True))
-            if box := _box(data.get("box")):
+            # смене материала рамка не нужна — второй раз не спрашиваем
+            if (box := _box(data.get("box"))) or kind == "material":
                 break
             log.warning("DeepSeek не дал рамку объекта (попытка %d): %s", attempt + 1, data.get("box"))
         result = {
@@ -1193,10 +1311,16 @@ async def describe_edit(frame: bytes, close: bytes, request: str, kind: str | No
         }
         if box:
             result["box"] = box
+        for k in ("material", "surface", "keep_in_surface"):
+            v = " ".join(str(data.get(k) or "").split()).rstrip(".")
+            if kind == "material" and v and v.lower() not in ("null", "none", "nothing"):
+                result[k] = v
         said = str(data.get("kind", "")).strip().lower()
         # «добавь» — только добавление; «измени / замени» — изменение или замена, это решает DeepSeek
         if kind == "add":
             result["kind"] = "add"
+        elif kind == "material":
+            result["kind"] = "change"
         elif kind == "change":
             result["kind"] = "replace" if said == "replace" else "change"
         else:
@@ -1219,11 +1343,15 @@ def _rect_mask(box: list[float], size: tuple[int, int]) -> Image.Image:
     return m
 
 
-async def _plan(src: Image.Image, core: Image.Image, request: str) -> tuple[dict, Image.Image | None]:
-    """Разбор правки DeepSeek (кэшируется) и рамка объекта в натуральную величину у выделения (None — «изменить»)."""
+async def _plan(
+    src: Image.Image, core: Image.Image, request: str, kind: str | None = None
+) -> tuple[dict, Image.Image | None]:
+    """Разбор правки DeepSeek (кэшируется) и рамка объекта в натуральную величину у выделения (None — «изменить»).
+    kind — тип, заданный режимом (вкладка «Материалы» — material); иначе — по словам запроса."""
     close_box = _context_box(core.getbbox(), *src.size)
     what = await describe_edit(
-        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(), parse_kind(request)
+        _highlight(src, core), _highlight(src.crop(close_box), core.crop(close_box)), request.strip(),
+        kind or parse_kind(request),
     )
     if what.get("kind") == "change" or not what.get("box"):
         return what, None
@@ -1247,7 +1375,7 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
-    box: list[float] | None = None,
+    box: list[float] | None = None, material: bool = False,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1259,7 +1387,10 @@ async def run_edit(
         seed = random.randrange(2**48)
     src, core, grow = _load(image, mask, EDIT_GROW)
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
-    what, extra = await _plan(src, core, request)
+    # вкладка «Материалы»: запрос — сам материал («дерево — венге»), тип правки задан, рамки нет
+    if material:
+        request = f"Смени материал выделенной поверхности на: {request.strip()}"
+    what, extra = await _plan(src, core, request, "material" if material else None)
     add = what.get("kind") != "change"
     if add and box:
         # рамка, поправленная пользователем на канвасе
@@ -1284,15 +1415,22 @@ async def run_edit(
     if model in QWEN21_MODELS:
         # 2.1: место и размер — ч/б маской вторым входом (выделение + рамка объекта); запрос — официальный
         # переписчик Qwen в исполнении DeepSeek, шаблон — запасной вариант
+        material = material or parse_kind(request) == "material"
         prompt = await rewrite_q21(
-            r.crop, r.mask, "add" if extra is not None else "change", request.strip()
+            r.crop, r.mask, "add" if extra is not None else "change", request.strip() + (MATERIAL_NOTE if material else "")
         ) or Q21_EDIT_PROMPT.format(**what, size_rule=Q21_SIZE_ADD if extra is not None else "")
         prompt += " " + Q21_MASK_TRACE + (Q21_MASK_TRACE_ADD if extra is not None else "")
+        # переписчик пишет, что поменять, а о свете кадра молчит — измеренный DeepSeek свет отдельной фразой
+        prompt += f" It is lit like the rest of <image1>: {what['look']}."
     elif native:
         # 2511: место и размер — красным контуром на Picture 2
         prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
     else:
         prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
+    if what.get("material"):
+        keep = MATERIAL_KEEP.format(keep=what["keep_in_surface"][:1].upper() + what["keep_in_surface"][1:])             if what.get("keep_in_surface") else ""
+        text = MATERIAL_PROMPT.format(material=what["material"], surface=what.get("surface") or "the marked surface", keep=keep)
+        prompt += q21_tags(text) if model in QWEN21_MODELS else text
     prompt += REALISM_EDIT
     log.info(
         "edit %s %dx%d кроп %s → %dx%d seed=%d %s рамка=%s «%s»\n%s",
@@ -1303,6 +1441,13 @@ async def run_edit(
     unleak = (mark or model == QWEN_EDIT_MODEL) and not RED_WORDS.search(request.lower())
     # снятие белёсой вуали — только при добавлении и замене; при «изменить» перекраска того же объекта и есть цель
     refine = REFINE_PROMPT.format(instruction=what["instruction"].rstrip(".")) if add else None
+    subject = what.get("subject") or "the edited element"
+    subject = subject[:1].lower() + subject[1:]
+    # свет на самом элементе (какая грань на солнце и какого оттенка, какая в тени) — с ним переосвещение заметное,
+    # с одним общим описанием кадра модель почти ничего не меняет
+    light = what.get("light_on_subject") or what["look"]
+    relight = RELIGHT_PROMPT.format(subject=subject, subject_cap=subject[:1].upper() + subject[1:], look=light)
     return await r.generate(
-        prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native
+        prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
+        relight=relight,
     ), seed

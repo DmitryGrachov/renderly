@@ -8,6 +8,7 @@ export type Shape = 'circle' | 'square'
 
 export const MODE_COLOR: Record<InpaintMode, string> = {
   edit: '#2f7bff',
+  material: '#f59e0b',
   remove: '#ff3b5c',
 }
 
@@ -67,6 +68,7 @@ interface ModeSwitchProps {
 export function ModeSwitch({ mode, onMode, disabled }: ModeSwitchProps) {
   const items: { id: InpaintMode; label: string }[] = [
     { id: 'edit', label: 'Добавить / изменить' },
+    { id: 'material', label: 'Материалы' },
     { id: 'remove', label: 'Удалить' },
   ]
   return (

@@ -145,7 +145,8 @@ async def inpaint(
     mask: UploadFile = File(...),
     scene: str = Form("exterior"),
     mode: str = Form(...),
-    # edit — что нарисовать; remove — необязательное уточнение, что именно удалить («люди», «машина»)
+    # edit — что нарисовать; material — какой материал положить на выделенную поверхность;
+    # remove — необязательное уточнение, что именно удалить («люди», «машина»)
     prompt: str | None = Form(None, max_length=300),
     # рамка объекта «x1,y1,x2,y2» в долях кадра, поправленная на канвасе (добавить / заменить); пусто — от DeepSeek
     box: str | None = Form(None, max_length=100),
@@ -161,15 +162,17 @@ async def inpaint(
     if llm not in DEEPSEEK_MODELS:
         raise HTTPException(400, f"Unknown llm: {llm}")
     llm_model.set(llm)
-    if mode not in ("edit", "remove"):
+    if mode not in ("edit", "material", "remove"):
         raise HTTPException(400, f"Unknown mode: {mode}")
     if mode == "edit" and not (prompt and prompt.strip()):
         raise HTTPException(400, "Опишите, что должно появиться в области")
+    if mode == "material" and not (prompt and prompt.strip()):
+        raise HTTPException(400, "Опишите материал")
 
     try:
-        if mode == "edit":
+        if mode in ("edit", "material"):
             result, used_seed = await inpainting.run_edit(
-                await image.read(), await mask.read(), prompt, seed, model, _parse_box(box)
+                await image.read(), await mask.read(), prompt, seed, model, _parse_box(box), material=mode == "material"
             )
         else:
             result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)

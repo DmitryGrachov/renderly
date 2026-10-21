@@ -3,7 +3,7 @@ import type { Scene } from './scene'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
 
-export type InpaintMode = 'edit' | 'remove'
+export type InpaintMode = 'edit' | 'material' | 'remove'
 
 /** Тип правки по первому слову запроса (как на бэкенде, backend/app/inpaint.py: parse_kind); null — решает DeepSeek */
 export type EditKind = 'add' | 'change'
@@ -37,6 +37,7 @@ export type ProgressFn = (progress: number, stage: string) => void
 export const INPAINT_STAGES: Record<InpaintMode, string[]> = {
   remove: ['Анализ области', 'Восстановление фона', 'Сведение'],
   edit: ['Анализ области', 'Генерация', 'Сведение'],
+  material: ['Анализ поверхности', 'Новый материал', 'Свет и сведение'],
 }
 
 /** Возвращает object URL нового изображения. */
@@ -162,7 +163,7 @@ async function mockInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   }
   xctx.filter = 'none'
 
-  if (req.mode === 'edit') {
+  if (req.mode !== 'remove') {
     // лёгкий «новый» оттенок, зависящий от промпта
     const hue = [...(req.prompt ?? '')].reduce((a, ch) => a + ch.charCodeAt(0), 0) % 360
     xctx.globalCompositeOperation = 'soft-light'
