@@ -25,10 +25,11 @@ import httpx
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from .comfy import TOTAL_STEPS, ComfyError, _check_model, _run, _sampling, _upload, to_png
+from .comfy import build_qwen21_workflow as img2img_workflow
 from .comfy import fit_size as _fit16
 from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
-    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN_EDIT,
+    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
@@ -227,6 +228,24 @@ Q2511_REMOVE_PROMPT = (
 # предел совмещения результата родного режима с кропом (доля кадра): сдвиг там — единицы пикселей
 ALIGN_MAX = 0.03
 EXACT_EDGE = 0.8  # сглаживание края вклейки по контуру поверхности (px): только антиалиасинг, без растушёвки
+# после любой правки весь кадр перерисовывается как img2img (Qwen-Image-2.1 Turbo): свет, края, углы, контактные
+# тени и зерно правки сходятся с кадром — без этого правка выглядела вклеенной «как в фотошопе». Мягкость кадра
+# (≈2 Мп) не важна: дальше апскейлер
+HARMONIZE_FULL = True
+# модели называется, что вписать: на общую фразу «всё как есть, сделай согласованно» 2.1 просто повторяла кадр
+HARMONIZE_PROMPT = (
+    "Re-render <image1> as one coherent unretouched photograph taken in a single shot. In it, {subject}: keep exactly "
+    "its shape, position, size, pattern, joints and colour, and integrate it naturally into the photo — real edges "
+    "and corners, depth of joints and relief, soft contact shadows where it meets other surfaces and the ground, the "
+    "same light direction and colour, colour grading, sharpness, noise and grain as the rest of the photo. "
+    "Everything else in <image1> stays exactly as it is, nothing added, removed or moved."
+)
+HARMONIZE_REMOVED = (
+    "Re-render <image1> as one coherent unretouched photograph taken in a single shot. {subject}: the filled area "
+    "shows only that continuing background and looks untouched — the same texture, lines, perspective, light, "
+    "shadows, colour grading, sharpness, noise and grain as its surroundings, with no trace, outline or smudge. "
+    "Everything else in <image1> stays exactly as it is, nothing added, removed or moved."
+)
 # «добавить / заменить»: объект сводится со сценой по свету через Marigold-IID (InegoHarmonize) вместо прогона
 # переосвещения через модель. Выключено: на границе солнца и тени средний свет вокруг объекта — не тот, что падает
 # на него (женщина на дорожке у газона вышла серой и холодной вместо освещённой закатом); прогон модели живее
@@ -901,7 +920,7 @@ class _Region:
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
         unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
-        relight: str | None = None, texture: Image.Image | None = None,
+        relight: str | None = None, texture: Image.Image | None = None, harmonize: tuple[str, bool] | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
 
@@ -977,11 +996,15 @@ class _Region:
         obj.paste(keep, self.box[:2])
         if self.source_light:
             result = await _relight_source(result, self.src, obj, self.exact)
-        elif relight and harmonized is None:
+        elif relight and harmonized is None and not HARMONIZE_FULL:
+            # (при пересчёте всего кадра свет добавленного объекта сводит он)
             # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
             result = await _relight(result, obj, relight, seed + 2, model, self.exact)
         if refine and self.room:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
+        if HARMONIZE_FULL and harmonize:
+            # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
+            result = await harmonize_frame(result, seed + 3, *harmonize)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1040,6 +1063,27 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
     result = result.copy()
     result.paste(refined, box[:2], alpha)
     return result
+
+
+async def harmonize_frame(result: Image.Image, seed: int, subject: str, removed: bool = False) -> Image.Image:
+    """Пересчёт всего кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img,
+    с совмещением кадра InegoAlign): правка вписывается в кадр целиком. Кадр — в исходный размер (апскейл —
+    дальше отдельно). Не получилось — результат правки как есть."""
+    w, h = result.size
+    gw, gh = fit_size(w, h, QWEN21_MEGAPIXELS)
+    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+        try:
+            await _check_model(client, QWEN21_TURBO_MODEL)
+            name = await _upload(client, to_png(result.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
+            prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
+            out = await _run(client, img2img_workflow(name, prompt, seed, None))
+        except ComfyError as e:
+            log.warning("Пересчёт кадра не удался, остаётся правка как есть: %s", e)
+            return result
+    if "save" not in out:
+        return result
+    log.info("кадр пересчитан целиком: %dx%d → %dx%d, вписано: %s", w, h, gw, gh, subject)
+    return Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
 
 
 async def _harmonize(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image) -> Image.Image | None:
@@ -1191,13 +1235,15 @@ TEXTURE_WIDTH_DEFAULT = 1.0  # без DeepSeek или при ошибке: ме�
 TEXTURE_MAX_SIDE = 2048  # образец для проекции — в своём разрешении, но не больше
 
 
-async def _texture_width(texture: bytes) -> float:
-    """Ширина образца в метрах (сколько реального материала на картинке) — DeepSeek по одному образцу."""
+async def _sample_info(texture: bytes) -> tuple[float, str]:
+    """Ширина образца в метрах (сколько реального материала на картинке) и что это за материал — DeepSeek по
+    одному образцу. Название нужно пересчёту кадра: модели говорится, что именно вписать."""
+    fallback = (TEXTURE_WIDTH_DEFAULT, "the new surface material")
     if not DEEPSEEK_API_KEY:
-        return TEXTURE_WIDTH_DEFAULT
+        return fallback
     key = hashlib.sha256(b"texwidth" + texture + llm_model.get().encode()).hexdigest()
     if key in _described:
-        return _described[key]["width_m"]
+        return _described[key]["width_m"], _described[key]["material"]
     try:
         data = json.loads(await _chat(
             [
@@ -1209,12 +1255,13 @@ async def _texture_width(texture: bytes) -> float:
         width = float(data.get("width_m") or 0)
     except Exception as e:  # noqa: BLE001
         log.warning("Ширина образца не оценена (DeepSeek): %s", e)
-        return TEXTURE_WIDTH_DEFAULT
+        return fallback
+    material = " ".join(str(data.get("material") or "").split()) or fallback[1]
     if not 0.02 <= width <= 20:
-        return TEXTURE_WIDTH_DEFAULT
-    log.info("образец: %s, %s элементов поперёк → %.2f м", data.get("material"), data.get("elements_across"), width)
-    _described[key] = {"width_m": width}
-    return width
+        width = TEXTURE_WIDTH_DEFAULT
+    log.info("образец: %s, %s элементов поперёк → %.2f м", material, data.get("elements_across"), width)
+    _described[key] = {"width_m": width, "material": material}
+    return width, material
 
 
 EXR_MAGIC = b"v/1\x01"
@@ -1369,7 +1416,10 @@ async def run_remove(
     )
     # 2511 видит красный контур — зачистка, если он протечёт
     unleak = model == QWEN_EDIT_MODEL
-    return await r.generate(prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native), seed
+    removed = f"{what['object']} was just removed and the area now shows {what['background']}"
+    return await r.generate(
+        prompt, seed, model, "remove", REMOVE_EDGE, unleak=unleak, native=native, harmonize=(removed, True)
+    ), seed
 
 
 def _box_mask(box: list[float], src: Image.Image, core: Image.Image) -> Image.Image | None:
@@ -1715,9 +1765,18 @@ async def run_edit(
     if material and texture:
         # образец — проекцией 1 в 1 (InegoTextureProject); не плоская поверхность — генеративный путь ниже
         surface = await _surface(src, core)
-        width = texture_width or await _texture_width(texture)
+        auto_width, material_name = await _sample_info(texture)
+        width = texture_width or auto_width
         projected = await _project_texture(src, surface, texture, width, pbr)
         if projected is not None:
+            if HARMONIZE_FULL:
+                frame = await harmonize_frame(
+                    Image.open(io.BytesIO(projected)).convert("RGB"), seed + 3,
+                    f"the {material_name} cladding just applied to a surface",
+                )
+                buf = io.BytesIO()
+                frame.save(buf, "JPEG", quality=95)
+                projected = buf.getvalue()
             return projected, seed
         log.info("проекция образца не удалась — материал по образцу через модель")
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
@@ -1809,4 +1868,5 @@ async def run_edit(
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
         relight=relight, texture=tex if model in QWEN21_MODELS else None,
+        harmonize=(f"{subject} was just {'added' if add else 'changed'}", False),
     ), seed
