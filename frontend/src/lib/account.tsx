@@ -7,7 +7,7 @@ import { useAuth } from './auth'
  * а расход за прошлые дни детерминированно генерируется из id пользователя.
  */
 
-export type ModelId = 'klein-4b' | 'klein-9b' | 'qwen-edit-2511' | 'qwen-image-2.1' | 'qwen-image-2.1-turbo'
+export type ModelId = 'klein-4b' | 'klein-9b' | 'qwen-edit-2511' | 'qwen-image-2.1'
 
 export interface Model {
   id: ModelId
@@ -61,30 +61,20 @@ export const MODELS: Model[] = [
   {
     id: 'qwen-image-2.1',
     name: 'Qwen-Image 2.1',
-    tag: '7B · 25 шагов',
-    description: 'Новейшая Qwen (сентябрь 2026), режим качества: живая листва и фактура, Inpainting на полной модели. Лицензия некоммерческая.',
+    tag: '7B · Turbo + базовая',
+    description: 'Новейшая Qwen (сентябрь 2026): быстрый проход Turbo и доводка полной моделью — живая листва и фактура, правки вписываются в кадр. Лицензия некоммерческая.',
     cost: 7,
     speed: 2,
     quality: 5,
     time: '≈ 2 мин',
     badge: 'Новая',
   },
-  {
-    id: 'qwen-image-2.1-turbo',
-    name: 'Qwen-Image 2.1 Turbo',
-    tag: '7B · 8 шагов',
-    description: 'Та же Qwen 2.1 в быстром режиме: рендер и правка за 8 шагов, листва и трава проще. Лицензия некоммерческая.',
-    cost: 5,
-    speed: 3,
-    quality: 4,
-    time: '≈ 55 с',
-  },
 ]
 
 /** В Img to Img модели «только Inpainting» заменяются этой */
 export const IMG2IMG_FALLBACK: ModelId = 'klein-9b'
 
-const ZERO: Record<ModelId, number> = { 'klein-4b': 0, 'klein-9b': 0, 'qwen-edit-2511': 0, 'qwen-image-2.1': 0, 'qwen-image-2.1-turbo': 0 }
+const ZERO: Record<ModelId, number> = { 'klein-4b': 0, 'klein-9b': 0, 'qwen-edit-2511': 0, 'qwen-image-2.1': 0 }
 
 /** Сумма токенов за день по всем моделям. */
 export const dayTotal = (d: UsageDay) => MODELS.reduce((s, m) => s + (d.byModel[m.id] ?? 0), 0)
@@ -163,7 +153,6 @@ function fakeUsage(seed: string): UsageDay[] {
         'klein-9b': renders(6) * 4,
         'qwen-edit-2511': 0,
         'qwen-image-2.1': 0,
-        'qwen-image-2.1-turbo': 0,
       },
     })
   }
@@ -231,6 +220,8 @@ const MODEL_KEY = 'inego.model'
 const readModel = (): ModelId => {
   try {
     const v = localStorage.getItem(MODEL_KEY)
+    // отдельной Turbo больше нет — она часть Qwen-Image 2.1
+    if (v === 'qwen-image-2.1-turbo') return 'qwen-image-2.1'
     if (MODELS.some((m) => m.id === v)) return v as ModelId
   } catch { /* storage недоступен */ }
   return 'klein-4b'

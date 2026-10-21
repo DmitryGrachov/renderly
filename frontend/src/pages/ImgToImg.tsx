@@ -32,9 +32,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const fallback = !!modelById(chosen).inpaintOnly
   const model = fallback ? IMG2IMG_FALLBACK : chosen
   const activeModel = modelById(model)
-  // Qwen-Image-2.1 Turbo: шкалы «сила» нет — со старта от исходника она то копирует черновик, то делает полный
+  // Qwen-Image-2.1: шкалы «сила» нет — со старта от исходника она то копирует черновик, то делает полный
   // рендер в зависимости от сида; рендер всегда с чистого шума (см. backend/app/comfy.py)
-  const fixedStrength = model === 'qwen-image-2.1' || model === 'qwen-image-2.1-turbo'
+  const fixedStrength = model === 'qwen-image-2.1'
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')

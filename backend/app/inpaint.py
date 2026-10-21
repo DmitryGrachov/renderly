@@ -31,7 +31,7 @@ from .comfy import build_workflow as flux_img2img_workflow
 from .comfy import fit_size as _fit16
 from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
-    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
+    QWEN21_MEGAPIXELS, QWEN21_MODEL, QWEN21_MODELS, QWEN21_REFINE, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
     QWEN_EDIT_MODEL, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
@@ -1151,7 +1151,9 @@ async def harmonize_frame(
             prompt = prompt.replace(word, "")
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         try:
-            await _check_model(client, model if flux else QWEN21_TURBO_MODEL)
+            # 2.1: как Img to Img — проход Turbo и доводка базовой (фактура, листва); 2511 и Turbo — только Turbo
+            refine = model == QWEN21_MODEL and QWEN21_REFINE > 0
+            await _check_model(client, model if flux else QWEN21_MODEL if refine else QWEN21_TURBO_MODEL)
             name = await _upload(client, to_png(result.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
             if flux:
                 # klein: картинка — «image 1» (ReferenceLatent), полный шум; совмещение кадра — как у 2.1, иначе
@@ -1164,15 +1166,15 @@ async def harmonize_frame(
                 }
                 wf["save"]["inputs"]["images"] = ["align", 0]
             else:
-                wf = img2img_workflow(name, prompt, seed, None)
+                wf = img2img_workflow(name, prompt, seed, None, refine=refine)
             out = await _run(client, wf)
         except ComfyError as e:
             log.warning("Пересчёт кадра не удался, остаётся правка как есть: %s", e)
             return result
     if "save" not in out:
         return result
-    log.info("кадр пересчитан целиком (%s): %dx%d → %dx%d, вписано: %s", model if flux else QWEN21_TURBO_MODEL,
-             w, h, gw, gh, subject)
+    log.info("кадр пересчитан целиком (%s): %dx%d → %dx%d, вписано: %s",
+             model if flux else "2.1 Turbo + базовая" if refine else "2.1 Turbo", w, h, gw, gh, subject)
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
     if area is None:
         return frame
