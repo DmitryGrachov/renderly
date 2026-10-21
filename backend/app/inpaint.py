@@ -107,11 +107,6 @@ EDIT_SYSTEM = (
     'the colour of the shade>", '
     '"subject": "<3-12 words: the edited element as it is after the edit, e.g. the white plastered walls of the '
     'house, the red car by the kerb>", '
-    '"light_on_subject": "<25-60 words: how the light of this frame falls on the edited element at its spot, judged '
-    'by the real brightness of the surfaces there and of neighbours facing the same way: which of its faces or parts '
-    'are in direct light and how much brighter they are, the slight warm or cool cast the light adds, which are in '
-    'shade and how much darker, where it darkens (under the eaves, in corners, at the ground). Describe only light '
-    'and brightness, never a colour of the element itself: its own colour stays as the user asked>", '
     '"kind": "add" if a new element appears, "change" if the same thing changes material, colour, species or '
     'style, "replace" if it becomes a different kind of object, '
     '"box": [x1, y1, x2, y2] in image 1, x as thousandths of its width and y as thousandths of its height}'
@@ -150,25 +145,7 @@ REFINE_PROMPT = (
     "in image 1."
 )
 REFINE_STEPS = 5  # из TOTAL_STEPS: 4 почти не меняет; 5 лечит полупрозрачность и шлейфы; на 6 уже меняется цвет одежды
-# прогон «переосвещения»: свет правки сводится с кадром отдельной правкой «relight» (как в img2img, где свет
-# рисуется заново). Частичный шум не годится: модель редактирования воспроизводит <image1> и на 6 шагах из 8
-RELIGHT_PROMPT = (
-    "Relight {subject} in image 1 so it looks photographed in the same shot as the rest of the scene: {look}. "
-    "The material keeps its own colour, tone and darkness exactly as in image 1: on lit faces it is the same material "
-    "only brighter with a slight cast of the light, in shade the same material only darker; the light never "
-    "repaints it in another colour. "
-    "Its parts facing the light take the brightness and colour tint of the light falling there, parts facing away or "
-    "in shadow are darker and take the colour of the ambient and sky light, with soft darkening in corners, under "
-    "overhangs and at contacts, cast shadows of the same direction and softness as elsewhere in the photo, "
-    "reflections of the surroundings on glossy surfaces, and the same exposure, white balance, contrast, sharpness "
-    "and texture as the surrounding photo. {subject_cap} keeps its shape, edges, position, material, own colour and "
-    "details; only its lighting changes."
-)
-Q21_RELIGHT_MASK = (
-    " The region to relight is marked white in the mask <image2>; everything outside it stays exactly as in "
-    "<image1>; the mask is only a guide and leaves no trace."
-)
-RELIGHT_BAND = 0.03  # запас вокруг правки (доля её размера): свет ложится и на кромку, шва нет
+RELIGHT_BAND = 0.03  # «изменить» без точного контура: свет исходника — и на кромку вокруг (доля размера правки)
 REFINE_PAD = 0.15  # поле вокруг объекта (доля его размера) — контекст для света и резкости
 # запас вверх для второго прогона (доля высоты объекта): если в первом не было головы, ей должно быть где появиться
 REFINE_HEADROOM = 0.15
@@ -231,7 +208,6 @@ EXACT_EDGE = 0.8  # сглаживание края вклейки по конт
 # после любой правки весь кадр перерисовывается как img2img (Qwen-Image-2.1 Turbo): свет, края, углы, контактные
 # тени и зерно правки сходятся с кадром — без этого правка выглядела вклеенной «как в фотошопе». Мягкость кадра
 # (≈2 Мп) не важна: дальше апскейлер
-HARMONIZE_FULL = True
 # модели называется, что вписать: на общую фразу «всё как есть, сделай согласованно» 2.1 просто повторяла кадр
 HARMONIZE_PROMPT = (
     "Re-render <image1> as one coherent unretouched photograph taken in a single shot. In it, {subject}: keep exactly "
@@ -248,10 +224,6 @@ HARMONIZE_REMOVED = (
     "shadows, colour grading, sharpness, noise and grain as its surroundings, with no trace, outline or smudge. "
     "Everything else in <image1> stays exactly as it is, nothing added, removed or moved."
 )
-# «добавить / заменить»: объект сводится со сценой по свету через Marigold-IID (InegoHarmonize) вместо прогона
-# переосвещения через модель. Выключено: на границе солнца и тени средний свет вокруг объекта — не тот, что падает
-# на него (женщина на дорожке у газона вышла серой и холодной вместо освещённой закатом); прогон модели живее
-ADD_HARMONIZE = False
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -922,11 +894,11 @@ class _Region:
     async def generate(
         self, prompt: str, seed: int, model: str, prefix: str, edge: float, reference: Image.Image | None = None,
         unleak: bool = False, unveil: bool = False, refine: str | None = None, native: bool = False,
-        relight: str | None = None, texture: Image.Image | None = None, harmonize: tuple[str, bool] | None = None,
+        texture: Image.Image | None = None, harmonize: tuple[str, bool] | None = None,
     ) -> bytes:
         """Перерисовка под маской в ComfyUI и вклейка в исходник: JPEG в полном разрешении.
 
-        relight — запрос прогона переосвещения (_relight): свет вклеенной правки сводится с кадром.
+        harmonize — что вписать при пересчёте всего кадра (harmonize_frame) и удаление ли это.
 
         native (Qwen-Image-2.1): маска уходит модели второй картинкой — чёткая ч/б область правки (self.mask:
         выделение + рамка объекта), а не мягкая маска шума.
@@ -974,12 +946,9 @@ class _Region:
         # (тент зонта над окном) _unveil принимал за вуаль и вырезал в нём дыры с окном
         if unveil and not found:
             patch = _unveil(patch, self.crop, self.gen)
-        harmonized = None
         if found:
             obj, shadow = found
-            if ADD_HARMONIZE:
-                harmonized = await _harmonize(patch, self.crop, obj, shadow)
-            patch = harmonized or _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
+            patch = _compose_object(patch, self.crop, obj, shadow, max(1, feather // 2))
             keep = obj
             # _compose_object уже свёл объект и тень с исходником — вклеивается весь кроп
             alpha = Image.new("L", self.crop.size, 255)
@@ -997,14 +966,11 @@ class _Region:
         obj = Image.new("L", self.src.size, 0)
         obj.paste(keep, self.box[:2])
         if self.source_light:
+            # свет исходника на изменённой поверхности — от него и считается цвет после пересчёта кадра
             result = await _relight_source(result, self.src, obj, self.exact)
-        elif relight and harmonized is None and not HARMONIZE_FULL:
-            # (при пересчёте всего кадра свет добавленного объекта сводит он)
-            # до второго прогона: он дорисовывает детали объекта и держит его цвета и свет — уже сведённые
-            result = await _relight(result, obj, relight, seed + 2, model, self.exact)
         if refine and self.room:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
-        if HARMONIZE_FULL and harmonize:
+        if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
             result = await harmonize_frame(result, seed + 3, *harmonize, area=obj)
         buf = io.BytesIO()
@@ -1137,35 +1103,6 @@ async def harmonize_frame(
     return frame
 
 
-async def _harmonize(patch: Image.Image, crop: Image.Image, obj: Image.Image, shadow: Image.Image) -> Image.Image | None:
-    """Добавленный объект, сведённый со сценой по свету (InegoHarmonize: Marigold-IID) — кроп исходника + тень по
-    падению освещённости + объект с оттенком и яркостью света сцены. None — не получилось (сборка _compose_object)."""
-    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
-        names = [
-            await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png")
-            for img in (patch, crop, obj.convert("RGB"), shadow.convert("RGB"))
-        ]
-        wf = {
-            "gen": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
-            "src": {"class_type": "LoadImage", "inputs": {"image": names[1]}},
-            "obj": {"class_type": "LoadImageMask", "inputs": {"image": names[2], "channel": "red"}},
-            "sh": {"class_type": "LoadImageMask", "inputs": {"image": names[3], "channel": "red"}},
-            "harm": {
-                "class_type": "InegoHarmonize",
-                "inputs": {"generated": ["gen", 0], "source": ["src", 0], "object": ["obj", 0], "shadow": ["sh", 0]},
-            },
-            "save": {"class_type": "SaveImage", "inputs": {"images": ["harm", 0], "filename_prefix": "inego/harmonize"}},
-        }
-        try:
-            out = await _run(client, wf)
-        except ComfyError as e:
-            log.warning("Объект не сведён со сценой по свету: %s", e)
-            return None
-    if "save" not in out:
-        return None
-    return Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
-
-
 async def _relight_source(result: Image.Image, src: Image.Image, area: Image.Image, exact: bool) -> Image.Image:
     """Свет исходника на изменённой поверхности (InegoRelight: Marigold-IID) — для «изменить» и материалов.
 
@@ -1199,47 +1136,6 @@ async def _relight_source(result: Image.Image, src: Image.Image, area: Image.Ima
     result = result.copy()
     result.paste(patch, box[:2], m.filter(ImageFilter.GaussianBlur(EXACT_EDGE)))
     log.info("свет исходника на изменённой поверхности: кроп %s", box)
-    return result
-
-
-async def _relight(
-    result: Image.Image, area: Image.Image, prompt: str, seed: int, model: str, exact: bool = False
-) -> Image.Image:
-    """Прогон переосвещения: свет правки сводится с кадром.
-
-    Правку модель рисует отдельно от кадра, и вклеенное выглядит наклейкой: ровно залитая белая стена без солнца и
-    тени, объект в своём свете. В img2img так не бывает — свет рисуется заново по всему кадру. Здесь кроп с правкой
-    уже вклеенной уходит модели ещё раз с правкой «переосвети это как остальной кадр» (свет кадра измерил DeepSeek):
-    форма, материал и цвет остаются, солнце, тень, оттенок и экспозиция сходятся с окружением. На 2.1 — родной
-    режим (маска вторым входом, Turbo), иначе — шум под маской. Вклеивается только правка с узкой кромкой.
-    """
-    bbox = area.getbbox()
-    if not bbox:
-        return result
-    w, h = result.size
-    box = _context_box(bbox, w, h)
-    crop = result.crop(box)
-    band = max(4, round(RELIGHT_BAND * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
-    m = _grow(area.crop(box), band)
-    native = model in QWEN21_MODELS
-    if native:
-        prompt = q21_tags(prompt) + Q21_RELIGHT_MASK
-    gw, gh = fit_size(*crop.size, QWEN21_MEGAPIXELS if native else INPAINT_MEGAPIXELS)
-    log.info("переосвещение %s: кроп %s → %dx%d\n%s", model, box, gw, gh, prompt)
-    mask = m.resize((gw, gh), Image.BILINEAR)
-    if not native:
-        mask = mask.filter(ImageFilter.GaussianBlur(max(1, round(min(gw, gh) * EDIT_EDGE))))
-    async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
-        crop_name = await _upload(client, to_png(crop.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-        mask_name = await _upload(client, to_png(mask.convert("RGB")), f"{uuid.uuid4().hex}.png")
-        out = await _run(client, build_workflow(crop_name, mask_name, gw, gh, prompt, seed, model, "relight", native=native))
-    if "save" not in out:
-        return result
-    patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
-    result = result.copy()
-    # exact (смена материала) — строго по контуру поверхности, кромка не задевает соседей
-    paste = area.crop(box).filter(ImageFilter.GaussianBlur(EXACT_EDGE)) if exact else m.filter(ImageFilter.GaussianBlur(band / 2))
-    result.paste(patch, box[:2], paste)
     return result
 
 
@@ -1318,10 +1214,9 @@ async def _sample_info(texture: bytes) -> tuple[float, str]:
 EXR_MAGIC = b"v/1\x01"
 
 
-def decode_map(data: bytes, color: bool) -> Image.Image:
-    """Карта PBR-набора или образец → 8-битная картинка (не больше TEXTURE_MAX_SIDE). EXR (Poly Haven, Quixel и
-    т.п.): цвет хранится линейно — переводится в sRGB; карты данных (нормали, AO, шероховатость) — значения как
-    есть, 0..1 → 0..255. ValueError — не картинка."""
+def decode_texture(data: bytes) -> Image.Image:
+    """Образец (фото или BaseColor набора) → 8-битная картинка не больше TEXTURE_MAX_SIDE. EXR (Poly Haven, Quixel
+    и т.п.) хранит цвет линейно — переводится в sRGB. ValueError — не картинка."""
     if data[:4] == EXR_MAGIC:
         import tempfile
 
@@ -1337,10 +1232,8 @@ def decode_map(data: bytes, color: bool) -> Image.Image:
                 px = np.asarray(part.pixels, dtype=np.float32)
         if px.ndim == 3 and px.shape[-1] == 4:
             px = px[..., :3]
-        px = np.nan_to_num(px)
-        if color:
-            px = np.clip(px, 0, 1)
-            px = np.where(px <= 0.0031308, px * 12.92, 1.055 * px ** (1 / 2.4) - 0.055)
+        px = np.clip(np.nan_to_num(px), 0, 1)
+        px = np.where(px <= 0.0031308, px * 12.92, 1.055 * px ** (1 / 2.4) - 0.055)
         img = Image.fromarray((np.clip(px, 0, 1) * 255 + 0.5).astype(np.uint8))
     else:
         try:
@@ -1353,25 +1246,19 @@ def decode_map(data: bytes, color: bool) -> Image.Image:
     return img
 
 
-async def _project_texture(
-    src: Image.Image, surface: Image.Image, texture: bytes, width_m: float, pbr: dict | None = None
-) -> bytes | None:
-    """Образец на поверхность проекцией 1 в 1 (InegoTextureProject: MoGe-2 + Marigold-IID) — JPEG кадра или None,
+async def _project_texture(src: Image.Image, surface: Image.Image, texture: bytes, width_m: float) -> Image.Image | None:
+    """Образец на поверхность проекцией 1 в 1 (InegoTextureProject: MoGe-2 + Marigold-IID) — кадр или None,
     если поверхность не плоская или геометрия не найдена. Кроп — с контекстом вокруг поверхности, в разрешении
-    исходника: MoGe-2 нужен окружающий кадр для геометрии, проекции — все пиксели.
-    pbr — карты набора: {"normal": bytes, "ao": bytes, "normal_dx": bool} (рельеф и затенение швов)."""
+    исходника: MoGe-2 нужен окружающий кадр для геометрии, проекции — все пиксели."""
     if not surface.getbbox():
         return None
-    pbr = pbr or {}
     box = _context_box(surface.getbbox(), *src.size)
     crop, m = src.crop(box), surface.crop(box)
-    tex = decode_map(texture, color=True)
-    maps = {k: decode_map(pbr[k], color=False) for k in ("normal", "ao") if pbr.get(k)}
+    tex = decode_texture(texture)
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         names = [
             await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for img in (crop, m.convert("RGB"), tex)
         ]
-        map_names = {k: await _upload(client, to_png(img), f"{uuid.uuid4().hex}.png") for k, img in maps.items()}
         wf = {
             "img": {"class_type": "LoadImage", "inputs": {"image": names[0]}},
             "surf": {"class_type": "LoadImageMask", "inputs": {"image": names[1], "channel": "red"}},
@@ -1384,11 +1271,6 @@ async def _project_texture(
             "save": {"class_type": "SaveImage", "inputs": {"images": ["proj", 0], "filename_prefix": "inego/texture"}},
             "save_m": {"class_type": "SaveImage", "inputs": {"images": ["applied", 0], "filename_prefix": "inego/texmask"}},
         }
-        for k, name in map_names.items():
-            wf[f"map_{k}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
-            wf["proj"]["inputs"][k] = [f"map_{k}", 0]
-        if "normal" in map_names:
-            wf["proj"]["inputs"]["normal_dx"] = bool(pbr.get("normal_dx"))
         try:
             out = await _run(client, wf)
         except ComfyError as e:
@@ -1400,14 +1282,11 @@ async def _project_texture(
     if not applied.point(lambda v: 255 if v > 127 else 0).getbbox():
         return None
     patch = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(crop.size, Image.LANCZOS)
-    log.info("образец спроецирован: кроп %s, ширина образца %.2f м, карты набора: %s", box, width_m,
-             ", ".join(map_names) or "нет")
+    log.info("образец спроецирован: кроп %s, ширина образца %.2f м", box, width_m)
     result = src.copy()
     # нода уже свела край со сглаживанием; вклейка — только по поверхности
     result.paste(patch, box[:2], m.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(EXACT_EDGE)))
-    buf = io.BytesIO()
-    result.save(buf, "JPEG", quality=95)
-    return buf.getvalue()
+    return result
 
 
 def _touches_edge(keep: Image.Image, box: tuple[int, int, int, int], size: tuple[int, int]) -> str:
@@ -1686,7 +1565,6 @@ async def describe_edit(
         "look": "the same light, shadows, colour grading and atmosphere as image 1",
         "kind": "change" if kind == "material" else kind or "add",
         "subject": "the edited element",
-        "light_on_subject": "",
     }
     if not DEEPSEEK_API_KEY:
         return fallback
@@ -1798,7 +1676,7 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
     box: list[float] | None = None, material: bool = False, texture: bytes | None = None,
-    texture_width: float | None = None, pbr: dict | None = None,
+    texture_width: float | None = None,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
 
@@ -1812,23 +1690,20 @@ async def run_edit(
     surface = None
     if material and texture and texture[:4] == EXR_MAGIC:
         # цвет набора в EXR — дальше везде (DeepSeek, модель) как обычная картинка
-        texture = to_png(decode_map(texture, color=True))
+        texture = to_png(decode_texture(texture))
     if material and texture:
         # образец — проекцией 1 в 1 (InegoTextureProject); не плоская поверхность — генеративный путь ниже
         surface = await _surface(src, core)
         auto_width, material_name = await _sample_info(texture)
         width = texture_width or auto_width
-        projected = await _project_texture(src, surface, texture, width, pbr)
+        projected = await _project_texture(src, surface, texture, width)
         if projected is not None:
-            if HARMONIZE_FULL:
-                frame = await harmonize_frame(
-                    Image.open(io.BytesIO(projected)).convert("RGB"), seed + 3,
-                    f"the {material_name} cladding just applied to a surface", area=surface,
-                )
-                buf = io.BytesIO()
-                frame.save(buf, "JPEG", quality=95)
-                projected = buf.getvalue()
-            return projected, seed
+            frame = await harmonize_frame(
+                projected, seed + 3, f"the {material_name} cladding just applied to a surface", area=surface,
+            )
+            buf = io.BytesIO()
+            frame.save(buf, "JPEG", quality=95)
+            return buf.getvalue(), seed
         log.info("проекция образца не удалась — материал по образцу через модель")
     # «изменить»: меняется то, что выделено, — рамка не нужна; «добавить» и «заменить» — объект в своём размере
     # вкладка «Материалы»: запрос — сам материал («дерево — венге»), тип правки задан, рамки нет
@@ -1912,12 +1787,8 @@ async def run_edit(
     refine = REFINE_PROMPT.format(instruction=what["instruction"].rstrip(".")) if add else None
     subject = what.get("subject") or "the edited element"
     subject = subject[:1].lower() + subject[1:]
-    # свет на самом элементе (какая грань на солнце и какого оттенка, какая в тени) — с ним переосвещение заметное,
-    # с одним общим описанием кадра модель почти ничего не меняет
-    light = what.get("light_on_subject") or what["look"]
-    relight = RELIGHT_PROMPT.format(subject=subject, subject_cap=subject[:1].upper() + subject[1:], look=light)
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
-        relight=relight, texture=tex if model in QWEN21_MODELS else None,
+        texture=tex if model in QWEN21_MODELS else None,
         harmonize=(f"{subject} was just {'added' if add else 'changed'}", False),
     ), seed

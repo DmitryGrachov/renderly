@@ -121,7 +121,7 @@ def _parse_box(raw: str | None) -> list[float] | None:
     return v
 
 
-# карта набора 4K в EXR весит 25-30 МБ
+# BaseColor 4K в EXR весит 25-30 МБ
 TEXTURE_MAX_BYTES = 64 * 2**20
 
 @app.post("/api/inpaint/plan")
@@ -157,10 +157,6 @@ async def inpaint(
     texture: UploadFile | None = File(None),
     # сколько сантиметров реального материала на образце (поперёк); пусто — оценит DeepSeek
     texture_width: float | None = Form(None, gt=0, le=5000),
-    # карты PBR-набора к образцу (цвет — texture): нормали (OpenGL / DirectX) и AO
-    texture_normal: UploadFile | None = File(None),
-    texture_ao: UploadFile | None = File(None),
-    normal_format: str = Form("gl"),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
@@ -179,21 +175,13 @@ async def inpaint(
         raise HTTPException(400, "Опишите, что должно появиться в области")
     material = mode == "material"
     texture_bytes = await texture.read() if texture is not None and material else None
-    pbr: dict = {"normal_dx": normal_format == "dx"}
-    for key, upload in (("normal", texture_normal), ("ao", texture_ao)):
-        if upload is not None and material:
-            pbr[key] = await upload.read()
-    for name, data in (("Цвет", texture_bytes), ("Нормали", pbr.get("normal")), ("AO", pbr.get("ao"))):
-        if not data:
-            continue
-        if len(data) > TEXTURE_MAX_BYTES:
-            raise HTTPException(400, f"{name}: файл больше {TEXTURE_MAX_BYTES // 2**20} МБ")
+    if texture_bytes:
+        if len(texture_bytes) > TEXTURE_MAX_BYTES:
+            raise HTTPException(400, f"Текстура больше {TEXTURE_MAX_BYTES // 2**20} МБ")
         try:
-            inpainting.decode_map(data, color=name == "Цвет")
+            inpainting.decode_texture(texture_bytes)
         except Exception as e:  # noqa: BLE001 — не картинка
-            raise HTTPException(400, f"{name}: нужен файл изображения (JPG, PNG, WebP, EXR)") from e
-    if (pbr.get("normal") or pbr.get("ao")) and not texture_bytes:
-        raise HTTPException(400, "Добавьте цвет материала (BaseColor) — карты нормалей и AO кладутся вместе с ним")
+            raise HTTPException(400, "Текстура: нужен файл изображения (JPG, PNG, WebP, EXR)") from e
     if mode == "material" and not (prompt and prompt.strip()) and not texture_bytes:
         raise HTTPException(400, "Опишите материал или добавьте текстуру")
 
@@ -202,7 +190,7 @@ async def inpaint(
             result, used_seed = await inpainting.run_edit(
                 await image.read(), await mask.read(), prompt or "", seed, model, _parse_box(box),
                 material=material, texture=texture_bytes or None,
-                texture_width=texture_width / 100 if texture_width else None, pbr=pbr,
+                texture_width=texture_width / 100 if texture_width else None,
             )
         else:
             result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)

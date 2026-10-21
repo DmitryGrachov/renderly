@@ -930,21 +930,10 @@ PLANE_TOL_DEG = 14
 SHADE_SMOOTH = 0.006
 # предфильтр образца — доля шага выборки: 1.0 — без муара, но вдвое мягче; 0.6 — резко, муара на кладке нет
 TEX_PREFILTER = 0.6
-# PBR: степень AO; пределы поправки рельефа от карты нормалей; группа «по оси» для оценки солнца — нормаль ближе
-# этого угла
-AO_POW = 1.0
-RELIEF_MIN, RELIEF_MAX = 0.45, 1.7
-SUN_ALIGN_DEG = 20
-AMB_MIN = 0.3
 # переосвещение правки по исходнику (InegoRelight): сглаживание карт освещённости (доля высоты поверхности)
 # и пределы поправки света
 RELIGHT_SMOOTH = 0.01
 RELIGHT_MIN, RELIGHT_MAX = 0.15, 6.0
-# сведение добавленного объекта (InegoHarmonize): оттенок света — полностью в этих пределах по каналу, яркость —
-# в степени HARM_GAIN_POW (у объекта свои грани к свету) и в пределах
-HARM_TINT_MIN, HARM_TINT_MAX = 0.8, 1.25
-HARM_GAIN_POW = 0.5
-HARM_GAIN_MIN, HARM_GAIN_MAX = 0.7, 1.4
 ASSIGN_PLANE_REL = 0.03  # «на плоскости грани»: отклонение точки меньше этой доли расстояния до камеры
 # манхэттенская система (_manhattan_frame): отрезок кадра — не короче этой доли кадра; «по оси» — отклонение
 # меньше этого угла; итераций; вес нормалей MoGe против отрезков
@@ -1023,9 +1012,6 @@ class InegoTextureProject:
          повторяется с шагом tex_width_m, мелкость — уменьшенной копией образца (без муара);
       3) свет — с исходника: Marigold-IID раскладывает кадр на альбедо × освещённость + остаток; новый цвет =
          образец (как альбедо, общий множитель — по разложению самого образца) × освещённость + остаток.
-    PBR-набор (normal / ao поданы): AO (нормированный по светлым местам) умножается на освещённость; карта
-    нормалей даёт рельеф: каждый пиксель освещён солнцем сцены (_sun_light) по своей нормали, поправка — отношение
-    к освещённости плоской грани.
     Не плоская поверхность или грани не найдены — пустая маска на выходе (бэкенд берёт генеративный путь).
     """
 
@@ -1037,12 +1023,7 @@ class InegoTextureProject:
                 "surface": ("MASK",),  # точный контур поверхности (InegoSurfaceMask)
                 "texture": ("IMAGE",),  # образец
                 "tex_width_m": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 50.0, "step": 0.01}),
-            },
-            "optional": {
-                "normal": ("IMAGE",),  # карта нормалей PBR-набора (касательное пространство)
-                "ao": ("IMAGE",),  # ambient occlusion PBR-набора
-                "normal_dx": ("BOOLEAN", {"default": False}),  # DirectX: зелёный канал перевёрнут относительно OpenGL
-            },
+            }
         }
 
     RETURN_TYPES = ("IMAGE", "MASK")
@@ -1050,7 +1031,7 @@ class InegoTextureProject:
     FUNCTION = "run"
     CATEGORY = "inego"
 
-    def run(self, image, surface, texture, tex_width_m, normal=None, ao=None, normal_dx=False):
+    def run(self, image, surface, texture, tex_width_m):
         import cv2
 
         src = image[0][..., :3].float().cpu().numpy()
@@ -1097,7 +1078,6 @@ class InegoTextureProject:
         faces = [owner == i for i in range(len(planes))]
         up = axes[0]
         UV = np.zeros((H, W, 2), np.float32)
-        frames = []  # (u, v, n) каждой грани — касательное пространство для карты нормалей
         for i, (nf, off) in enumerate(planes):
             if abs(nf @ up) > 0.7:
                 # пол, терраса: укладка вдоль осей здания, «вверх» образца — от камеры вглубь
@@ -1111,7 +1091,6 @@ class InegoTextureProject:
             u = u / (np.linalg.norm(u) + 1e-6)
             if u[0] < 0:
                 u = -u
-            frames.append((u.astype(np.float32), (v / (np.linalg.norm(v) + 1e-6)).astype(np.float32), nf))
             sel = owner == i
             den = rays[sel] @ nf
             t = off / np.where(np.abs(den) < 1e-6, 1e-6, den)
@@ -1141,7 +1120,7 @@ class InegoTextureProject:
         gx = np.hypot(np.gradient(UV[..., 0], axis=1), np.gradient(UV[..., 1], axis=0))
 
         def sample(img: np.ndarray) -> np.ndarray:
-            """Карта набора на гранях (цвет, нормали, AO — одной разверткой; размер карты может отличаться)."""
+            """Образец на гранях: повтор с шагом tex_width_m, мелкость — уменьшенной копией (по грани)."""
             out_ = np.zeros((H, W, img.shape[2]), np.float32)
             ih, iw = img.shape[:2]
             scale = iw / tw
@@ -1168,7 +1147,6 @@ class InegoTextureProject:
         # 4) свет исходника
         iid = _decompose((np.clip(src, 0, 1) * 255).astype(np.uint8))
         alb, shd, rsd = iid[0], iid[1], iid[2]
-        shd_raw = shd.copy()
         sig = max(1.0, SHADE_SMOOTH * np.ptp(np.nonzero(S)[0]))
         for i in range(len(faces)):
             fm = (owner == i).astype(np.float32)
@@ -1181,32 +1159,9 @@ class InegoTextureProject:
         # (своя шкала) выходил в разы темнее. Рисунок не меняется — только общий множитель
         t_alb = float(_decompose((np.clip(tex, 0, 1) * 255).astype(np.uint8))[0].mean())
         k = t_alb / max(1e-4, float(_to_lin(tex).mean()))
-        light = np.ones((H, W, 1), np.float32)
-        if ao is not None:
-            # AO — данные (линейные), затемнение швов и углублений при любом свете
-            # нормировка по светлым местам: плоская часть материала = 1, темнеют только швы и углубления (и карта
-            # высоты, поданная вместо AO, не темнит всё целиком)
-            ao_src = ao[0][..., :3].float().cpu().numpy().mean(-1, keepdims=True)
-            ao_src = np.clip(ao_src / max(1e-3, float(np.percentile(ao_src, 95))), 0, 1)
-            light *= sample(ao_src) ** AO_POW
-        if normal is not None:
-            nm = sample(normal[0][..., :3].float().cpu().numpy()) * 2 - 1
-            if normal_dx:
-                nm[..., 1] = -nm[..., 1]
-            L, amb, sun = _sun_light(N, shd_raw, axes)
-            relief = np.ones((H, W), np.float32)
-            for i, (u, v, nf) in enumerate(frames):
-                sel = owner == i
-                n_pix = nm[sel, 0:1] * u + nm[sel, 1:2] * v + nm[sel, 2:3] * nf
-                n_pix /= np.linalg.norm(n_pix, axis=1, keepdims=True) + 1e-6
-                flat = amb + sun * max(0.0, float(nf @ L))
-                relief[sel] = np.clip((amb + sun * np.clip(n_pix @ L, 0, None)) / (flat + 1e-4), RELIEF_MIN, RELIEF_MAX)
-            light *= relief[..., None]
-        out = _to_srgb(cal * (_to_lin(proj) * k * shd * light + rsd))
-        log.info("INEGO texture: %d граней, образец %.2f м, калибровка %.2f, альбедо образца ×%.2f%s%s", len(faces),
-                 tex_width_m, cal, k, ", AO" if ao is not None else "", ", нормали" if normal is not None else "")
-
-        out = _match_grain(out, src, S)
+        out = _to_srgb(cal * (_to_lin(proj) * k * shd + rsd))
+        log.info("INEGO texture: %d граней, образец %.2f м, калибровка %.2f, альбедо образца ×%.2f", len(faces),
+                 tex_width_m, cal, k)
 
         alpha = ndimage.gaussian_filter(S.astype(np.float32), 0.8)[..., None]
         res = src * (1 - alpha) + out * alpha
@@ -1271,95 +1226,6 @@ class InegoRelight:
         alpha = ndimage.gaussian_filter(fm, 0.8)[..., None]
         res = gen * (1 - alpha) + out * alpha
         return (torch.from_numpy(res.astype(np.float32))[None],)
-
-
-class InegoHarmonize:
-    """Сборка добавленного объекта с исходником по свету (Inpainting «добавить / заменить»): кроп исходника +
-    тень + объект из генерации, сведённый по оттенку и яркости со светом сцены.
-
-    Модель рисует объект в своём свете — теплее или холоднее сцены, ярче или темнее, — и он выглядит вклеенным.
-    Marigold-IID раскладывает исходник и генерацию на альбедо × освещённость:
-      - объект: свет сцены вокруг него (кольцо по исходнику) против света, в котором его нарисовала модель
-        (освещённость генерации на объекте). Оттенок света сводится полностью, яркость — частично (HARM_GAIN_POW):
-        у объекта свои грани, повёрнутые к свету иначе, чем земля и стена рядом;
-      - тень: там, где освещённость генерации ниже исходной, — затемнение исходника на это отношение. Трава и
-        плитка под тенью остаются пикселями фото (раньше тень бралась по яркости, и в неё попадало всё, что модель
-        перекрасила на газоне).
-    Край объекта — как в _compose_object бэкенда: по чуть сжатой маске, без тёмного ореола фона генерации.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "generated": ("IMAGE",),  # кроп генерации
-                "source": ("IMAGE",),  # тот же кроп исходника
-                "object": ("MASK",),
-                "shadow": ("MASK",),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "run"
-    CATEGORY = "inego"
-
-    def run(self, generated, source, object, shadow):  # noqa: A002 — имя входа ноды
-        g = generated[0][..., :3].float().cpu().numpy()
-        o = source[0][..., :3].float().cpu().numpy()
-        H, W = o.shape[:2]
-
-        def fit(mk):
-            mk = mk[0].float()[None, None]
-            if mk.shape[-2:] != (H, W):
-                mk = F.interpolate(mk, size=(H, W), mode="bilinear", align_corners=False)
-            return mk[0, 0].numpy() > 0.5
-
-        if g.shape != o.shape:
-            return (generated,)
-        m, sh = fit(object), fit(shadow)
-        if m.sum() < 64:
-            return (source,)
-        ys, xs = np.nonzero(m)
-        size = max(np.ptp(ys) + 1, np.ptp(xs) + 1)
-        _free_vram()
-        d_o = _decompose((np.clip(o, 0, 1) * 255).astype(np.uint8))
-        d_g = _decompose((np.clip(g, 0, 1) * 255).astype(np.uint8))
-
-        def calib(img, d, region):
-            return float(np.median((_to_lin(img)[region].mean(1) + 1e-4) / ((d[0] * d[1] + d[2])[region].mean(1) + 1e-4)))
-
-        everywhere = np.ones_like(m)
-        cal_o, cal_g = calib(o, d_o, everywhere), calib(g, d_g, everywhere)
-        shd_o, shd_g = cal_o * d_o[1], cal_g * d_g[1]
-
-        # тень: отношение гладких освещённостей генерации и исходника (только темнее), вес — по области тени
-        s_lum = max(2.0, size * 0.012)
-        lo = ndimage.gaussian_filter(shd_o.mean(-1), s_lum)
-        lg = ndimage.gaussian_filter(shd_g.mean(-1), s_lum)
-        ratio = np.clip((lg + 1e-4) / (lo + 1e-4), 0.2, 1.0)
-        wgt = np.clip(ndimage.gaussian_filter(sh.astype(np.float32), max(3.0, size * 0.04)) * 1.6, 0, 1)
-        out = _to_lin(o) * (1 - wgt * (1 - ratio))[..., None]
-
-        # объект: свет сцены вокруг против света, в котором он нарисован
-        core = ndimage.binary_erosion(m, iterations=max(1, round(size * 0.02)))
-        if core.sum() < 32:
-            core = m
-        ring = ndimage.binary_dilation(m, iterations=max(4, round(size * 0.15))) & ~ndimage.binary_dilation(
-            m, iterations=max(2, round(size * 0.03))) & ~ndimage.binary_dilation(sh, iterations=2)
-        lin_g = _to_lin(g)
-        if ring.sum() > 64:
-            scene = np.median(shd_o[ring], 0)
-            drawn = np.median(shd_g[core], 0)
-            lum = np.array([0.2126, 0.7152, 0.0722], np.float32)
-            tint = np.clip((scene / (scene @ lum + 1e-4)) / (drawn / (drawn @ lum + 1e-4) + 1e-4), HARM_TINT_MIN, HARM_TINT_MAX)
-            gain = float(np.clip(((scene @ lum) / (drawn @ lum + 1e-4)) ** HARM_GAIN_POW, HARM_GAIN_MIN, HARM_GAIN_MAX))
-            lin_g = lin_g * (tint * gain)[None, None, :]
-            log.info("INEGO harmonize: оттенок света ×%s, яркость ×%.2f", np.round(tint, 2), gain)
-
-        # край — с чуть сжатой маски: пиксели фона из генерации вокруг контура (тёмный ореол) не попадают
-        a = ndimage.gaussian_filter(ndimage.binary_erosion(m, iterations=1).astype(np.float32), max(0.8, size * 0.0015))
-        out = out * (1 - a[..., None]) + lin_g * a[..., None]
-        return (torch.from_numpy(_to_srgb(out).astype(np.float32))[None],)
 
 
 def _segments(gray: np.ndarray, min_len: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1542,87 +1408,8 @@ def _manhattan_faces(A: np.ndarray, P: np.ndarray, N: np.ndarray, valid: np.ndar
     return owner, out
 
 
-def _sun_light(N: np.ndarray, shd: np.ndarray, A: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """Направление солнца и доли рассеянного и прямого света — по освещённости Marigold на поверхностях кадра,
-    повёрнутых по осям здания (земля, стены двух направлений): у каждой такой группы точная нормаль, и её средняя
-    освещённость ≈ рассеянный + прямой·max(0, n·L). Направление — азимут и высота в осях здания; подбор с
-    нескольких стартов и слабым притяжением к высоте 40° (групп бывает две-три — задача на грани
-    недоопределённости). Групп меньше двух — свет сверху-сбоку по умолчанию."""
-    from scipy.optimize import least_squares
-
-    fin = np.isfinite(N).all(-1)
-    Nn = np.where(fin[..., None], N, 0)
-    Nn = Nn / (np.linalg.norm(Nn, axis=-1, keepdims=True) + 1e-6)
-    lum = shd.mean(-1)
-    groups = []
-    for axis in range(3):
-        for sg in (-1, 1):
-            n = sg * A[axis]
-            sel = fin & (Nn @ n > np.cos(np.radians(SUN_ALIGN_DEG)))
-            if sel.mean() > 0.01:
-                groups.append((n, float(np.median(lum[sel])), float(sel.mean())))
-    up, h1, h2 = A[0], A[1], A[2]
-
-    def direction(az, el):
-        return np.cos(el) * (np.cos(az) * h1 + np.sin(az) * h2) + np.sin(el) * up
-
-    if len(groups) < 2:
-        L = direction(np.radians(225), np.radians(40))
-        log.info("INEGO texture: солнце по умолчанию (групп по осям %d)", len(groups))
-        return L.astype(np.float32), 0.45, 0.55
-    ns = np.stack([g[0] for g in groups])
-    ss = np.array([g[1] for g in groups])
-    ws = np.sqrt(np.array([g[2] for g in groups]))
-
-    def fun(x):
-        az, el, a, b = x
-        L = direction(az, el)
-        return np.concatenate([ws * (a + b * np.clip(ns @ L, 0, None) - ss), [0.05 * (el - np.radians(40))]])
-
-    best = None
-    for az0 in np.radians(np.arange(0, 360, 45)):
-        for el0 in np.radians([20, 45, 70]):
-            r = least_squares(fun, [az0, el0, ss.min() * 0.8, ss.max()], bounds=(
-                [-np.inf, np.radians(2), 0, 0], [np.inf, np.radians(89), np.inf, np.inf]))
-            if best is None or r.cost < best.cost:
-                best = r
-    az, el, a, b = best.x
-    L = direction(az, el)
-    # небо светит всегда: доля рассеянного a / (a + b) не ниже AMB_MIN (иначе теневая грань для рельефа — чёрная)
-    a = max(a, AMB_MIN / (1 - AMB_MIN) * b)
-    tot = a + b + 1e-6
-    log.info("INEGO texture: солнце — высота %.0f°, направление %s, рассеянный свет %.0f%% (групп по осям %d)",
-             np.degrees(el), np.round(L, 2), 100 * a / tot, len(groups))
-    return L.astype(np.float32), float(a / tot), float(b / tot)
-
-
-def _match_grain(out: np.ndarray, src: np.ndarray, S: np.ndarray) -> np.ndarray:
-    """Зерно сенсора как на фото: на подставленной текстуре его нет, и она выглядела «чистой CG» на фоне
-    шумного кадра. Уровень — по мелкой составляющей исходника на соседних гладких местах (MAD), добавляется
-    недостающая до него доля, в основном по яркости."""
-    def hf_std(img, m):
-        hf = img - ndimage.gaussian_filter(img, (1.0, 1.0, 0))
-        v = hf[m]
-        return 1.4826 * np.median(np.abs(v - np.median(v, 0)), 0) if len(v) else np.zeros(3)
-
-    ring = ndimage.binary_dilation(S, iterations=12) & ~ndimage.binary_dilation(S, iterations=3)
-    want = hf_std(src, ring) if ring.sum() > 500 else hf_std(src, S)
-    have = hf_std(out, S)
-    add = np.sqrt(np.clip(want ** 2 - have ** 2, 0, None))
-    if add.max() < 1 / 255:
-        return out
-    rng = np.random.default_rng(0)
-    lum = rng.standard_normal(out.shape[:2]).astype(np.float32)
-    chroma = rng.standard_normal(out.shape).astype(np.float32)
-    noise = ndimage.gaussian_filter(0.85 * lum[..., None] + 0.35 * chroma, (0.6, 0.6, 0))
-    noise /= noise.std() + 1e-6
-    log.info("INEGO texture: зерно +%s", np.round(add * 255, 1))
-    return np.clip(out + noise * add, 0, 1)
-
-
-NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight, "InegoHarmonize": InegoHarmonize}
+NODE_CLASS_MAPPINGS = {"InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "InegoHarmonize": "INEGO Harmonize (added object: light tint, exposure and shadow from Marigold-IID)",
     "InegoRelight": "INEGO Relight (source lighting onto an edited surface, Marigold-IID)",
     "InegoTextureProject": "INEGO Texture Project (sample texture 1:1 onto planar faces, MoGe-2 + Marigold-IID)",
     "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",
