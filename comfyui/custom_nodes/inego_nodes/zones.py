@@ -791,28 +791,66 @@ def _lab(rgb) -> np.ndarray:
 VECTOR_MERGE_DE = 14.0  # соседние цвета здания ближе этого — один материал (оттенок той же заливки на свету и в тени)
 
 
-def _vector_building(schema: np.ndarray, area: np.ndarray):
-    """Материалы здания — цвета вектора в здании (где здание — решает сценовая модель по фото): слой на цвет,
-    края — полигоны VTracer. Соседние почти одинаковые цвета сливаются (граф смежности областей: оттенок одной
-    заливки), несоседние одинаковые — и так один цвет. [подпись, маска, вид, цвет]."""
+SHADE_DC = 6.0  # соседние куски одной ориентации с цветностью (a*, b*) ближе этого …
+SHADE_DL = 35.0  # … и яркостью ближе этого — один материал на свету и в тени (тень меняет яркость, не оттенок)
+SHADE_MIN_C = 10.0  # правило тени — только для цветных (цветность не меньше этого)
+
+
+def _orientation(normals: np.ndarray) -> np.ndarray:
+    """Ориентация поверхности по нормалям MoGe: 0 — вертикальная (стены), 1 — наклонная (скаты), 2 — горизонтальная
+    (земля, плоская кровля), -1 — неизвестно. Вертикаль кадра — ось y камеры (архитектурные кадры почти без завала)."""
+    n = np.where(np.isfinite(normals), normals, 0)
+    n = n / (np.linalg.norm(n, axis=-1, keepdims=True) + 1e-6)
+    c = np.abs(n[..., 1])
+    o = np.where(c > 0.9, 2, np.where(c > 0.35, 1, 0))
+    o[~np.isfinite(normals).all(-1)] = -1
+    return o
+
+
+def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray | None = None):
+    """Материалы здания — цвета вектора в здании (где здание — решает сценовая модель по фото), края — полигоны
+    VTracer. Логика материала, а не только цвета:
+      - один цвет на поверхностях разной ориентации — разные материалы (тёмная полоса цоколя внизу и тёмный скат
+        крыши почти одного цвета, но цоколь вертикальный, а крыша наклонная);
+      - соседние куски одной ориентации с одним оттенком и разной яркостью — один материал на свету и в тени
+        (освещённый и затенённый скаты крыши).
+    [подпись, маска, вид, цвет]."""
     H, W = area.shape
     vid, _, _, vz = _vector_zones(schema)
-    items = []
+    orient = _orientation(normals) if normals is not None else np.zeros((H, W), np.int32)
+    items = []  # [маска, цвет, площадь, ориентация]
     for z in vz:
-        m = (vid == z["id"]) & area
-        if m.sum() >= VECTOR_MIN * H * W:
-            items.append([m, z["color"], int(m.sum())])
+        layer = (vid == z["id"]) & area
+        if layer.sum() < VECTOR_MIN * H * W:
+            continue
+        lab, n = ndimage.label(layer)
+        by_o: dict[int, np.ndarray] = {}
+        for k in range(1, n + 1):
+            comp = lab == k
+            ov = orient[comp]
+            ov = ov[ov >= 0]
+            o = int(np.bincount(ov).argmax()) if ov.size else 0
+            by_o[o] = by_o.get(o, np.zeros((H, W), bool)) | comp
+        for o, m in by_o.items():
+            if m.sum() >= VECTOR_MIN * H * W:
+                items.append([m, z["color"], int(m.sum()), o])
+    lab_of = lambda c: _lab([int(c[k:k + 2], 16) for k in (1, 3, 5)])  # noqa: E731
     merged = True
     while merged:
         merged = False
         for i in range(len(items)):
             for j in range(len(items)):
-                if i == j:
+                if i == j or items[i][3] != items[j][3]:
                     continue
                 a, b = items[i], items[j]
-                de = np.linalg.norm(_lab([int(a[1][k:k + 2], 16) for k in (1, 3, 5)])
-                                    - _lab([int(b[1][k:k + 2], 16) for k in (1, 3, 5)]))
-                if de < VECTOR_MERGE_DE and (ndimage.binary_dilation(a[0], iterations=2) & b[0]).sum() > 20:
+                la, lb = lab_of(a[1]), lab_of(b[1])
+                close = np.linalg.norm(la - lb) < VECTOR_MERGE_DE
+                # у почти серых нет оттенка — они различаются только яркостью (светлое стекло и тёмные рамы),
+                # правило тени — только для цветных
+                chroma = min(np.linalg.norm(la[1:]), np.linalg.norm(lb[1:]))
+                shade = (chroma >= SHADE_MIN_C and np.linalg.norm(la[1:] - lb[1:]) < SHADE_DC
+                         and abs(la[0] - lb[0]) < SHADE_DL)
+                if (close or shade) and (ndimage.binary_dilation(a[0], iterations=2) & b[0]).sum() > 20:
                     keep, drop = (i, j) if a[2] >= b[2] else (j, i)
                     items[keep][0] = items[keep][0] | items[drop][0]
                     items[keep][2] += items[drop][2]
@@ -1021,7 +1059,7 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
             if z[0] in ("Небо",) or z[2] == "veg":
                 open_mask |= z[1]
         area = (dil if dil is not None else bmask) & ~open_mask
-        bzones = _vector_building(schema, area)
+        bzones = _vector_building(schema, area, geo[1])
         exact = {z[0] for z in bzones}
         zones += bzones
         parts = []

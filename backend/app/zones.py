@@ -37,10 +37,11 @@ def _png_url(arr: np.ndarray) -> str:
 # как нарисованы). Натуральные цвета модель держит стабильно (камень и штукатурка — разные), а условные цвета
 # Material ID — нет: то сливала материалы, то красила всё одним цветом
 SCHEMA_PROMPT = (
-    "Redraw image 1 as a clean flat vector illustration of the same scene, in its natural colours: every surface "
-    "and material is one solid flat fill of its own real colour, with no texture, no brick or stone pattern, no "
-    "reflections, no shading, no shadows, no cast shadows and no gradients: the sunlit and the shaded sides of one "
-    "material are exactly the same colour. Different materials keep clearly different colours "
+    "Redraw image 1 as a clean flat vector illustration of the same scene that works like the unlit base-colour "
+    "(albedo) pass of a 3D render: there is no lighting at all, so every material is one solid flat fill of its own "
+    "real colour everywhere it appears: both roof slopes, walls in sun and in shade, sides facing away all have "
+    "exactly the same colour as the rest of that material. No texture, no brick or stone pattern, no reflections, "
+    "no shading, no shadows, no highlights and no gradients. Different materials keep clearly different colours "
     "(stone cladding, plaster, dark panels, window frames, glass, roofing, paving, lawn, trees and sky each their "
     "own flat colour); glass is a flat solid tint without reflections. Keep every edge, window, frame, door, panel, "
     "balcony, railing and building exactly in place, same camera and framing, crisp straight edges."
