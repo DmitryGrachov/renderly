@@ -1,7 +1,7 @@
 """Карта зон кадра (вкладка Render pass): нод InegoZoneMap в ComfyUI (см. comfyui/custom_nodes/inego_nodes/zones.py).
 
-Ответ — карта зон PNG (значение пикселя — id зоны, 0 — без зоны), альфа растительности PNG (мягкие края веток)
-и список зон {id, label, kind, group}: kind — scene | veg | part | finish, group — буква отделки («А» — весь камень).
+Ответ — карта зон PNG (значение пикселя — id зоны, 0 — без зоны), альфа растительности PNG (мягкие края веток),
+id растительности под альфой PNG и список зон {id, label, kind, group}: kind — scene | veg | part.
 """
 
 import asyncio
@@ -59,6 +59,7 @@ async def build_zones(image: bytes) -> dict:
                     "height": src.height,
                     "map": "data:image/png;base64," + base64.b64encode(files[0]).decode(),
                     "alpha": "data:image/png;base64," + base64.b64encode(files[1]).decode(),
+                    "veg": "data:image/png;base64," + base64.b64encode(files[2]).decode(),
                     "zones": zones,
                 }
         raise ComfyError("ComfyUI не ответил вовремя")

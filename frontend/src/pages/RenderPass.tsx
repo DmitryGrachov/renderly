@@ -9,8 +9,8 @@ const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
 const SECTIONS: { kinds: ZoneKind[]; title: string }[] = [
   { kinds: ['part'], title: 'Здание' },
-  { kinds: ['finish'], title: 'Отделка стен' },
-  { kinds: ['scene', 'veg'], title: 'Окружение' },
+  { kinds: ['veg'], title: 'Растительность' },
+  { kinds: ['scene'], title: 'Окружение' },
 ]
 
 export function RenderPass() {
@@ -85,17 +85,23 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null)
 
   const byId = useMemo(() => new Map((map?.zones ?? []).map((z) => [z.id, z])), [map])
+  const isVeg = useMemo(() => {
+    const v = new Uint8Array(256)
+    for (const z of map?.zones ?? []) if (z.kind === 'veg') v[z.id] = 1
+    return v
+  }, [map])
   const colors = useMemo(() => {
     const c = new Uint8Array(256 * 3)
     for (const z of map?.zones ?? []) c.set(zoneColor(z), z.id * 3)
     return c
   }, [map])
 
-  // перерисовка оверлея: все зоны полупрозрачно, наведённая и выбранные — ярче, их край — белым
+  // перерисовка оверлея: все зоны полупрозрачно, наведённая и выбранные — ярче, их край — белым;
+  // растительность — по мягкой альфе поверх (ветки, а не пятно вместе с небом между ними)
   useEffect(() => {
     const cv = canvas.current
     if (!cv || !map) return
-    const { width: w, height: h, ids } = map
+    const { width: w, height: h, ids, alpha, veg } = map
     cv.width = w
     cv.height = h
     const ctx = cv.getContext('2d')!
@@ -103,8 +109,23 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
     const px = img.data
     const base = showAll ? 105 : 0
     for (let i = 0; i < ids.length; i++) {
+      const v = veg[i]
+      if (v && alpha[i] > 3) {
+        const k = alpha[i] / 255
+        const a = (v === hover || selected.has(v) ? 215 : base) * k
+        const id0 = isVeg[ids[i]] ? 0 : ids[i]
+        const under = id0 && (showAll || id0 === hover || selected.has(id0))
+        const o = i * 4
+        const ua = under ? (id0 === hover || selected.has(id0) ? 185 : base) : 0
+        const t = a / Math.max(1, Math.max(a, ua))
+        for (let c = 0; c < 3; c++) {
+          px[o + c] = under ? colors[id0 * 3 + c] * (1 - k) + colors[v * 3 + c] * k : colors[v * 3 + c]
+        }
+        px[o + 3] = Math.max(a, ua * (1 - k * t))
+        continue
+      }
       const id = ids[i]
-      if (!id) continue
+      if (!id || isVeg[id]) continue
       const on = id === hover || selected.has(id)
       const a = on ? 185 : base
       if (!a) continue
@@ -125,7 +146,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
       }
     }
     ctx.putImageData(img, 0, 0)
-  }, [map, colors, hover, selected, showAll])
+  }, [map, colors, isVeg, hover, selected, showAll])
 
   const idAt = (e: React.MouseEvent) => {
     if (!map) return 0
@@ -133,7 +154,10 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
     const x = Math.floor(((e.clientX - r.left) / r.width) * map.width)
     const y = Math.floor(((e.clientY - r.top) / r.height) * map.height)
     if (x < 0 || y < 0 || x >= map.width || y >= map.height) return 0
-    return map.ids[y * map.width + x]
+    const p = y * map.width + x
+    // под курсором ветка (альфа > 0.5) — дерево; небо между ветками — небо
+    if (map.veg[p] && map.alpha[p] > 127) return map.veg[p]
+    return isVeg[map.ids[p]] ? 0 : map.ids[p]
   }
 
   const toggle = (ids: number[]) =>

@@ -4,16 +4,18 @@
   1. сцена — EoMT-L 1280 (ADE20K panoptic): небо, газон, дорога, тротуар, деревья, кусты, машины, люди, здание.
      Лучшая из сравнённых (OneFormer, Mask2Former): только она на клей-рендере отделила дом от фона;
   2. части здания — детекторы по тексту: Grounding DINO base (окна, двери, ворота, крыша, балкон — рамки точнее всех)
-     и OWLv2 (колонны, водостоки, трубы, ограждения — их Grounding DINO не видит); ложные — по форме и пересечениям;
-  3. края частей — SAM 2.1 по рамкам;
-  4. стены = здание − части; грани — по осям здания (MoGe-2 + линии кадра, как в InegoTextureProject),
-     горизонтальные плоскости — «Покрытие»; внутри — куски отделки (SAM по сетке точек, однородные первыми),
-     одинаковая отделка на разных гранях — одна группа («Отделка А» — весь камень, «Отделка Б» — вся штукатурка);
-  5. края карты — крапинки соседям, границы прижаты к перепадам картинки (guided filter), прямые края архитектуры —
-     по прямым кадра; растительность — мягкая альфа ViTMatte (ветки на фоне неба, жёсткая карта их рвёт).
+     и OWLv2 (колонны, водостоки, трубы — их Grounding DINO не видит); ложные — по форме и пересечениям.
+     Крыша — один слой (все найденные куски вместе);
+  3. по всему кадру Grounding DINO ищет то, что EoMT пропускает: живую изгородь, забор и каждое дерево отдельно;
+  4. края — SAM 2.1 по рамкам;
+  5. стены — один слой: здание без частей; горизонтальные плоскости (пол террасы) — «Покрытие» (оси здания по
+     MoGe-2 и линиям кадра, как в InegoTextureProject);
+  6. края карты — крапинки соседям, границы прижаты к перепадам картинки (guided filter), прямые края архитектуры —
+     по прямым кадра; растительность — мягкая альфа ViTMatte: в тримапе «точно дерево» — только не похожее на небо
+     (небо между ветками раздутого пятна EoMT иначе становилось деревом).
 
-Выход (OUTPUT_NODE): PNG карты (значение пикселя — id зоны, 0 — без зоны), PNG альфы растительности
-и список зон {id, label, kind, group} в ui.zones (JSON).
+Выход (OUTPUT_NODE): PNG карты (значение пикселя — id зоны, 0 — без зоны), PNG альфы растительности, PNG id
+растительности под альфой и список зон {id, label, kind, group} в ui.zones (JSON).
 """
 
 import json
@@ -49,25 +51,28 @@ PARTS = [
     ("owl", "column", 0.25, "Колонна"),
     ("owl", "downpipe", 0.25, "Водосток"),
     ("owl", "chimney", 0.25, "Труба"),
-    ("owl", "balcony railing", 0.22, "Ограждение"),
+]
+# по всему кадру (EoMT их пропускает или сливает): запрос, порог, подпись, вид
+SCENE_EXTRA = [
+    ("hedge", 0.30, "Живая изгородь", "veg"),
+    ("fence", 0.35, "Забор", "scene"),
+    ("tree", 0.30, "Дерево", "veg"),
 ]
 BUILDING = {"building", "house", "skyscraper", "tower"}
 # классы ADE20K → подписи; «вещи» — отдельными экземплярами, остальное сливается по классу
 SCENE = {
     "sky": "Небо", "grass": "Газон", "field": "Газон", "earth": "Земля", "sand": "Земля", "road": "Дорога",
-    "sidewalk": "Тротуар", "path": "Дорожка", "floor": "Покрытие", "tree": "Дерево", "plant": "Кусты",
+    "sidewalk": "Тротуар", "path": "Дорожка", "floor": "Покрытие", "tree": "Деревья", "plant": "Кусты",
     "flower": "Цветы", "fence": "Забор", "wall": "Стена (фон)", "stairs": "Ступени", "step": "Ступени",
     "stairway": "Ступени", "car": "Машина", "truck": "Машина", "van": "Машина", "person": "Человек",
     "bicycle": "Велосипед", "minibike": "Мотоцикл", "pole": "Столб", "streetlight": "Фонарь", "bench": "Скамейка",
     "water": "Вода", "mountain": "Горы", "hill": "Холмы", "rock": "Камни", "signboard": "Вывеска",
     "awning": "Навес", "railing": "Ограждение", "column": "Колонна",
 }
-THINGS = {"car", "truck", "van", "person", "bicycle", "minibike", "tree", "bench", "pole", "streetlight"}
+THINGS = {"car", "truck", "van", "person", "bicycle", "minibike", "bench", "pole", "streetlight"}
 OPENINGS = {"Окно", "Дверь", "Ворота"}
-ARCH = ("Крыша", "Отделка", "Окно", "Дверь", "Ворота", "Колонна", "Труба", "Балкон", "Покрытие", "Ступени",
-        "Ограждение", "Водосток")
-VEG = ("Дерево", "Кусты", "Цветы")
-MAT_MIN = 0.03  # кусок отделки — не меньше этой доли стен
+ARCH = ("Крыша", "Стены", "Окно", "Дверь", "Ворота", "Колонна", "Труба", "Балкон", "Покрытие", "Ступени", "Водосток")
+VEG = ("Дерево", "Деревья", "Кусты", "Цветы", "Живая изгородь")
 MATTE_SIDE = 1536  # длинная сторона кропа для ViTMatte
 
 _models: dict = {}
@@ -138,6 +143,18 @@ def _detect(img: Image.Image, kind: str, query: str, thr: float):
             r = proc.post_process_grounded_object_detection(out, threshold=thr, target_sizes=[(h, w)],
                                                             text_labels=[[query]])[0]
     return list(zip(r["boxes"].tolist(), r["scores"].tolist()))
+
+
+def _hedge_or_fence(img: Image.Image, b) -> tuple[str, str]:
+    """Изгородь или забор: по цвету не различить (изгородь в тени почти чёрная), а детектор на «fence» находит и
+    изгородь — спрашиваем его же по вырезке, какой из двух ответов увереннее."""
+    pad = 0.1 * max(b[2] - b[0], b[3] - b[1])
+    crop = img.crop((max(0, b[0] - pad), max(0, b[1] - pad), min(img.width, b[2] + pad), min(img.height, b[3] + pad)))
+    best = {}
+    for q in ("hedge", "fence"):
+        found = _detect(crop, "gdino", q, 0.15)
+        best[q] = max((sc for _, sc in found), default=0.0)
+    return ("Живая изгородь", "veg") if best["hedge"] >= best["fence"] else ("Забор", "scene")
 
 
 def _nms(dets, iou=0.5):
@@ -250,97 +267,6 @@ def _faces(rgb, walls):
     return [(owner == i, abs(float(np.dot(n, axes[0]))) > np.cos(np.radians(35))) for i, (n, _) in enumerate(planes)]
 
 
-def _features(rgb):
-    """Признаки отделки на пиксель: цветность a, b (Lab), яркость/3 и фактура (локальный перепад яркости,
-    усреднённый по окрестности: камень и кирпич — высокий, штукатурка — низкий)."""
-    import cv2
-
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-    L, a, b = lab[..., 0] * 100 / 255, lab[..., 1] - 128, lab[..., 2] - 128
-    tex = ndimage.uniform_filter(np.abs(L - ndimage.uniform_filter(L, 5)), max(5, rgb.shape[1] // 120))
-    return np.stack([a, b, L / 3, tex * 3], -1)
-
-
-def _inhomogeneity(feat, m):
-    v = feat[m][:: max(1, int(m.sum()) // 4000)]
-    return float(v.std(0).sum())
-
-
-def _split_materials(rgb, feat, walls):
-    """Куски отделки: SAM по сетке точек; однородные куски первыми (маска «вся стена» с камнем и штукатуркой
-    разнородна и проигрывает); остаток — куску с похожей отделкой (иначе граница шла дугой там, где стыка нет)."""
-    total = walls.sum()
-    if total < 400:
-        return [walls]
-    ys, xs = np.nonzero(walls)
-    inner = ndimage.binary_erosion(walls, iterations=max(1, round(0.02 * np.sqrt(total))))
-    if inner.sum() < 50:
-        inner = walls
-    iy, ix = np.nonzero(inner)
-    pts = set()
-    for gy in np.linspace(0.05, 0.95, 9):
-        for gx in np.linspace(0.05, 0.95, 9):
-            ty, tx = ys.min() + gy * np.ptp(ys), xs.min() + gx * np.ptp(xs)
-            k = int(np.argmin((iy - ty) ** 2 + (ix - tx) ** 2))
-            pts.add((float(ix[k]), float(iy[k])))
-    pts = sorted(pts)
-    ms, sc = _sam_run(rgb, input_points=[[[list(p)] for p in pts]], input_labels=[[[1] for _ in pts]])
-    ms = ms.reshape(len(pts), -1, *walls.shape)
-    sc = sc.reshape(len(pts), -1)
-    cands = []
-    for i in range(len(ms)):
-        for j in range(ms.shape[1]):
-            m = ms[i, j]
-            inw = m & walls
-            if inw.sum() >= MAT_MIN * total and inw.sum() > 0.5 * m.sum() and sc[i, j] > 0.7:
-                cands.append(inw)
-    cands.sort(key=lambda m: _inhomogeneity(feat, m) - 2.0 * np.log(m.sum() / total))
-    taken = np.zeros_like(walls)
-    segs = []
-    for m in cands:
-        new = m & ~taken
-        if new.sum() >= 0.7 * m.sum() and new.sum() >= MAT_MIN * total:
-            segs.append(new)
-            taken |= new
-    if len(segs) <= 1:
-        return [walls]
-    f = ndimage.gaussian_filter(feat, (2, 2, 0))
-    cost = []
-    for m in segs:
-        mu, sd = f[m].mean(0), f[m].std(0) + 1.0
-        cost.append((((f - mu) / sd) ** 2).sum(-1))
-    lab = np.argmin(np.stack(cost), 0) + 1
-    for i, m in enumerate(segs, 1):
-        lab[m] = i
-    sig = max(1.5, 0.004 * max(walls.shape))
-    votes = np.stack([ndimage.gaussian_filter(((lab == i) & walls).astype(np.float32), sig) for i in range(1, len(segs) + 1)])
-    lab = np.where(walls, np.argmax(votes, 0) + 1, 0)
-    return [lab == i for i in range(1, len(segs) + 1)]
-
-
-def _material_groups(feat, segs):
-    """Одинаковая отделка на разных гранях — одна группа: цветность и фактура строго, яркость (свет граней разный)
-    — с допуском."""
-    feats = []
-    for m in segs:
-        a, b, L3, t3 = (float(np.median(feat[..., c][m])) for c in range(4))
-        feats.append((L3 * 3, a, b, t3 / 3 + 0.3))
-    group = list(range(len(segs)))
-
-    def root(i):
-        while group[i] != i:
-            i = group[i]
-        return i
-
-    for i in range(len(segs)):
-        for j in range(i):
-            fi, fj = feats[i], feats[j]
-            if (abs(fi[1] - fj[1]) < 4 and abs(fi[2] - fj[2]) < 5 and abs(fi[0] - fj[0]) < 22
-                    and max(fi[3], fj[3]) / min(fi[3], fj[3]) < 1.35):
-                group[root(i)] = root(j)
-    return [root(i) for i in range(len(segs))]
-
-
 def _fill(out, hole):
     """Пиксели hole — ближайшей зоне не из hole."""
     if hole.any() and (~hole).any():
@@ -405,27 +331,43 @@ def _straighten_arch(idmap, labels, rgb):
 
 
 def _matte(idmap, labels, rgb):
-    """Растительность: ViTMatte по тримапу вокруг зоны — мягкая альфа (ветки на фоне неба). В карте зона берёт
-    пиксели с альфой > 0.5 у неба и фона и отдаёт с альфой < 0.5 соседям."""
+    """Растительность: ViTMatte по тримапу вокруг зоны — мягкая альфа (ветки на фоне неба). «Точно дерево» — пятно
+    без похожего на небо (иначе небо между ветками раздутого пятна EoMT считалось деревом), неизвестность — пятно
+    и полоса вокруг. Возвращает карту (зона берёт пиксели с альфой > 0.5 у неба и отдаёт с < 0.5), альфу и id
+    растительности под альфой (у каждого пикселя — зона с наибольшей альфой)."""
+    import cv2
     from transformers import VitMatteForImageMatting, VitMatteImageProcessor
 
     H, W = idmap.shape
     out = idmap.copy()
     alpha = np.zeros((H, W), np.float32)
+    vegid = np.zeros((H, W), np.int32)
     veg = [i for i, n in labels.items() if n.startswith(VEG) and (idmap == i).sum() >= 400]
     if not veg:
-        return out, alpha
+        return out, alpha, vegid
     proc, model = _load("matte", lambda: (VitMatteImageProcessor.from_pretrained(MATTE_ID, cache_dir=CACHE),
                                           VitMatteForImageMatting.from_pretrained(MATTE_ID, cache_dir=CACHE).eval()))
-    open_ids = [j for j, n in labels.items() if n in ("Небо", "Стена (фон)")] + [0]
+    sky_ids = [j for j, n in labels.items() if n == "Небо"]
+    open_ids = sky_ids + [j for j, n in labels.items() if n == "Стена (фон)"] + [0]
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    sky = np.isin(idmap, sky_ids)
+    skyish = np.zeros((H, W), bool)
+    if sky.sum() > 500:
+        # «похоже на небо»: близко к цвету ближайшего настоящего неба (небо — градиент и по высоте, и к солнцу:
+        # у горизонта за деревом оно светлее и теплее, чем в среднем по строке). Небо сглажено — без шума
+        sig = max(2.0, 0.01 * max(H, W))
+        wsum = ndimage.gaussian_filter(sky.astype(np.float32), sig) + 1e-6
+        smooth = np.stack([ndimage.gaussian_filter(lab[..., c] * sky, sig) / wsum for c in range(3)], -1)
+        _, (iy, ix) = ndimage.distance_transform_edt(~sky, return_indices=True)
+        skyish = np.linalg.norm(lab - smooth[iy, ix], axis=-1) < 12
     with _on_gpu(model):
         for i in veg:
             m = idmap == i
             ys, xs = np.nonzero(m)
             size = max(np.ptp(ys), np.ptp(xs)) + 1
-            grow = max(6, round(0.04 * size))
-            shrink = max(1, round(0.004 * size))  # ствол и толстые ветки тонкие — сильное сжатие их съедает
-            fg = ndimage.binary_erosion(m, iterations=shrink)
+            grow = max(6, round(0.05 * size))
+            fg = ndimage.binary_erosion(m, iterations=1) & ~ndimage.binary_dilation(skyish, iterations=2)
+            fg = ndimage.binary_opening(fg, iterations=1)
             bg = ~ndimage.binary_dilation(m, iterations=grow)
             y0, y1 = max(0, ys.min() - grow - 8), min(H, ys.max() + grow + 9)
             x0, x1 = max(0, xs.min() - grow - 8), min(W, xs.max() + grow + 9)
@@ -446,16 +388,19 @@ def _matte(idmap, labels, rgb):
             a = np.where(tri == 255, 1.0, np.where(tri == 0, 0.0, a))
             full = np.zeros((H, W), np.float32)
             full[y0:y1, x0:x1] = a
+            vegid[full > alpha] = i
             alpha = np.maximum(alpha, full)
             unknown = ~fg & ~bg
             out[unknown & (full > 0.5) & np.isin(out, open_ids)] = i
             give = unknown & (full < 0.5) & (out == i)
             out = _fill(np.where(give, -1, out), give)
-    return out, alpha
+    vegid[alpha < 0.02] = 0
+    return out, alpha, vegid
 
 
 def build_zone_map(rgb: np.ndarray):
-    """(карта id (H, W) int32, альфа растительности (H, W) float32, [{id, label, kind, group}])."""
+    """(карта id (H, W) int32, альфа растительности (H, W) float32, id растительности под альфой (H, W) int32,
+    [{id, label, kind, group}])."""
     img = Image.fromarray(rgb)
     H, W = rgb.shape[:2]
     t0 = time.time()
@@ -465,7 +410,7 @@ def build_zone_map(rgb: np.ndarray):
         if lab in BUILDING:
             bmask |= m
     near = ndimage.binary_dilation(bmask, iterations=max(3, round(0.02 * max(H, W)))) if bmask.any() else None
-    found = []
+    found, extra = [], []
     for kind in ("gdino", "owl"):
         with _on_gpu(_detector(kind)[1]):
             for _, q, thr, name in (p for p in PARTS if p[0] == kind):
@@ -478,10 +423,19 @@ def build_zone_map(rgb: np.ndarray):
                         if (b[2] - b[0]) * (b[3] - b[1]) > 0.6 * bmask.sum() and name != "Крыша":
                             continue
                     found.append((name, b, s))
+            if kind == "gdino":
+                for q, thr, name, zkind in SCENE_EXTRA:
+                    for b, s in _nms(_detect(img, kind, q, thr)):
+                        if (b[2] - b[0]) * (b[3] - b[1]) > 0.5 * H * W:
+                            continue  # рамка на полкадра — не отдельный объект
+                        if name in ("Живая изгородь", "Забор"):
+                            name, zkind = _hedge_or_fence(img, b)
+                        extra.append((name, b, zkind))
     found = _clean_parts(found, bmask, H, W)
-    masks = _sam_boxes(rgb, [f[1] for f in found])
+    masks = _sam_boxes(rgb, [f[1] for f in found] + [e[1] for e in extra])
+    part_masks, extra_masks = masks[: len(found)], masks[len(found):]
 
-    zones = []  # [подпись, маска, вид, группа]
+    zones = []  # [подпись, маска, вид]
     for lab, m in segs:
         if lab in BUILDING:
             continue
@@ -492,56 +446,72 @@ def build_zone_map(rgb: np.ndarray):
             if same is not None:
                 same[1] |= m
                 continue
-        zones.append([name, m.copy(), kind, None])
-    parts = []
+        zones.append([name, m.copy(), kind])
+    # изгородь, заборы, отдельные деревья — поверх сцены, не на здании
+    # «зелёное»: зелёный канал выше красного и синего (тёмная изгородь в тени почти чёрная — по Lab не видно)
+    g16 = rgb.astype(np.int16)
+    green = (g16[..., 1] > g16[..., 0] + 2) & (g16[..., 1] > g16[..., 2] + 2)
+    bushes = np.zeros((H, W), bool)
+    for z in zones:
+        if z[0] == "Кусты":
+            bushes |= z[1]
+    for (name, b, zkind), m in zip(extra, extra_masks):
+        m = m & ~bmask
+        if m.sum() < 0.0005 * H * W:
+            continue
+        if name == "Забор" and green[m].mean() > 0.5:
+            name, zkind = "Живая изгородь", "veg"  # зелёный «забор» — это изгородь
+        if name == "Живая изгородь" and (m & bushes).sum() > 0.6 * m.sum():
+            continue  # отдельный куст, его уже размечает сцена
+        if name != "Дерево":
+            same = next((z for z in zones if z[0] == name), None)
+            if same is not None:
+                same[1] |= m
+                continue
+        zones.append([name, m, zkind])
+
     dil = ndimage.binary_dilation(bmask, iterations=max(2, round(0.01 * max(H, W)))) if bmask.any() else None
-    for (name, b, s), m in zip(found, masks):
-        if name != "Крыша" and dil is not None:
+    roof = np.zeros((H, W), bool)
+    parts = []
+    for (name, b, s), m in zip(found, part_masks):
+        if name == "Крыша":
+            roof |= m  # крыша — один слой
+            continue
+        if dil is not None:
             m = m & dil
         if m.sum() > 30:
-            parts.append([name, m, "part", None])
+            parts.append([name, m, "part"])
+    if roof.sum() > 30:
+        parts.insert(0, ["Крыша", roof, "part"])
     occupied = np.zeros((H, W), bool)
     for p in parts:
         occupied |= p[1]
+    # стены — один слой: здание без частей; горизонтальные плоскости — покрытие
     walls = bmask & ~occupied
-    fs = _faces(rgb, walls)
-    vert = np.zeros((H, W), bool)
-    for f, horizontal in fs:
+    floor = np.zeros((H, W), bool)
+    for f, horizontal in _faces(rgb, walls):
         if horizontal:
-            zones.append(["Покрытие", f, "part", None])
-        else:
-            vert |= f
-    feat = _features(rgb)
-    segs_w, owners = [], []
-    for m in _split_materials(rgb, feat, vert):
-        for k, (f, horizontal) in enumerate(fs):
-            if not horizontal and (m & f).sum() >= 0.004 * vert.sum():
-                segs_w.append(m & f)
-                owners.append(k)
-    groups = _material_groups(feat, segs_w) if segs_w else []
-    order = sorted(set(groups), key=lambda g: -sum(segs_w[i].sum() for i in range(len(groups)) if groups[i] == g))
-    letter = {g: "АБВГДЕЖЗИК"[n] if n < 10 else str(n + 1) for n, g in enumerate(order)}
-    nfaces = len(set(owners))
-    for i, m in enumerate(segs_w):
-        g = letter[groups[i]]
-        zones.append([f"Отделка {g}" + (f" · грань {owners[i] + 1}" if nfaces > 1 else ""), m, "finish", g])
+            floor |= f
+    if floor.sum() > 0.002 * H * W:
+        zones.append(["Покрытие", floor, "part"])
+    zones.append(["Стены", walls & ~floor, "part"])
     zones += parts
 
     # карта: позже — поверх
     idmap = np.zeros((H, W), np.int32)
-    labels, meta, counts = {}, {}, {}
-    for i, (name, m, kind, group) in enumerate(zones, 1):
+    labels, kinds, counts = {}, {}, {}
+    for i, (name, m, kind) in enumerate(zones, 1):
         counts[name] = counts.get(name, 0) + 1
         idmap[m] = i
         labels[i] = name if sum(1 for z in zones if z[0] == name) == 1 else f"{name} {counts[name]}"
-        meta[i] = (kind, group)
+        kinds[i] = kind
     idmap = _finish(idmap, rgb)
     idmap = _straighten_arch(idmap, labels, rgb)
-    idmap, alpha = _matte(idmap, labels, rgb)
-    present = set(np.unique(idmap).tolist())
-    out = [{"id": i, "label": labels[i], "kind": meta[i][0], "group": meta[i][1]} for i in labels if i in present]
+    idmap, alpha, vegid = _matte(idmap, labels, rgb)
+    present = set(np.unique(idmap).tolist()) | set(np.unique(vegid).tolist())
+    out = [{"id": i, "label": labels[i], "kind": kinds[i], "group": None} for i in labels if i in present]
     log.info("INEGO zones: %d зон за %.1f с: %s", len(out), time.time() - t0, ", ".join(z["label"] for z in out))
-    return idmap, alpha, out
+    return idmap, alpha, vegid, out
 
 
 class InegoZoneMap:
@@ -560,7 +530,7 @@ class InegoZoneMap:
         _free_vram()
         rgb = _to_uint8(image[0])
         try:
-            idmap, alpha, zones = build_zone_map(rgb)
+            idmap, alpha, vegid, zones = build_zone_map(rgb)
         finally:
             # ~4.5 ГБ моделей карты не держим в RAM рядом с Qwen и klein (25 ГБ у контейнера): следующая карта
             # загрузит их заново за ~10 с
@@ -572,7 +542,8 @@ class InegoZoneMap:
         os.makedirs(folder, exist_ok=True)
         tag = uuid.uuid4().hex
         files = []
-        for name, data in (("map", idmap.astype(np.uint8)), ("alpha", (alpha * 255 + 0.5).astype(np.uint8))):
+        for name, data in (("map", idmap.astype(np.uint8)), ("alpha", (alpha * 255 + 0.5).astype(np.uint8)),
+                           ("veg", vegid.astype(np.uint8))):
             fn = f"zones_{tag}_{name}.png"
             Image.fromarray(data, "L").save(os.path.join(folder, fn))
             files.append({"filename": fn, "subfolder": "inego", "type": "output"})

@@ -19,6 +19,8 @@ export interface ZoneMap {
   ids: Uint8Array
   /** мягкая альфа растительности 0…255 (ветки на фоне неба) */
   alpha: Uint8Array
+  /** id зоны растительности под альфой (деревья и кусты рисуются и выбираются по альфе, а не по ids) */
+  veg: Uint8Array
   zones: Zone[]
 }
 
@@ -49,8 +51,10 @@ export async function buildZones(file: File, signal?: AbortSignal): Promise<Zone
     throw new Error(detail || `Сервер ответил ${res.status}`)
   }
   const j = await res.json()
-  const [ids, alpha] = await Promise.all([decode(j.map, j.width, j.height), decode(j.alpha, j.width, j.height)])
-  return { width: j.width, height: j.height, ids, alpha, zones: j.zones }
+  const [ids, alpha, veg] = await Promise.all([
+    decode(j.map, j.width, j.height), decode(j.alpha, j.width, j.height), decode(j.veg, j.width, j.height),
+  ])
+  return { width: j.width, height: j.height, ids, alpha, veg, zones: j.zones }
 }
 
 /** Цвет зоны: равномерно по кругу оттенков (золотое сечение), отделка одной группы — одним оттенком */
