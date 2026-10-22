@@ -1399,7 +1399,9 @@ def _manhattan_faces(A: np.ndarray, P: np.ndarray, N: np.ndarray, valid: np.ndar
     out = []
     for i, (n, _) in enumerate(planes):
         sel = (owner == i) & fin
-        spread = float(np.degrees(np.arccos(np.clip(Nn[sel] @ n, -1, 1))).mean()) if sel.any() else 0.0
+        # медиана: стёкла и рамы окон, попавшие в контур, дают выбросы нормалей MoGe — средний разброс 13° у плоской
+        # стены (медиана 3°) отправлял проекцию в генеративный путь
+        spread = float(np.median(np.degrees(np.arccos(np.clip(Nn[sel] @ n, -1, 1))))) if sel.any() else 0.0
         if spread > PLANE_TOL_DEG:
             log.info("INEGO texture: грань %d не плоская (нормали ±%.0f° от оси) — генеративный путь", i, spread)
             return None

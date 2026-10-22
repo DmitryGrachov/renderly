@@ -987,9 +987,7 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(
-                result, seed + 3, *harmonize, area=obj, model=model, scene=scene, added=bool(refine and self.room),
-            )
+            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model, scene=scene)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1134,9 +1132,10 @@ def guard_scene(after: Image.Image, before: Image.Image, area: Image.Image | Non
 
 
 def keep_object(after: Image.Image, before: Image.Image, area: Image.Image) -> Image.Image:
-    """Добавленный объект после пересчёта кадра: img2img иногда «растворяет» мелкий новый объект (от женщины на
-    дорожке остались полупрозрачные ноги). Если внутри объекта пересчёт изменил структуру больше чем на
-    KEEP_OBJECT_CHANGED площади, объект возвращается из кадра до пересчёта (свет вокруг — из пересчёта)."""
+    """Правка после пересчёта кадра: img2img иногда «растворяет» её — мелкий новый объект (от женщины на дорожке
+    остались полупрозрачные ноги) или мелкий рисунок материала (плитку klein перерисовал штукатуркой). Если внутри
+    правки пересчёт изменил структуру больше чем на KEEP_OBJECT_CHANGED площади, правка возвращается из кадра до
+    пересчёта (свет вокруг — из пересчёта)."""
     import numpy as np
     from scipy import ndimage
 
@@ -1166,7 +1165,7 @@ def keep_object(after: Image.Image, before: Image.Image, area: Image.Image) -> I
 
 async def harmonize_frame(
     result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None,
-    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None, added: bool = False,
+    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None,
 ) -> Image.Image:
     """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
     совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
@@ -1217,7 +1216,9 @@ async def harmonize_frame(
     # полоса вокруг правки — только свет и тени: новые объекты и рисунок в ней (плитка, поползшая на соседнюю
     # стену у klein) возвращаются; у удаления проверяется и сама область
     frame = guard_scene(frame, result, area, removed)
-    if added:
+    if not removed:
+        # пересчёт мог «растворить» правку: добавленный объект (полупрозрачные ноги) или рисунок материала (klein
+        # перерисовал плитку штукатуркой — 50% площади, в удачных прогонах 0%)
         frame = keep_object(frame, result, area)
     if not removed:
         frame = restore_colour(frame, result, area)
@@ -1333,19 +1334,31 @@ async def _sample_info(texture: bytes) -> tuple[float, str]:
     key = hashlib.sha256(b"texwidth" + texture + llm_model.get().encode()).hexdigest()
     if key in _described:
         return _described[key]["width_m"], _described[key]["material"]
-    try:
-        data = json.loads(await _chat(
-            [
-                {"role": "system", "content": TEXTURE_WIDTH_SYSTEM},
-                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": _data_url(texture, 1024)}}]},
-            ],
-            json_mode=True,
-        ))
-        width = float(data.get("width_m") or 0)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Ширина образца не оценена (DeepSeek): %s", e)
+    data, material = {}, ""
+    # DeepSeek изредка отвечает «unknown» по тёмному однородному образцу — второй попыткой
+    for attempt in range(2):
+        try:
+            data = json.loads(await _chat(
+                [
+                    {"role": "system", "content": TEXTURE_WIDTH_SYSTEM},
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": _data_url(texture, 1024)}}]},
+                ],
+                json_mode=True,
+            ))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Образец не разобран (DeepSeek, попытка %d): %s", attempt + 1, e)
+            continue
+        material = " ".join(str(data.get("material") or "").split())
+        if material and material.lower() not in ("unknown", "none", "n/a"):
+            break
+        log.warning("Образец не распознан (DeepSeek, попытка %d): %s", attempt + 1, material)
+        material = ""
+    if not material:
         return fallback
-    material = " ".join(str(data.get("material") or "").split()) or fallback[1]
+    try:
+        width = float(data.get("width_m") or 0)
+    except (TypeError, ValueError):
+        width = 0
     if not 0.02 <= width <= 20:
         width = TEXTURE_WIDTH_DEFAULT
     log.info("образец: %s, %s элементов поперёк → %.2f м", material, data.get("elements_across"), width)
@@ -1880,8 +1893,9 @@ async def run_edit(
         tex.thumbnail((TEXTURE_SIDE, TEXTURE_SIDE), Image.LANCZOS)
         tex = tex.resize((max(32, round(tex.width / 32) * 32), max(32, round(tex.height / 32) * 32)), Image.LANCZOS)
         texture = to_png(tex)
-        request = "Смени материал выделенной поверхности на материал с образца" + (
-            f": {request.strip()}" if request and request.strip() else ""
+        # что на образце — явно: иначе DeepSeek путал образец с тем, что уже на стене (плитку описал досками)
+        request = f"Смени материал выделенной поверхности на материал с образца — {material_name}" + (
+            f"; {request.strip()}" if request and request.strip() else ""
         )
     else:
         texture = None
