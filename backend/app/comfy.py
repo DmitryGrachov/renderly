@@ -31,6 +31,13 @@ Qwen-Image-2.1 Turbo — та же логика в родном для неё в
     «Сила» здесь не применяется;
   - зоны — тем же InegoKeepZones / InegoZoneRestyle, перерисовка по маске — Differential Diffusion поверх
     QwenImage21Cache и хвост расписания; небо — тот же InegoSkyMatch.
+
+Qwen-Image-Edit-2511 — в родном для неё виде (build_qwen2511_workflow), как в шаблоне ComfyUI:
+  - картинки — в TextEncodeQwenImageEditPlus: Picture 1 — исходник, Picture 2 — вырезанное небо референса.
+    Сам референс картинкой не подаётся (QWEN_EDIT_REF_IMAGE): с ним 2511 брала с референса и дом — цоколь,
+    колонны, крыльцо. Свет и окружение референса описывает текстом официальный переписчик (DeepSeek видит референс);
+  - Lightning LoRA, 4 шага, cfg 1, сдвиг 3.1, CFGNorm, index_timestep_zero; кадр ~1 Мп, полный шум от латента
+    исходника; InegoAlign возвращает кадр на место; зоны и небо — как у FLUX и 2.1. «Сила» не применяется.
 """
 
 import asyncio
@@ -56,6 +63,9 @@ from .config import (
     QWEN21_ZONE_STEPS,
     QWEN_EDIT,
     QWEN_EDIT_MODEL,
+    QWEN_EDIT_REF_IMAGE,
+    QWEN_EDIT_RENDER_MEGAPIXELS,
+    QWEN_EDIT_ZONE_DENOISE,
     RENDER_MEGAPIXELS,
     SKY_MATCH,
     ZONE_DETAIL,
@@ -305,6 +315,92 @@ def build_qwen21_workflow(
     return wf
 
 
+def _q2511_sampling(wf: dict, tag: str, text: str, model: list, latent: list, denoise: float, seed: int) -> list:
+    """Сэмплинг Qwen-Image-Edit-2511: Lightning 4 шага, euler/simple, cfg 1 (негатив — пустой текст)."""
+    wf[f"sample{tag}"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": model, "positive": [f"ref_pos{text}", 0], "negative": [f"ref_neg{text}", 0], "latent_image": latent,
+            "seed": seed, "steps": QWEN_EDIT["steps"], "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
+            "denoise": denoise,
+        },
+    }
+    wf[f"decode{tag}"] = {"class_type": "VAEDecode", "inputs": {"samples": [f"sample{tag}", 0], "vae": ["vae", 0]}}
+    return [f"decode{tag}", 0]
+
+
+def build_qwen2511_workflow(
+    source: str,
+    prompt: str,
+    seed: int,
+    reference: str | None,
+    keep_sky: bool = False,
+    keep_bg: bool = False,
+    keep_sur: bool = False,
+    building_box: list[float] | None = None,
+    zone_prompt: str = "",
+    sky_ref: str | None = None,
+    sky_match: bool = False,
+) -> dict:
+    """Img to Img на Qwen-Image-Edit-2511 (см. docstring модуля): Picture 1 — исходник, затем небо референса
+    (и сам референс перед ним при QWEN_EDIT_REF_IMAGE); референс в workflow — для InegoSkyMatch."""
+    q = QWEN_EDIT
+    wf: dict = {
+        "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": q["unet"]}},
+        "lora": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["unet", 0], "lora_name": q["lora"], "strength_model": 1.0}},
+        "shift": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["lora", 0], "shift": q["shift"]}},
+        "cfgnorm": {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": q["text_encoder"], "type": "qwen_image", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": q["vae"]}},
+        "src_img": {"class_type": "LoadImage", "inputs": {"image": source}},
+        "src_lat": {"class_type": "VAEEncode", "inputs": {"pixels": ["src_img", 0], "vae": ["vae", 0]}},
+    }
+    images = {"image1": ["src_img", 0]}
+    if reference:
+        wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
+        if QWEN_EDIT_REF_IMAGE:
+            images["image2"] = ["ref_img", 0]
+        if sky_ref and not keep_sky:
+            wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
+            images[f"image{len(images) + 1}"] = ["sky_ref_img", 0]
+
+    def encode(tag: str, text: str) -> str:
+        for kind, t in (("pos", text), ("neg", "")):
+            wf[f"text_{kind}{tag}"] = {
+                "class_type": "TextEncodeQwenImageEditPlus",
+                "inputs": {"clip": ["clip", 0], "prompt": t, "vae": ["vae", 0], **images},
+            }
+            # GGUF не от Comfy-Org: способ подачи референсов — явно, как в шаблоне ComfyUI для 2511
+            wf[f"ref_{kind}{tag}"] = {
+                "class_type": "FluxKontextMultiReferenceLatentMethod",
+                "inputs": {"conditioning": [f"text_{kind}{tag}", 0], "reference_latents_method": "index_timestep_zero"},
+            }
+        return tag
+
+    # проход 1 — полный рендер (полный шум от латента исходника), кадр возвращается на место исходника
+    image = _q2511_sampling(wf, "", encode("", prompt), ["cfgnorm", 0], ["src_lat", 0], 1.0, seed)
+    wf["align"] = {
+        "class_type": "InegoAlign",
+        "inputs": {"image": image, "source": ["src_img", 0], "max_scale": 0.08, "max_shift": 0.08},
+    }
+    image = ["align", 0]
+
+    if keep_sky or keep_bg or keep_sur:
+        _zones(wf, image, keep_sky, keep_bg, keep_sur, building_box)
+        # проход 2 — только сохраняемые зоны: склейка — стартовый латент, шум под маской (Differential Diffusion)
+        wf["diffdiff"] = {"class_type": "DifferentialDiffusion", "inputs": {"model": ["cfgnorm", 0], "strength": 1.0}}
+        wf["comp_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["restyle", 0], "vae": ["vae", 0]}}
+        wf["zone_lat"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["comp_lat", 0], "mask": ["zones", 3]}}
+        image = _q2511_sampling(
+            wf, "_z", encode("_z", zone_prompt or prompt), ["diffdiff", 0], ["zone_lat", 0], QWEN_EDIT_ZONE_DENOISE, seed + 1,
+        )
+
+    if sky_match and reference:
+        image = _sky_match(wf, image)
+    wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": "inego/img2img"}}
+    return wf
+
+
 def build_workflow(
     source: str,
     width: int,
@@ -324,6 +420,10 @@ def build_workflow(
     qwen21_refine: bool = False,
 ) -> dict:
     """Workflow в API-формате ComfyUI."""
+    if model == QWEN_EDIT_MODEL:
+        return build_qwen2511_workflow(
+            source, prompt, seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_ref, sky_match,
+        )
     if model in QWEN21_MODELS:
         return build_qwen21_workflow(
             source, prompt, seed, reference, keep_sky, keep_bg, keep_sur, building_box, zone_prompt, sky_match,
@@ -485,9 +585,11 @@ async def run_img2img(
     if seed is None:
         seed = random.randrange(2**48)
     src = Image.open(io.BytesIO(image)).convert("RGB")
-    family = "qwen21" if model in QWEN21_MODELS else "flux"
+    family = "qwen21" if model in QWEN21_MODELS else "qwen2511" if model == QWEN_EDIT_MODEL else "flux"
     if family == "qwen21":
         width, height = fit_size(*src.size, QWEN21_RENDER_MEGAPIXELS, step=32)
+    elif family == "qwen2511":
+        width, height = fit_size(*src.size, QWEN_EDIT_RENDER_MEGAPIXELS)
     else:
         width, height = fit_size(*src.size, RENDER_MEGAPIXELS)
 
@@ -501,7 +603,7 @@ async def run_img2img(
     # небо референса: рамка чистого неба из разбора DeepSeek (из кэша) — образец неба (image 3) в экстерьере
     sky_box = None
     exterior = scene == "exterior"
-    if ref_bytes and exterior and not keep_sky and family == "flux":
+    if ref_bytes and exterior and not keep_sky and family in ("flux", "qwen2511"):
         try:
             sky_box = (await analyze_reference(ref_bytes)).get("_sky_box")
         except Exception as e:  # noqa: BLE001 — без образца неба генерация всё равно идёт

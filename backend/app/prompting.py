@@ -26,12 +26,15 @@ import io
 import json
 import logging
 from collections import OrderedDict
+from pathlib import Path
 from contextvars import ContextVar
 
 import httpx
 from PIL import Image
 
-from .config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL, DEEPSEEK_VISION_MODEL, DEEPSEEK_VISION_MODELS
+from .config import (
+    DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL, DEEPSEEK_VISION_MODEL, DEEPSEEK_VISION_MODELS, QWEN_EDIT_REF_IMAGE,
+)
 
 # модель DeepSeek текущего запроса (переключатель Flash / Pro в шапке); по умолчанию — из DEEPSEEK_MODEL
 llm_model: ContextVar[str] = ContextVar("llm_model", default=DEEPSEEK_MODEL)
@@ -167,6 +170,75 @@ Q21_BODY_RULE = """- Write it as an edit instruction from someone holding only t
   what changes: the light, the sky, the vegetation, how the existing surfaces look once photographed. Name what stays
   (the building, its openings, the layout) by type and position, without re-describing its appearance.
 """
+
+
+# ---------------- Qwen-Image-Edit-2511 ----------------
+# картинки адресуются «Picture N» (так их называет TextEncodeQwenImageEditPlus); референс подаётся самой картинкой
+# (Picture 2): 2511 обучена на нескольких входах с ролями. Смена медиума — цель правки (как у 2.1), реализм — без
+# «зерна» и «шума»; то, что остаётся, называется по типу и месту (правило официального переписчика)
+def q2511_text(text: str) -> str:
+    """«image N» → «Picture N», один абзац."""
+    return " ".join(re.sub(r"\b[Ii]mage ([1-9])\b", r"Picture \1", text).split())
+
+
+# Длинный промпт (как у klein и 2.1, ~900 слов) 2511 почти не слушала: дневное небо с облаками вместо заката
+# референса, гараж с машиной, газон из заливки — в плитку. Официальный переписчик (polish_edit_prompt: «direct and
+# specific»; для стилизации — описать стиль референса и сохранить содержимое исходника) пишет короткий запрос
+# по картинкам; задача, разбор референса и описание под здание — его вход, после — короткие замки
+Q2511_REWRITE_SYSTEM = (Path(__file__).parent / "prompts" / "qwen2511_edit_rewrite.txt").read_text(encoding="utf-8")
+Q25_RENDER_TASK = (
+    "Picture 1 is a draft architectural 3D render (a viewport screenshot or clay render) of a building. The reference "
+    "photo shows a different place; it is shown only to you, the editing model never sees it, so describe its look "
+    "in words. Turn Picture 1 into a real unretouched architectural photograph taken in the world of the reference: "
+    "its sun direction and height, light colour, shadows, sky and cloud cover, weather, season, haze and atmosphere, "
+    "vegetation species and colours, and colour grading. From Picture 1 keep the camera and framing, the building "
+    "geometry with every opening, every material and its colour, and the layout of the surroundings: every lawn, "
+    "path, paving area, tree and object stays where it is with its shape and size, and flat painted or untextured "
+    "areas become their real counterparts (a green painted area becomes real lawn grass, a grey ground area becomes "
+    "real paving or asphalt, simple trees become real trees). Nothing of the reference's buildings, objects or "
+    "composition appears; add nothing that is not in Picture 1 (no cars, garages, walls, fences, people or furniture). "
+    "Keep the prompt direct: 120-200 words."
+)
+Q25_RENDER_SKY = " Picture 2 is a close-up of the sky of the reference: the sky of the result looks exactly like Picture 2."
+Q25_RENDER_LOCK = (
+    "The camera, framing, building geometry, openings and materials stay exactly as in Picture 1, and nothing new is "
+    "added."
+)
+Q25_PHOTO = (
+    "An unretouched photograph from a full-frame camera with a sharp prime lens at low ISO: physically correct light "
+    "and soft contact shadows, real glass with reflections, true-to-life materials with real micro-texture, crisp "
+    "individual leaves and grass blades, a natural sky with smooth gradients."
+)
+
+
+def q2511_noref(text: str) -> str:
+    """Референса у модели нет: «image 2» разбора и описания → «the reference», картинки — «Picture N»."""
+    t = re.sub(r"\b[Ii]mage 2\b", "the reference", text)
+    return q2511_text(t)
+
+
+async def q2511_render_prompt(
+    image: bytes, reference: bytes | None, task: str, notes: str, cloud: str = "", sky_image: bool = False,
+) -> str | None:
+    """Запрос Img to Img для 2511 так, как его пишет официальный переписчик: DeepSeek с его системным промптом,
+    картинками Picture 1 (черновик) и Picture 2 (референс); notes — разбор референса и описание под здание.
+    None — переписать не удалось (тогда длинный шаблон)."""
+    instruction = task + (Q25_RENDER_SKY if sky_image else "") + (f" Notes for the details: {notes}" if notes else "")
+    content = [{"type": "text", "text": "Picture 1:"}, {"type": "image_url", "image_url": {"url": _data_url(image)}}]
+    if reference:
+        content += [{"type": "text", "text": "Reference photo:"}, {"type": "image_url", "image_url": {"url": _data_url(reference, 1024)}}]
+    content.append({"type": "text", "text": f"User Input: {instruction}\n\nRewritten Prompt:"})
+    try:
+        raw = await _chat([{"role": "system", "content": Q2511_REWRITE_SYSTEM}, {"role": "user", "content": content}],
+                          json_mode=True)
+        text = " ".join(str(json.loads(raw).get("Rewritten") or "").split())
+    except Exception as e:  # noqa: BLE001
+        log.warning("Переписчик Qwen-Image-Edit-2511 для Img to Img недоступен: %s", e)
+        return None
+    if not text:
+        return None
+    text = _NOISE.sub("", text)
+    return " ".join(p for p in (text, cloud, Q25_RENDER_LOCK, Q25_PHOTO) if p)
 
 
 def q21_tags(text: str) -> str:
@@ -428,8 +500,10 @@ def assemble(
     family="qwen21": вступление с действия и ролей картинок, теги <imageN>, один абзац."""
     lock = SPEC_MATERIALS.format(spec=materials.rstrip(".") + ".") if materials else KEEP_MATERIALS
     q21 = family == "qwen21"
+    q25 = family == "qwen2511"
     parts = (
         [Q21_INTRO, Q21_LOOK_ROLE if has_ref else "", KEEP_GEOMETRY, DRAWING_LINES, lock] if q21
+        else [Q21_INTRO, KEEP_GEOMETRY, DRAWING_LINES, lock] if q25
         else [INTRO, KEEP_GEOMETRY, DRAWING_LINES, lock]
     )
     if has_ref:
@@ -440,11 +514,11 @@ def assemble(
         parts.append(KEEP_BG)
     if keep_sur:
         parts.append(KEEP_SUR)
-    if q21:
+    if q21 or q25:
         ref_text = _NOISE.sub("", ref_text)
-    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", Q21_PHOTOREAL if q21 else PHOTOREAL, FINAL_LOCK]
+    parts += [ref_text, body.strip(), SKY_IMAGE if sky_image else "", Q21_PHOTOREAL if q21 or q25 else PHOTOREAL, FINAL_LOCK]
     text = " ".join(p for p in parts if p)
-    return q21_text(text) if q21 else text
+    return q21_text(text) if q21 else q2511_text(text) if q25 else text
 
 
 # ---------------- перерисовка сохраняемых зон (второй проход, только по маске) ----------------
@@ -513,7 +587,7 @@ async def zone_instruction(
     if not style and reference is not None:
         style.append("Match the vegetation, sky, light and colour grading of image 2.")
     text = " ".join(parts + style + [ZONE_OUTRO])
-    return q21_text(text) if family == "qwen21" else text
+    return q21_text(text) if family == "qwen21" else q2511_text(text) if family == "qwen2511" else text
 
 
 def _box(raw) -> list[float] | None:
@@ -579,8 +653,8 @@ async def build_prompt(
         if need_box:
             shape["box"] = [0, 0, 1000, 1000]
         system = PROMPT_SYSTEM.format(
-            model="Qwen-Image-2.1" if family == "qwen21" else "FLUX.2 [klein]",
-            model_rule=Q21_BODY_RULE if family == "qwen21" else "",
+            model={"qwen21": "Qwen-Image-2.1", "qwen2511": "Qwen-Image-Edit-2511"}.get(family, "FLUX.2 [klein]"),
+            model_rule=Q21_BODY_RULE if family in ("qwen21", "qwen2511") else "",
             scene=scene,
             material_rules=RULES_FROM_SPEC if materials else RULES_FROM_IMAGE,
             sur_rule=(SKY_KEEP_RULE if keep_sky else "") + (BG_KEEP_RULE if keep_bg else "") + (SUR_KEEP_RULE if keep_sur else ""),
@@ -620,9 +694,18 @@ async def build_prompt(
             materials = (data.get("materials") or "").strip() or materials
         # образец неба (image 3) — экстерьер без «Сохранить небо», если на референсе есть чистое небо
         # (только FLUX: в Qwen-Image-2.1 третья картинка не помещается в память)
-        sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box")) and family == "flux"
+        sky_image = scene == "exterior" and not keep_sky and bool(analysis.get("_sky_box")) and family in ("flux", "qwen2511")
+        prompt = None
+        if family == "qwen2511":
+            task = Q25_RENDER_TASK + (f" Materials specified by the architect, mandatory: {materials}" if materials else "")
+            task += "".join(" " + k for on, k in zip(keep, (KEEP_SKY, KEEP_BG, KEEP_SUR)) if on)
+            cloud = clouds_text(analysis["cloud_cover"]) if analysis.get("cloud_cover") and not keep_sky else ""
+            prompt = await q2511_render_prompt(
+                image, reference, q2511_noref(task), q2511_noref(_NOISE.sub("", ref_text) + " " + data["prompt"]),
+                q2511_noref(cloud), sky_image,
+            )
         result = (
-            assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image, family=family),
+            prompt or assemble(data["prompt"], materials, ref_text, has_ref, *keep, sky_image=sky_image, family=family),
             _box(data.get("box")) if need_box else None,
         )
         _cache[key] = result

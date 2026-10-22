@@ -53,6 +53,13 @@ QWEN_EDIT = {
     "steps": int(os.getenv("QWEN_EDIT_STEPS", "4")),
     "shift": float(os.getenv("QWEN_EDIT_SHIFT", "3.1")),
 }
+# Img to Img на 2511: кадр ~1 Мп (как ImageScaleToTotalPixels в шаблоне ComfyUI — на нём модель держит Picture 1
+# без дрейфа), перерисовка сохраняемых зон — хвост расписания (доля шума)
+QWEN_EDIT_RENDER_MEGAPIXELS = float(os.getenv("QWEN_EDIT_RENDER_MEGAPIXELS", "1.0"))
+QWEN_EDIT_ZONE_DENOISE = float(os.getenv("QWEN_EDIT_ZONE_DENOISE", "0.75"))
+# референс картинкой в 2511: с ним модель брала с референса и дом (каменный цоколь, колонну, крыльцо); без него
+# свет и окружение референса описывает переписчик, картинкой идёт только вырезанное небо референса
+QWEN_EDIT_REF_IMAGE = os.getenv("QWEN_EDIT_REF_IMAGE", "false").lower() == "true"
 # Qwen-Image-2.1 Turbo (7B, сентябрь 2026; Qwen Research License — только некоммерческое использование) — только Inpainting: int8, 8 шагов по фиксированному расписанию
 # две модели в списке: qwen-image-2.1 — качество (базовая модель: Inpainting целиком, Img to Img — доводка фактуры
 # поверх рендера Turbo), qwen-image-2.1-turbo — скорость (всё на Turbo)
@@ -83,7 +90,7 @@ QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
 QWEN21_REFINE = float(os.getenv("QWEN21_REFINE", "0.6"))
 QWEN21_BASE_STEPS = int(os.getenv("QWEN21_BASE_STEPS", "25"))
 # модели генерации, доступные в Img to Img (Qwen-Image-Edit-2511 — только Inpainting)
-IMG2IMG_MODELS = [*FLUX_MODELS, *QWEN21_MODELS]
+IMG2IMG_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, *QWEN21_MODELS]
 # модели генерации, доступные в Inpainting
 INPAINT_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, *QWEN21_MODELS]
 FLUX_VAE = os.getenv("FLUX_VAE", "flux2-vae.safetensors")

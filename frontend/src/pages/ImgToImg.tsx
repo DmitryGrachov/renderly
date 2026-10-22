@@ -34,7 +34,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const activeModel = modelById(model)
   // Qwen-Image-2.1: шкалы «сила» нет — со старта от исходника она то копирует черновик, то делает полный
   // рендер в зависимости от сида; рендер всегда с чистого шума (см. backend/app/comfy.py)
-  const fixedStrength = model === 'qwen-image-2.1'
+  const fixedStrength = model === 'qwen-image-2.1' || model === 'qwen-edit-2511'
   const [source, setSource] = useState<StudioImage | null>(null)
   const [reference, setReference] = useState<StudioImage | null>(null)
   const [preset, setPreset] = useState<PresetId>('golden')
@@ -453,7 +453,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
 
             <div className="my-6 h-px bg-line" />
 
-            <Step n={2} title="Сила эффекта" hint={fixedStrength ? 'На Qwen-Image 2.1 не регулируется — всегда полный нейрорендер' : 'Насколько сильно менять сцену'} />
+            <Step n={2} title="Сила эффекта" hint={fixedStrength ? 'На Qwen не регулируется — всегда полный нейрорендер' : 'Насколько сильно менять сцену'} />
             <div className={`mt-4 ${fixedStrength ? 'opacity-50' : ''}`}>
               <div className="mb-3 flex items-baseline justify-between">
                 <span className="text-[13px] text-mute">{fixedStrength ? 'Полный рендер' : strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
