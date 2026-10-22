@@ -807,6 +807,45 @@ def _orientation(normals: np.ndarray) -> np.ndarray:
     return o
 
 
+SAM_GRID = 48  # сетка точек SAM на векторе
+SAM_MIN = 0.0003  # кусок SAM меньше этой доли кадра — не объект
+
+
+def _sam_parts(schema: np.ndarray) -> np.ndarray:
+    """Объекты на векторе — SAM 2.1 по сетке точек, вариант уровня частей (крыша, стена, цоколь, окно — не весь
+    дом и не деталь), мелкие первыми; на плоской иллюстрации без фактуры и бликов края объектов чистые.
+    Метки кусков (H, W), 0 — не покрыто."""
+    H, W = schema.shape[:2]
+    proc, model = _sam()
+    pts = [(float(x), float(y)) for y in np.linspace(4, H - 5, SAM_GRID) for x in np.linspace(4, W - 5, SAM_GRID)]
+    masks = []
+    with _on_gpu(model):
+        with torch.no_grad():
+            emb = proc(images=schema, return_tensors="pt").to(_device())
+            feats = model.get_image_embeddings(emb["pixel_values"])
+            for i in range(0, len(pts), 64):
+                chunk = pts[i:i + 64]
+                inp = proc(images=schema, input_points=[[[list(p)] for p in chunk]],
+                           input_labels=[[[1] for _ in chunk]], return_tensors="pt").to(_device())
+                out = model(image_embeddings=feats, input_points=inp["input_points"],
+                            input_labels=inp["input_labels"], multimask_output=True)
+                ms = proc.post_process_masks(out.pred_masks.cpu(), inp["original_sizes"])[0].numpy() > 0
+                sc = out.iou_scores[0].float().cpu().numpy()
+                for j in range(len(chunk)):
+                    if sc[j, 0] > 0.85:
+                        masks.append(ms[j, 0])
+    lab = np.zeros((H, W), np.int32)
+    n = 0
+    for m in sorted(masks, key=lambda m: m.sum()):
+        new = m & (lab == 0)
+        if new.sum() < SAM_MIN * H * W or new.sum() < 0.6 * m.sum():
+            continue
+        n += 1
+        lab[new] = n
+    log.info("INEGO zones: SAM на векторе — %d кусков", n)
+    return lab
+
+
 def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray | None = None):
     """Материалы здания — цвета вектора в здании (где здание — решает сценовая модель по фото), края — полигоны
     VTracer. Логика материала, а не только цвета:
@@ -816,23 +855,31 @@ def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray |
     [подпись, маска, вид, цвет]."""
     H, W = area.shape
     vid, _, _, vz = _vector_zones(schema)
+    colour_of = {z["id"]: z["color"] for z in vz}
     orient = _orientation(normals) if normals is not None else np.zeros((H, W), np.int32)
-    items = []  # [маска, цвет, площадь, ориентация]
-    for z in vz:
-        layer = (vid == z["id"]) & area
-        if layer.sum() < VECTOR_MIN * H * W:
+    # куски — объекты вектора по SAM (крыша целиком, даже двумя оттенками; каждый цоколь, окно, колонна), то, что
+    # SAM не покрыл, — связные куски слоёв цвета; материал куска — его основной цвет вектора и ориентация
+    plab = _sam_parts(schema)
+    plab[~area] = 0
+    pieces = [plab == k for k in np.unique(plab) if k > 0]
+    rest = area & (plab == 0)
+    for zid in colour_of:
+        lab, n = ndimage.label(rest & (vid == zid))
+        pieces += [lab == k for k in range(1, n + 1)]
+    groups: dict[tuple, np.ndarray] = {}
+    for m in pieces:
+        if m.sum() < 20:
             continue
-        lab, n = ndimage.label(layer)
-        by_o: dict[int, np.ndarray] = {}
-        for k in range(1, n + 1):
-            comp = lab == k
-            ov = orient[comp]
-            ov = ov[ov >= 0]
-            o = int(np.bincount(ov).argmax()) if ov.size else 0
-            by_o[o] = by_o.get(o, np.zeros((H, W), bool)) | comp
-        for o, m in by_o.items():
-            if m.sum() >= VECTOR_MIN * H * W:
-                items.append([m, z["color"], int(m.sum()), o])
+        cv = vid[m]
+        zid = int(np.bincount(cv[cv > 0]).argmax()) if (cv > 0).any() else 0
+        if zid not in colour_of:
+            continue
+        ov = orient[m]
+        ov = ov[ov >= 0]
+        o = int(np.bincount(ov).argmax()) if ov.size else 0
+        key = (zid, o)
+        groups[key] = groups.get(key, np.zeros((H, W), bool)) | m
+    items = [[m, colour_of[k[0]], int(m.sum()), k[1]] for k, m in groups.items() if m.sum() >= VECTOR_MIN * H * W]
     lab_of = lambda c: _lab([int(c[k:k + 2], 16) for k in (1, 3, 5)])  # noqa: E731
     merged = True
     while merged:
