@@ -69,4 +69,12 @@ from transformers import AutoImageProcessor as P, AutoModelForDepthEstimation as
 i='depth-anything/Depth-Anything-V2-Base-hf'; P.from_pretrained(i, cache_dir='$M/depth'); M.from_pretrained(i, cache_dir='$M/depth')
 " || echo "[models] Depth Anything не скачан — докачается при первом запросе"
 
+# карта зон (Render pass, нод InegoZoneMap): EoMT — сцена, Grounding DINO и OWLv2 — части здания, ViTMatte — ветки
+[ -d "$M/zones/models--hustvl--vitmatte-base-composition-1k" ] || python -c "
+from huggingface_hub import snapshot_download as d
+for r in ('tue-mps/ade20k_panoptic_eomt_large_1280', 'IDEA-Research/grounding-dino-base',
+          'google/owlv2-large-patch14-ensemble', 'hustvl/vitmatte-base-composition-1k'):
+    d(r, cache_dir='$M/zones', allow_patterns=['*.json', '*.safetensors', '*.txt', '*.model'])
+" || echo "[models] модели карты зон не скачаны — докачаются при первом запросе"
+
 exec python main.py --listen 0.0.0.0 --port 8188 ${COMFYUI_ARGS:-}

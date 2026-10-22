@@ -7,11 +7,12 @@ import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { fmt, LLMS, useAccount } from '../lib/account'
 import { ModelSelect } from './ModelSelect'
 
-export type Tab = 'img2img' | 'inpainting' | 'account'
+export type Tab = 'img2img' | 'inpainting' | 'renderpass' | 'account'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'img2img', label: 'Img to Img' },
   { id: 'inpainting', label: 'Inpainting' },
+  { id: 'renderpass', label: 'Render pass' },
 ]
 
 interface Props {

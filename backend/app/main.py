@@ -8,6 +8,7 @@ from fastapi.responses import Response
 
 from . import comfy
 from . import inpaint as inpainting
+from . import zones as zone_map
 from .auth import current_user
 from .auth import router as auth_router
 from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, log
@@ -123,6 +124,16 @@ def _parse_box(raw: str | None) -> list[float] | None:
 
 # BaseColor 4K в EXR весит 25-30 МБ
 TEXTURE_MAX_BYTES = 64 * 2**20
+
+@app.post("/api/zones")
+async def zones(image: UploadFile = File(...), _user: User = Depends(current_user)):
+    """Карта зон кадра (Render pass): небо, газон, деревья, окна, двери, крыша, отделка стен — готовые маски."""
+    try:
+        return await zone_map.build_zones(await image.read())
+    except (comfy.ComfyError, httpx.HTTPError) as e:
+        log.exception("zones failed")
+        raise HTTPException(502, f"Карта зон не построена: {e}") from e
+
 
 @app.post("/api/inpaint/plan")
 async def inpaint_plan(
