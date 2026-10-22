@@ -36,7 +36,7 @@ Qwen-Image-Edit-2511 — в родном для неё виде (build_qwen2511_
   - картинки — в TextEncodeQwenImageEditPlus: Picture 1 — исходник, Picture 2 — вырезанное небо референса.
     Сам референс картинкой не подаётся (QWEN_EDIT_REF_IMAGE): с ним 2511 брала с референса и дом — цоколь,
     колонны, крыльцо. Свет и окружение референса описывает текстом официальный переписчик (DeepSeek видит референс);
-  - Lightning LoRA, 4 шага, cfg 1, сдвиг 3.1, CFGNorm, index_timestep_zero; кадр ~1 Мп, полный шум от латента
+  - Lightning LoRA на 8 шагов (в Inpainting — на 4), cfg 1, сдвиг 3.1, CFGNorm, index_timestep_zero; кадр ~1 Мп, полный шум от латента
     исходника; InegoAlign возвращает кадр на место; зоны и небо — как у FLUX и 2.1. «Сила» не применяется.
 """
 
@@ -64,7 +64,9 @@ from .config import (
     QWEN_EDIT,
     QWEN_EDIT_MODEL,
     QWEN_EDIT_REF_IMAGE,
+    QWEN_EDIT_RENDER_LORA,
     QWEN_EDIT_RENDER_MEGAPIXELS,
+    QWEN_EDIT_RENDER_STEPS,
     QWEN_EDIT_ZONE_DENOISE,
     RENDER_MEGAPIXELS,
     SKY_MATCH,
@@ -316,12 +318,12 @@ def build_qwen21_workflow(
 
 
 def _q2511_sampling(wf: dict, tag: str, text: str, model: list, latent: list, denoise: float, seed: int) -> list:
-    """Сэмплинг Qwen-Image-Edit-2511: Lightning 4 шага, euler/simple, cfg 1 (негатив — пустой текст)."""
+    """Сэмплинг Qwen-Image-Edit-2511 в Img to Img: Lightning 8 шагов, euler/simple, cfg 1 (негатив — пустой текст)."""
     wf[f"sample{tag}"] = {
         "class_type": "KSampler",
         "inputs": {
             "model": model, "positive": [f"ref_pos{text}", 0], "negative": [f"ref_neg{text}", 0], "latent_image": latent,
-            "seed": seed, "steps": QWEN_EDIT["steps"], "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
+            "seed": seed, "steps": QWEN_EDIT_RENDER_STEPS, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
             "denoise": denoise,
         },
     }
@@ -347,7 +349,7 @@ def build_qwen2511_workflow(
     q = QWEN_EDIT
     wf: dict = {
         "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": q["unet"]}},
-        "lora": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["unet", 0], "lora_name": q["lora"], "strength_model": 1.0}},
+        "lora": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["unet", 0], "lora_name": QWEN_EDIT_RENDER_LORA, "strength_model": 1.0}},
         "shift": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["lora", 0], "shift": q["shift"]}},
         "cfgnorm": {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}},
         "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": q["text_encoder"], "type": "qwen_image", "device": "default"}},
@@ -495,7 +497,8 @@ async def _check_model(client: httpx.AsyncClient, model: str) -> None:
     """Понятная ошибка вместо «Value not in list», если веса модели ещё не скачаны в ComfyUI."""
     if model == QWEN_EDIT_MODEL:
         q = QWEN_EDIT
-        need = (("unet_gguf", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]), ("loras", q["lora"]))
+        need = (("unet_gguf", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]), ("loras", q["lora"]),
+                ("loras", QWEN_EDIT_RENDER_LORA))
     elif model in QWEN21_MODELS:
         q = QWEN21
         need = (("diffusion_models", q["unet"]), ("text_encoders", q["text_encoder"]), ("vae", q["vae"]))

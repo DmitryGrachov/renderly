@@ -43,7 +43,8 @@ FLUX_MODELS = {
     },
 }
 DEFAULT_MODEL = "klein-4b"
-# Qwen-Image-Edit-2511 (Apache 2.0, 20B) — только Inpainting: GGUF Q4_K_M + Lightning LoRA на 4 шага
+# Qwen-Image-Edit-2511 (Apache 2.0, 20B) — Inpainting и Img to Img: GGUF Q4_K_M + Lightning LoRA.
+# Inpainting — 4 шага: на 8 модель перерисовывала больше, чем просили (дверь целиком — без стёкол, пропал светильник)
 QWEN_EDIT_MODEL = "qwen-edit-2511"
 QWEN_EDIT = {
     "unet": os.getenv("QWEN_EDIT_UNET", "qwen-image-edit-2511-Q4_K_M.gguf"),
@@ -56,6 +57,9 @@ QWEN_EDIT = {
 # Img to Img на 2511: кадр ~1 Мп (как ImageScaleToTotalPixels в шаблоне ComfyUI — на нём модель держит Picture 1
 # без дрейфа), перерисовка сохраняемых зон — хвост расписания (доля шума)
 QWEN_EDIT_RENDER_MEGAPIXELS = float(os.getenv("QWEN_EDIT_RENDER_MEGAPIXELS", "1.0"))
+# Img to Img — 8 шагов (своя LoRA): на 4 фактура плоская и изредка мусорные надписи в углу кадра
+QWEN_EDIT_RENDER_LORA = os.getenv("QWEN_EDIT_RENDER_LORA", "Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors")
+QWEN_EDIT_RENDER_STEPS = int(os.getenv("QWEN_EDIT_RENDER_STEPS", "8"))
 QWEN_EDIT_ZONE_DENOISE = float(os.getenv("QWEN_EDIT_ZONE_DENOISE", "0.75"))
 # референс картинкой в 2511: с ним модель брала с референса и дом (каменный цоколь, колонну, крыльцо); без него
 # свет и окружение референса описывает переписчик, картинкой идёт только вырезанное небо референса

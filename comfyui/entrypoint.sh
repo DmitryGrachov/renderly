@@ -31,11 +31,12 @@ else
 fi
 
 # Qwen-Image-Edit-2511 (Apache 2.0) — модель для Inpainting: GGUF Q4_K_M (~13 ГБ), текстовый энкодер Qwen2.5-VL 7B,
-# свой VAE и Lightning LoRA на 4 шага. QWEN_EDIT=false — не скачивать (~24 ГБ)
+# свой VAE и Lightning LoRA на 8 шагов (и на 4 — запасная). QWEN_EDIT=false — не скачивать (~24 ГБ)
 if [ "${QWEN_EDIT:-true}" = "true" ]; then
   fetch diffusion_models qwen-image-edit-2511-Q4_K_M.gguf "$HF/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q4_K_M.gguf"     || echo "[models] Qwen-Image-Edit-2511 не скачана"
   fetch text_encoders qwen_2.5_vl_7b_fp8_scaled.safetensors "$HF/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"     || echo "[models] qwen_2.5_vl_7b не скачан"
   fetch vae qwen_image_vae.safetensors "$HF/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"     || echo "[models] qwen_image_vae не скачан"
+  fetch loras Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors "$HF/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors"     || echo "[models] Lightning LoRA (8 шагов) не скачана"
   fetch loras Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors "$HF/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"     || echo "[models] Lightning LoRA не скачана"
 fi
 
