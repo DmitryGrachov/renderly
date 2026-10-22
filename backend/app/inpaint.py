@@ -194,6 +194,42 @@ Q2511_EDIT_PROMPT = (
     "guide: the result is based on the clean Picture 1 and the red outline leaves no trace. Everything outside the "
     "outlined area stays exactly as in Picture 1."
 )
+# официальный переписчик правок Qwen-Image-Edit (QwenLM/Qwen-Image, src/examples/tools/prompt_utils.py,
+# polish_edit_prompt; Apache 2.0): там его играет qwen-vl-max, у нас — DeepSeek с картинками
+Q2511_REWRITE_SYSTEM = (Path(__file__).parent / "prompts" / "qwen2511_edit_rewrite.txt").read_text(encoding="utf-8")
+# что переписчик узнаёт о картинках и задаче — запрос пользователя идёт следом как есть
+Q2511_TASK = {
+    "add": (
+        "Picture 1 is the photo to edit. Picture 2 is the same photo with a thin red outline marking where the new "
+        "element stands and how big it is: it stands on the ground at the bottom of the outline, at its true "
+        "real-world size. Only the new element and its own shadow appear; everything else stays unchanged."
+    ),
+    "change": (
+        "Picture 1 is the photo to edit. Picture 2 is the same photo with a thin red outline marking what to change; "
+        "everything outside the outline stays unchanged."
+    ),
+    "material": (
+        "Picture 1 is the photo to edit. Picture 2 is the same photo with a thin red outline marking the surface whose "
+        "material changes: its shape, size, edges and openings stay, only the material changes; everything outside "
+        "the outline stays unchanged."
+    ),
+    "remove": (
+        "Picture 1 is the photo to edit. Picture 2 is the same photo with a thin red outline marking what to delete, "
+        "together with its shadow; the area is filled with the background that continues around it, everything "
+        "else stays unchanged."
+    ),
+}
+Q2511_SAMPLE = " Picture 3 is a photo sample of the new material: the surface gets exactly this material."
+# после ответа переписчика — всегда: роль контура, свет кадра
+Q2511_GUIDE = (
+    " Picture 2 is only a guide: the result is based on the clean Picture 1 and the red outline leaves no trace. "
+    "Everything outside the outlined area stays exactly as in Picture 1."
+)
+Q2511_TEXTURE = (
+    " The new material is exactly the material shown in Picture 3: the same colour, pattern, grain, element shapes, "
+    "joints and surface finish, laid on the surface at true real-world scale (not at the scale of the sample photo), "
+    "following its plane and perspective. Picture 3 is only a material sample; nothing else from it appears."
+)
 Q2511_SIZE_ADD = (
     "The outlined area shows where it stands and its full size: it fills the area at its real size, standing at "
     "the bottom of it, and is shown whole, never cut off. "
@@ -385,7 +421,7 @@ async def describe_removal(crop: bytes, highlighted: bytes, hint: str = "") -> d
 
 def build_qwen_workflow(
     crop: str, mask: str, width: int, height: int, prompt: str, seed: int, prefix: str,
-    reference: str | None = None, denoise: float = 1.0, native: bool = False,
+    reference: str | None = None, denoise: float = 1.0, native: bool = False, texture: str | None = None,
 ) -> dict:
     """То же на Qwen-Image-Edit-2511: картинки подаются в TextEncodeQwenImageEditPlus (Picture 1 — кроп,
     Picture 2 — подсказка), Lightning LoRA — 4 шага, cfg 1.
@@ -411,6 +447,10 @@ def build_qwen_workflow(
     if reference:
         wf["ref_img"] = {"class_type": "LoadImage", "inputs": {"image": reference}}
         images["image2"] = ["ref_img", 0]
+    if texture:
+        # Picture 3 — образец материала (штатный перенос материала 2511: «…to the material in image 2» из шаблона ComfyUI)
+        wf["tex_img"] = {"class_type": "LoadImage", "inputs": {"image": texture}}
+        images["image3" if reference else "image2"] = ["tex_img", 0]
     for tag, text in (("pos", prompt), ("neg", "")):
         wf[f"text_{tag}"] = {
             "class_type": "TextEncodeQwenImageEditPlus",
@@ -532,7 +572,9 @@ def build_workflow(
 ) -> dict:
     """Перерисовка кропа только под маской. image 1 — сам кроп, image 2 (reference) — его копия с разметкой правки."""
     if model == QWEN_EDIT_MODEL:
-        return build_qwen_workflow(crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native)
+        return build_qwen_workflow(
+            crop, mask, width, height, prompt, seed, prefix, reference, steps / TOTAL_STEPS, native, texture
+        )
     if model in QWEN21_MODELS:
         # прогон с маской второй картинкой (native) — всегда Turbo: базовая принимала белое маски буквально и рисовала
         # объект на белом прямоугольнике. Базовая (qwen-image-2.1) — во втором прогоне по шуму под объектом: фактура
@@ -956,6 +998,10 @@ class _Region:
         if self.extra is not None:
             # добавить / заменить: вклеиваются только силуэт объекта (SAM 2.1) и его тень затемнением
             async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
+                if model == QWEN_EDIT_MODEL:
+                    # 2511 (GGUF ~13 ГБ + энкодер ~9 ГБ) вместе с SAM не помещается в 25 ГБ RAM контейнера —
+                    # процесс ComfyUI убивала система; веса 2511 выгружаются (для второго прогона подгрузятся снова)
+                    await client.post("/free", json={"unload_models": True, "free_memory": True})
                 found = await _extract_object(client, patch, self.crop, self.core, self.gen)
         # вуаль снимается только без силуэта: с ним фон и так из исходника, а светлый объект над тёмным фоном
         # (тент зонта над окном) _unveil принимал за вуаль и вырезал в нём дыры с окном
@@ -1176,7 +1222,8 @@ async def harmonize_frame(
     Qwen-Image-2.1 Turbo."""
     w, h = result.size
     flux = model in FLUX_MODELS
-    gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else QWEN21_MEGAPIXELS)
+    own = model == QWEN_EDIT_MODEL  # 2511 пересчитывает сам, ~1 Мп (FluxKontextImageScale в шаблоне ComfyUI)
+    gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else INPAINT_MEGAPIXELS if own else QWEN21_MEGAPIXELS)
     prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
     # сцена — в какую фотографию вписывать; ультрареализм — всегда
     keys = ("light", "colour_grade", "camera", "mood") if flux else ("light", "atmosphere", "colour_grade", "camera", "mood")
@@ -1187,9 +1234,18 @@ async def harmonize_frame(
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         try:
             # Qwen — пересчёт на 2.1 Turbo (как Img to Img); базовая модель уводила кадр
-            await _check_model(client, model if flux else QWEN21_TURBO_MODEL)
+            await _check_model(client, model if flux or own else QWEN21_TURBO_MODEL)
             name = await _upload(client, to_png(result.resize((gw, gh), Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-            if flux:
+            if model == QWEN_EDIT_MODEL:
+                # 2511 пересчитывает сам: кадр — Picture 1, полный шум (родной режим, без маски), 4 шага Lightning
+                wf = build_qwen_workflow(name, name, gw, gh, prompt.replace("<image1>", "Picture 1"), seed, "rerender",
+                                         native=True)
+                wf["align"] = {
+                    "class_type": "InegoAlign",
+                    "inputs": {"image": ["decode", 0], "source": ["src_img", 0], "max_scale": 0.08, "max_shift": 0.08},
+                }
+                wf["save"]["inputs"]["images"] = ["align", 0]
+            elif flux:
                 # klein: картинка — «image 1» (ReferenceLatent), полный шум; совмещение кадра — как у 2.1, иначе
                 # полоса вклеивается со сдвигом
                 wf = flux_img2img_workflow(name, gw, gh, prompt.replace("<image1>", "image 1"), 1.0, seed, None, model=model)
@@ -1208,7 +1264,7 @@ async def harmonize_frame(
     if "save" not in out:
         return result
     log.info("кадр пересчитан целиком (%s): %dx%d → %dx%d, вписано: %s",
-             model if flux else "2.1 Turbo", w, h, gw, gh, subject)
+             model if flux or own else "2.1 Turbo", w, h, gw, gh, subject)
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
     if area is None:
         return frame
@@ -1493,10 +1549,14 @@ async def run_remove(
     if native:
         tpl = Q21_REMOVE_PROMPT if model in QWEN21_MODELS else Q2511_REMOVE_PROMPT
         prompt = tpl.format(**what) + (Q21_KEEP.format(keep=what["keep"]) if what.get("keep") else "")
+    request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
     if model in QWEN21_MODELS:
-        request = f"удали {hint.strip()}" if hint and hint.strip() else "удали то, что отмечено"
         prompt = await rewrite_q21(r.crop, r.mask, "remove", request) or prompt
         prompt += " " + Q21_MASK_TRACE
+    elif model == QWEN_EDIT_MODEL:
+        rewritten = await rewrite_2511(r.crop, r.mask, "remove", request)
+        if rewritten:
+            prompt = rewritten + Q2511_GUIDE
     prompt += REALISM_REMOVE
     log.info(
         "remove %s %dx%d кроп %s → %dx%d seed=%d тень=%s\n%s",
@@ -1601,6 +1661,44 @@ async def rewrite_q21(
         text = " ".join(str(data.get("rewritten_prompt") or data.get("rewrited_prompt") or "").split())
     except Exception as e:  # noqa: BLE001 — без переписчика остаётся шаблон
         log.warning("Переписчик Qwen-Image-2.1 (DeepSeek) недоступен: %s", e)
+        return None
+    if not text:
+        return None
+    _described[key] = {"prompt": text}
+    if len(_described) > CACHE_SIZE:
+        _described.popitem(last=False)
+    return text
+
+
+async def rewrite_2511(
+    crop: Image.Image, area: Image.Image, task: str, request: str, texture: bytes | None = None
+) -> str | None:
+    """Запрос для Qwen-Image-Edit-2511 так, как его пишет официальный переписчик (polish_edit_prompt): DeepSeek с
+    его системным промптом, картинками Picture 1 (кроп), Picture 2 (кроп с красным контуром области) и, для
+    материала по образцу, Picture 3 (образец). None — переписать не удалось (тогда шаблон)."""
+    if not DEEPSEEK_API_KEY:
+        return None
+    instruction = Q2511_TASK[task] + (Q2511_SAMPLE if texture else "") + f" Edit request: «{request}»"
+    crop_png, outline_png = to_png(crop), to_png(_outline(crop, area))
+    key = hashlib.sha256(
+        b"2511" + crop_png + outline_png + instruction.encode() + llm_model.get().encode() + (texture or b"")
+    ).hexdigest()
+    if key in _described:
+        _described.move_to_end(key)
+        return _described[key]["prompt"]
+    images = [("Picture 1", crop_png, 1536), ("Picture 2", outline_png, 1536)]
+    if texture:
+        images.append(("Picture 3", texture, TEXTURE_SIDE))
+    content = []
+    for name, data, side in images:
+        content += [{"type": "text", "text": f"{name}:"}, {"type": "image_url", "image_url": {"url": _data_url(data, side)}}]
+    content.append({"type": "text", "text": f"User Input: {instruction}\n\nRewritten Prompt:"})
+    try:
+        raw = await _chat([{"role": "system", "content": Q2511_REWRITE_SYSTEM}, {"role": "user", "content": content}],
+                          json_mode=True)
+        text = " ".join(str(json.loads(raw).get("Rewritten") or "").split())
+    except Exception as e:  # noqa: BLE001 — без переписчика остаётся шаблон
+        log.warning("Переписчик Qwen-Image-Edit-2511 (DeepSeek) недоступен: %s", e)
         return None
     if not text:
         return None
@@ -1955,8 +2053,21 @@ async def run_edit(
         if tex is not None:
             prompt += Q21_TEXTURE
     elif native:
-        # 2511: место и размер — красным контуром на Picture 2
-        prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
+        # 2511: место и размер — красным контуром на Picture 2; запрос — официальный переписчик Qwen в исполнении
+        # DeepSeek (образец материала — Picture 3), шаблон — запасной вариант
+        material = material or parse_kind(request) == "material"
+        task = "add" if extra is not None else "material" if material else "change"
+        prompt = await rewrite_2511(
+            r.crop, r.mask, task, request.strip() + (WOOD_NOTE if material and "дерев" in request.lower() else ""),
+            texture,
+        )
+        if prompt:
+            prompt += (" " + Q2511_SIZE_ADD.strip() if extra is not None else "") + Q2511_GUIDE
+        else:
+            prompt = Q2511_EDIT_PROMPT.format(**what, size_rule=Q2511_SIZE_ADD if extra is not None else "")
+        prompt += f" It is photographed in the same shot as the rest of Picture 1: {what['look']}"
+        if tex is not None:
+            prompt += Q2511_TEXTURE
     else:
         prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
     if what.get("material"):
@@ -1977,6 +2088,6 @@ async def run_edit(
     subject = subject[:1].lower() + subject[1:]
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
-        texture=tex if model in QWEN21_MODELS else None,
+        texture=tex if model in (*QWEN21_MODELS, QWEN_EDIT_MODEL) else None,
         harmonize=(f"{subject} was just {'added' if add else 'changed'}", False), scene=scene,
     ), seed
