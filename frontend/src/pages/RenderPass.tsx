@@ -8,6 +8,7 @@ import { buildZones, zoneColor, type Zone, type ZoneKind, type ZoneMap } from '.
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
 const SECTIONS: { kinds: ZoneKind[]; title: string }[] = [
+  { kinds: ['material'], title: 'Материалы стен' },
   { kinds: ['part'], title: 'Здание' },
   { kinds: ['veg'], title: 'Растительность' },
   { kinds: ['scene'], title: 'Окружение' },

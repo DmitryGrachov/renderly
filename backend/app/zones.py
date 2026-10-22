@@ -1,7 +1,7 @@
 """Карта зон кадра (вкладка Render pass): нод InegoZoneMap в ComfyUI (см. comfyui/custom_nodes/inego_nodes/zones.py).
 
 Ответ — карта зон PNG (значение пикселя — id зоны, 0 — без зоны), альфа растительности PNG (мягкие края веток),
-id растительности под альфой PNG и список зон {id, label, kind, group}: kind — scene | veg | part.
+id растительности под альфой PNG и список зон {id, label, kind, group}: kind — scene | veg | part | material.
 """
 
 import asyncio

@@ -8,8 +8,11 @@
      Крыша — один слой (все найденные куски вместе);
   3. по всему кадру Grounding DINO ищет то, что EoMT пропускает: живую изгородь, забор и каждое дерево отдельно;
   4. края — SAM 2.1 по рамкам;
-  5. стены — один слой: здание без частей; горизонтальные плоскости (пол террасы) — «Покрытие» (оси здания по
-     MoGe-2 и линиям кадра, как в InegoTextureProject);
+  5. стены — по материалам, как Material ID: один слой на материал по всему зданию («Стены · материал 1» —
+     вся штукатурка, «Стены · материал 2» — весь кирпич). Куски — SAM по сетке точек (однородные первыми), один
+     ли материал — по альбедо Marigold-IID (цвет без света: штукатурка на солнце и в тени — одна) и фактуре.
+     Мелкие детали фасада (светильники) — Grounding DINO по увеличенной вырезке здания (на весь кадр их не видно).
+     Горизонтальные плоскости (пол террасы) — «Покрытие» (оси здания по MoGe-2 и линиям кадра);
   6. края карты — крапинки соседям, границы прижаты к перепадам картинки (guided filter), прямые края архитектуры —
      по прямым кадра; растительность — мягкая альфа ViTMatte: в тримапе «точно дерево» — только не похожее на небо
      (небо между ветками раздутого пятна EoMT иначе становилось деревом).
@@ -31,7 +34,8 @@ from scipy import ndimage
 
 import folder_paths
 
-from . import _device, _free_vram, _manhattan_faces, _manhattan_frame, _moge, _sam, _straighten, _to_uint8
+from . import (_decompose, _device, _free_vram, _manhattan_faces, _manhattan_frame, _moge, _sam, _straighten,
+               _to_srgb, _to_uint8)
 
 log = logging.getLogger("inego")
 
@@ -52,6 +56,10 @@ PARTS = [
     ("owl", "downpipe", 0.25, "Водосток"),
     ("owl", "chimney", 0.25, "Труба"),
 ]
+# мелкие детали фасада — по увеличенной вырезке здания: запрос, порог, подпись
+DETAILS = [("lamp", 0.40, "Светильник")]
+DETAIL_SIDE = 1600  # длинная сторона увеличенной вырезки здания
+MAT_MIN = 0.03  # кусок материала стен — не меньше этой доли стен
 # по всему кадру (EoMT их пропускает или сливает): запрос, порог, подпись, вид
 SCENE_EXTRA = [
     ("hedge", 0.30, "Живая изгородь", "veg"),
@@ -71,7 +79,8 @@ SCENE = {
 }
 THINGS = {"car", "truck", "van", "person", "bicycle", "minibike", "bench", "pole", "streetlight"}
 OPENINGS = {"Окно", "Дверь", "Ворота"}
-ARCH = ("Крыша", "Стены", "Окно", "Дверь", "Ворота", "Колонна", "Труба", "Балкон", "Покрытие", "Ступени", "Водосток")
+ARCH = ("Крыша", "Стены", "Окно", "Дверь", "Ворота", "Колонна", "Труба", "Балкон", "Покрытие", "Ступени", "Водосток",
+        "Светильник")
 VEG = ("Дерево", "Деревья", "Кусты", "Цветы", "Живая изгородь")
 MATTE_SIDE = 1536  # длинная сторона кропа для ViTMatte
 
@@ -267,6 +276,124 @@ def _faces(rgb, walls):
     return [(owner == i, abs(float(np.dot(n, axes[0]))) > np.cos(np.radians(35))) for i, (n, _) in enumerate(planes)]
 
 
+def _features(rgb):
+    """Признаки материала на пиксель: альбедо Marigold-IID в Lab (цвет без света — штукатурка на солнце и в тени
+    одна) и фактура — локальный перепад яркости, делённый на местную яркость (тень её не меняет): камень и кирпич —
+    высокая, штукатурка — низкая."""
+    import cv2
+
+    alb = _decompose(rgb)[0]
+    alb = (np.clip(_to_srgb(np.clip(alb, 0, 1)), 0, 1) * 255).astype(np.uint8)
+    if alb.shape[:2] != rgb.shape[:2]:
+        alb = np.asarray(Image.fromarray(alb).resize((rgb.shape[1], rgb.shape[0]), Image.BILINEAR))
+    lab = cv2.cvtColor(alb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L, a, b = lab[..., 0] * 100 / 255, lab[..., 1] - 128, lab[..., 2] - 128
+    Y = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float32) * 100 / 255
+    tex = np.abs(Y - ndimage.uniform_filter(Y, 5)) / (ndimage.uniform_filter(Y, 15) + 8) * 100
+    tex = ndimage.uniform_filter(tex, max(5, rgb.shape[1] // 120))
+    return np.stack([a, b, L / 2, tex / 2], -1)
+
+
+def _inhomogeneity(feat, m):
+    v = feat[m][:: max(1, int(m.sum()) // 4000)]
+    return float(v.std(0).sum())
+
+
+def _split_materials(rgb, feat, walls):
+    """Куски материала стен: SAM по сетке точек; однородные куски первыми (маска «вся стена» с кирпичом и
+    штукатуркой разнородна и проигрывает); остаток — куску с похожим материалом (иначе граница шла дугой там, где
+    стыка нет)."""
+    total = walls.sum()
+    if total < 400:
+        return [walls]
+    ys, xs = np.nonzero(walls)
+    inner = ndimage.binary_erosion(walls, iterations=max(1, round(0.02 * np.sqrt(total))))
+    if inner.sum() < 50:
+        inner = walls
+    iy, ix = np.nonzero(inner)
+    pts = set()
+    for gy in np.linspace(0.05, 0.95, 9):
+        for gx in np.linspace(0.05, 0.95, 9):
+            ty, tx = ys.min() + gy * np.ptp(ys), xs.min() + gx * np.ptp(xs)
+            k = int(np.argmin((iy - ty) ** 2 + (ix - tx) ** 2))
+            pts.add((float(ix[k]), float(iy[k])))
+    pts = sorted(pts)
+    ms, sc = _sam_run(rgb, input_points=[[[list(p)] for p in pts]], input_labels=[[[1] for _ in pts]])
+    ms = ms.reshape(len(pts), -1, *walls.shape)
+    sc = sc.reshape(len(pts), -1)
+    cands = []
+    for i in range(len(ms)):
+        for j in range(ms.shape[1]):
+            inw = ms[i, j] & walls
+            if inw.sum() >= MAT_MIN * total and inw.sum() > 0.5 * ms[i, j].sum() and sc[i, j] > 0.7:
+                cands.append(inw)
+    cands.sort(key=lambda m: _inhomogeneity(feat, m) - 2.0 * np.log(m.sum() / total))
+    taken = np.zeros_like(walls)
+    segs = []
+    for m in cands:
+        new = m & ~taken
+        if new.sum() >= 0.7 * m.sum() and new.sum() >= MAT_MIN * total:
+            segs.append(new)
+            taken |= new
+    if len(segs) <= 1:
+        return [walls]
+    fs = ndimage.gaussian_filter(feat, (2, 2, 0))
+    cost = []
+    for m in segs:
+        mu, sd = fs[m].mean(0), fs[m].std(0) + 1.0
+        cost.append((((fs - mu) / sd) ** 2).sum(-1))
+    lab = np.argmin(np.stack(cost), 0) + 1
+    for i, m in enumerate(segs, 1):
+        lab[m] = i
+    sig = max(1.5, 0.004 * max(walls.shape))
+    votes = np.stack([ndimage.gaussian_filter(((lab == i) & walls).astype(np.float32), sig) for i in range(1, len(segs) + 1)])
+    lab = np.where(walls, np.argmax(votes, 0) + 1, 0)
+    return [lab == i for i in range(1, len(segs) + 1)]
+
+
+def _material_groups(feat, segs):
+    """Один материал — одна группа: альбедо (цвет без света) и фактура."""
+    med = [np.median(feat[m], 0) for m in segs]
+    group = list(range(len(segs)))
+
+    def root(i):
+        while group[i] != i:
+            i = group[i]
+        return i
+
+    for i in range(len(segs)):
+        for j in range(i):
+            (ai, bi, li, ti), (aj, bj, lj, tj) = med[i], med[j]
+            # фактура разделяет, только если разница заметная: на гладкой штукатурке мерка неустойчива (рамы окон,
+            # тени и рёбра в куске), и одна штукатурка распадалась на несколько материалов
+            if (abs(ai - aj) < 5 and abs(bi - bj) < 6 and abs(li - lj) * 2 < 12
+                    and (abs(ti - tj) < 2.5 or max(ti, tj) + 0.5 < 1.4 * (min(ti, tj) + 0.5))):
+                group[root(i)] = root(j)
+    log.info("INEGO zones: куски стен (a, b, L/2, фактура/2): %s → группы %s",
+             [tuple(round(float(v), 1) for v in m) for m in med], [root(i) for i in range(len(segs))])
+    return [root(i) for i in range(len(segs))]
+
+
+def _details(img: Image.Image, bmask: np.ndarray):
+    """Мелкие детали фасада (светильники): Grounding DINO по увеличенной вырезке здания — на весь кадр они
+    в несколько пикселей и не находятся. Рамки — в координатах кадра."""
+    if not bmask.any():
+        return []
+    ys, xs = np.nonzero(bmask)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    k = min(3.0, DETAIL_SIDE / max(x1 - x0, y1 - y0))
+    if k <= 1.05:
+        return []
+    crop = img.crop((x0, y0, x1, y1)).resize((round((x1 - x0) * k), round((y1 - y0) * k)), Image.LANCZOS)
+    out = []
+    for q, thr, name in DETAILS:
+        for b, sc in _nms(_detect(crop, "gdino", q, thr)):
+            box = [x0 + b[0] / k, y0 + b[1] / k, x0 + b[2] / k, y0 + b[3] / k]
+            if (box[2] - box[0]) * (box[3] - box[1]) < 0.02 * (x1 - x0) * (y1 - y0):
+                out.append((name, box, sc))
+    return out
+
+
 def _fill(out, hole):
     """Пиксели hole — ближайшей зоне не из hole."""
     if hole.any() and (~hole).any():
@@ -431,6 +558,7 @@ def build_zone_map(rgb: np.ndarray):
                         if name in ("Живая изгородь", "Забор"):
                             name, zkind = _hedge_or_fence(img, b)
                         extra.append((name, b, zkind))
+                found += _details(img, bmask)
     found = _clean_parts(found, bmask, H, W)
     masks = _sam_boxes(rgb, [f[1] for f in found] + [e[1] for e in extra])
     part_masks, extra_masks = masks[: len(found)], masks[len(found):]
@@ -486,7 +614,7 @@ def build_zone_map(rgb: np.ndarray):
     occupied = np.zeros((H, W), bool)
     for p in parts:
         occupied |= p[1]
-    # стены — один слой: здание без частей; горизонтальные плоскости — покрытие
+    # стены — без частей; горизонтальные плоскости — покрытие; остальное — по материалам, слой на материал
     walls = bmask & ~occupied
     floor = np.zeros((H, W), bool)
     for f, horizontal in _faces(rgb, walls):
@@ -494,7 +622,16 @@ def build_zone_map(rgb: np.ndarray):
             floor |= f
     if floor.sum() > 0.002 * H * W:
         zones.append(["Покрытие", floor, "part"])
-    zones.append(["Стены", walls & ~floor, "part"])
+    walls &= ~floor
+    feat = _features(rgb)
+    pieces = _split_materials(rgb, feat, walls)
+    groups = _material_groups(feat, pieces) if len(pieces) > 1 else [0]
+    mats = {}
+    for g, m in zip(groups, pieces):
+        mats[g] = mats.get(g, np.zeros((H, W), bool)) | m
+    mats = sorted(mats.values(), key=lambda m: -m.sum())
+    for n, m in enumerate(mats, 1):
+        zones.append(["Стены" if len(mats) == 1 else f"Стены · материал {n}", m, "material"])
     zones += parts
 
     # карта: позже — поверх

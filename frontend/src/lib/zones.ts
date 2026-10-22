@@ -1,11 +1,11 @@
 /** Карта зон кадра (Render pass): /api/zones */
 
-export type ZoneKind = 'scene' | 'veg' | 'part' | 'finish'
+export type ZoneKind = 'scene' | 'veg' | 'part' | 'material' | 'finish'
 
 export interface Zone {
   id: number
   label: string
-  /** scene — сцена, veg — растительность, part — часть здания, finish — отделка стен */
+  /** scene — сцена, veg — растительность, part — часть здания, material — материал стен (слой на материал) */
   kind: ZoneKind
   /** буква отделки: одна буква — один материал на всех гранях */
   group: string | null
