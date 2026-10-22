@@ -4,11 +4,12 @@ import { Eye, EyeOff, Loader2, RotateCcw, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { toStudioImage, type StudioImage } from '../lib/types'
 import { buildZones, zoneColor, type Zone, type ZoneKind, type ZoneMap } from '../lib/zones'
+import { useAccount } from '../lib/account'
 
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
 const SECTIONS: { kinds: ZoneKind[]; title: string }[] = [
-  { kinds: ['material'], title: 'Материалы стен' },
+  { kinds: ['material'], title: 'Материалы' },
   { kinds: ['part'], title: 'Здание' },
   { kinds: ['veg'], title: 'Растительность' },
   { kinds: ['scene'], title: 'Окружение' },
@@ -19,6 +20,8 @@ export function RenderPass() {
   const [map, setMap] = useState<ZoneMap | null>(null)
   const [error, setError] = useState<string | null>(null)
   const abort = useRef<AbortController | null>(null)
+  // схему материалов рисует модель, выбранная в шапке
+  const { model } = useAccount()
 
   const start = async (file: File) => {
     abort.current?.abort()
@@ -28,7 +31,7 @@ export function RenderPass() {
     setMap(null)
     setImage(await toStudioImage(file))
     try {
-      setMap(await buildZones(file, ctrl.signal))
+      setMap(await buildZones(file, model, ctrl.signal))
     } catch (e) {
       if ((e as Error).name !== 'AbortError') setError((e as Error).message)
     }
@@ -198,7 +201,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
             <div className="absolute inset-0 grid place-items-center bg-black/25 backdrop-blur-[2px]">
               <div className="flex items-center gap-2.5 rounded-full bg-surface/90 px-4 py-2 text-[14px] font-medium shadow-card">
                 <Loader2 className="size-4 animate-spin text-accent" />
-                Строим карту зон… обычно 20–60 с
+                Строим карту зон… обычно 1–2 мин
               </div>
             </div>
           )}

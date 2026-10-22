@@ -61,6 +61,7 @@ DETAILS = [("lamp", 0.40, "Светильник")]
 DETAIL_SIDE = 1600  # длинная сторона увеличенной вырезки здания
 MAT_MIN = 0.03  # кусок материала стен — не меньше этой доли стен
 FAR_DEPTH = 2.0  # здание дальше стольких глубин основного — фон (город на горизонте)
+DEPTH_JUMP = 1.12  # скачок глубины между соседними пикселями, после которого здания — разные
 # по всему кадру (EoMT их пропускает или сливает): запрос, порог, подпись, вид
 SCENE_EXTRA = [
     ("hedge", 0.30, "Живая изгородь", "veg"),
@@ -259,20 +260,31 @@ def _geometry(rgb):
 
 def _far_buildings(bmask, P):
     """Здания далеко за основным (город на горизонте): EoMT называет их тем же «building», и они уходили в стены.
-    Основное здание — крупнейший связный кусок; дальше FAR_DEPTH его глубины — фон."""
+    Основное здание — крупнейший связный кусок вместе со всем, что примыкает к нему без скачка глубины (длинный
+    дом, уходящий вглубь, — тоже он: глубина вдоль стены растёт плавно). Остальное дальше FAR_DEPTH его глубины
+    — фон."""
     depth = np.linalg.norm(np.where(np.isfinite(P), P, np.inf), axis=-1)
-    lab, n = ndimage.label(ndimage.binary_opening(bmask, iterations=1))
+    ok = bmask & np.isfinite(depth)
+    # разрыв: соседние пиксели здания с глубиной, отличающейся больше чем на DEPTH_JUMP, не связаны
+    ld = np.log(np.where(ok, depth, 1.0))
+    jump = np.zeros_like(ok)
+    jump[1:] |= np.abs(ld[1:] - ld[:-1]) > np.log(DEPTH_JUMP)
+    jump[:-1] |= np.abs(ld[1:] - ld[:-1]) > np.log(DEPTH_JUMP)
+    jump[:, 1:] |= np.abs(ld[:, 1:] - ld[:, :-1]) > np.log(DEPTH_JUMP)
+    jump[:, :-1] |= np.abs(ld[:, 1:] - ld[:, :-1]) > np.log(DEPTH_JUMP)
+    lab, n = ndimage.label(ok & ~jump)
     if not n:
         return np.zeros_like(bmask)
     sizes = ndimage.sum(np.ones_like(lab), lab, range(1, n + 1))
-    main = lab == int(np.argmax(sizes)) + 1
-    d = depth[main & np.isfinite(depth)]
-    if not d.size:
-        return np.zeros_like(bmask)
-    far = bmask & (depth > FAR_DEPTH * float(np.median(d)))
+    main_id = int(np.argmax(sizes)) + 1
+    main_depth = float(np.median(depth[lab == main_id]))
+    meds = ndimage.median(np.where(ok, depth, 0), lab, range(1, n + 1))
+    far_ids = [k + 1 for k in range(n) if k + 1 != main_id and meds[k] > FAR_DEPTH * main_depth]
+    far = np.isin(lab, far_ids)
     far = ndimage.binary_opening(far, iterations=1)
     if far.any():
-        log.info("INEGO zones: здания дальше %.1f× основного — фон (%.1f%% кадра)", FAR_DEPTH, 100 * far.mean())
+        log.info("INEGO zones: здания за скачком глубины дальше %.1f× основного — фон (%.1f%% кадра)",
+                 FAR_DEPTH, 100 * far.mean())
     return far
 
 
@@ -502,6 +514,55 @@ def _straighten_arch(idmap, labels, rgb):
     return _fill(out, out == -1)
 
 
+QUAD = ("Окно", "Дверь", "Ворота", "Светильник", "Колонна", "Труба", "Стекло", "Балкон")
+QUAD_IOU = 0.82  # кусок заменяется четырёхугольником, если совпадает с ним не хуже этого
+
+
+def _quad(m: np.ndarray):
+    """Четырёхугольник (в перспективе) по контуру куска: выпуклая оболочка, упрощённая до 4 вершин. None — кусок
+    не четырёхугольник (арка, круглое окно, Г-образный)."""
+    import cv2
+
+    cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cs:
+        return None
+    hull = cv2.convexHull(max(cs, key=cv2.contourArea))
+    peri = cv2.arcLength(hull, True)
+    for eps in (0.01, 0.02, 0.03, 0.05, 0.08):
+        poly = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(poly) == 4:
+            q = np.zeros(m.shape, np.uint8)
+            cv2.fillPoly(q, [poly], 1)
+            q = q.astype(bool)
+            iou = (q & m).sum() / max(1, (q | m).sum())
+            return q if iou >= QUAD_IOU else None
+        if len(poly) < 4:
+            return None
+    return None
+
+
+def _quadify(idmap, labels):
+    """Примитивы: окна, двери, стёкла (каждое стекло отдельно), светильники, колонны — точные четырёхугольники
+    по своему контуру, а не волнистое пятно. Добирает пиксели только у стен, рам и «без зоны»; лишнее отдаёт
+    соседям."""
+    out = idmap.copy()
+    soft = [j for j, n in labels.items() if n.startswith(("Стены", "Рамы"))] + [0]
+    for i, name in labels.items():
+        if not name.startswith(QUAD):
+            continue
+        lab, n = ndimage.label(idmap == i)
+        for k in range(1, n + 1):
+            m = lab == k
+            if m.sum() < 40:
+                continue
+            q = _quad(m)
+            if q is None:
+                continue
+            out[q & ~m & np.isin(out, soft)] = i
+            out[m & ~q & (out == i)] = -1
+    return _fill(out, out == -1)
+
+
 def _matte(idmap, labels, rgb):
     """Растительность: ViTMatte по тримапу вокруг зоны — мягкая альфа (ветки на фоне неба). «Точно дерево» — пятно
     без похожего на небо (иначе небо между ветками раздутого пятна EoMT считалось деревом), неизвестность — пятно
@@ -570,7 +631,157 @@ def _matte(idmap, labels, rgb):
     return out, alpha, vegid
 
 
-def build_zone_map(rgb: np.ndarray):
+def _schema_glass(schema: np.ndarray, area: np.ndarray | None) -> np.ndarray:
+    """Стекло со схемы: чисто голубое (оттенок циан, насыщенное и светлое); только в здании; без крошек."""
+    import cv2
+
+    hsv = cv2.cvtColor(schema, cv2.COLOR_RGB2HSV)
+    glass = (np.abs(hsv[..., 0].astype(np.int16) - 90) <= 10) & (hsv[..., 1] > 100) & (hsv[..., 2] > 100)
+    if area is not None:
+        glass &= area
+    lab, n = ndimage.label(glass)
+    if n:
+        sizes = ndimage.sum(np.ones_like(lab), lab, range(1, n + 1))
+        glass = np.isin(lab, [k + 1 for k in range(n) if sizes[k] >= 20])
+    return glass
+
+
+SCHEMA_DE = 12.0  # цвета схемы ближе этого (ΔE) — один цвет
+SCHEMA_MIN = 0.0002  # пятно схемы мельче этой доли кадра — соседям
+PART_COVER = 0.5  # пятно — часть (окно, дверь, светильник…), если её рамка покрывает хотя бы такую долю пятна
+
+
+def _schema_regions(schema: np.ndarray, area: np.ndarray):
+    """Пятна схемы в здании: цвета сводятся к палитре (k-means в Lab, близкие слиты), пятно — связный кусок
+    одного цвета; крошки — соседям. Края — ровно как нарисовала модель. (метки пятен (H, W), цвет пятна)."""
+    import cv2
+
+    H, W = area.shape
+    lab = cv2.cvtColor(schema, cv2.COLOR_RGB2LAB).astype(np.float32)
+    X = lab[area]
+    if len(X) < 100:
+        return np.zeros((H, W), np.int32), {}
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    k = min(12, len(X))
+    _, cl, cen = cv2.kmeans(X[:: max(1, len(X) // 200000)], k, None, crit, 2, cv2.KMEANS_PP_CENTERS)
+    # близкие центры — один цвет
+    root = list(range(k))
+    for i in range(k):
+        for j in range(i):
+            if np.linalg.norm(cen[i] - cen[j]) < SCHEMA_DE:
+                a, b = i, j
+                while root[a] != a:
+                    a = root[a]
+                while root[b] != b:
+                    b = root[b]
+                root[a] = b
+    for i in range(k):
+        while root[root[i]] != root[i]:
+            root[i] = root[root[i]]
+    d = ((X[:, None, :] - cen[None]) ** 2).sum(-1)
+    col = np.full((H, W), -1, np.int32)
+    col[area] = np.array(root)[d.argmin(1)]
+    # пятна: связные куски одного цвета; крошки — ближайшему пятну
+    reg = np.zeros((H, W), np.int32)
+    colour = {}
+    n = 0
+    small = max(20, int(SCHEMA_MIN * H * W))
+    for c in np.unique(col[area]):
+        lab_c, nc = ndimage.label(col == c)
+        sizes = ndimage.sum(np.ones_like(lab_c), lab_c, range(1, nc + 1))
+        for kk in range(1, nc + 1):
+            if sizes[kk - 1] < small:
+                reg[lab_c == kk] = -1
+                continue
+            n += 1
+            reg[lab_c == kk] = n
+            colour[n] = int(c)
+    hole = (reg == -1) | (area & (reg == 0))
+    if hole.any() and (reg > 0).any():
+        reg = _fill(np.where(hole, -1, reg), hole)
+    reg[~area] = 0
+    return reg, colour
+
+
+def _schema_building(rgb, schema, area, glass, part_masks, roof, floor, feat):
+    """Здание по схеме: пятна схемы с её ровными краями, имена — от стекла, рамок частей, крыши и альбедо.
+    [подпись, маска, вид]."""
+    H, W = area.shape
+    reg, colour = _schema_regions(schema, area)
+    out = []
+    walls_by_colour: dict[int, np.ndarray] = {}
+    claimed = {name: np.zeros((H, W), bool) for name, _ in part_masks}
+    for r in range(1, reg.max() + 1):
+        m = reg == r
+        if not m.any():
+            continue
+        if (m & glass).sum() > 0.5 * m.sum():
+            out.append(["Стекло", m, "material"])
+            continue
+        hit = None
+        for name, pm in part_masks:
+            if (m & pm).sum() >= PART_COVER * m.sum():
+                hit = name
+                break
+        if hit:
+            claimed[hit] |= m
+            continue
+        if roof is not None and (m & roof).sum() >= PART_COVER * m.sum():
+            out.append(["Крыша", m, "part"])
+            continue
+        if floor is not None and (m & floor).sum() >= 0.6 * m.sum():
+            out.append(["Покрытие", m, "part"])
+            continue
+        c = colour.get(r, 0)
+        walls_by_colour[c] = walls_by_colour.get(c, np.zeros((H, W), bool)) | m
+    # стекло, крыша, покрытие — по одному слою
+    merged = {}
+    rest = []
+    for z in out:
+        if z[0] in ("Стекло", "Крыша", "Покрытие"):
+            if z[0] in merged:
+                merged[z[0]][1] |= z[1]
+            else:
+                merged[z[0]] = [z[0], z[1].copy(), z[2]]
+        else:
+            rest.append(z)
+    out = rest + list(merged.values())
+    # окна без стекла — рамы; остальные части — своими именами (пятна схемы внутри их рамок)
+    for name, m in claimed.items():
+        if m.sum() > 30:
+            out.append(["Рамы" if name == "Окно" else name, m, "material" if name == "Окно" else "part"])
+    # стены — слой на цвет схемы; если в одном цвете два материала (камень и штукатурка одним цветом) — по альбедо
+    # куски: цвета схемы (крупный цвет ещё и по альбедо — камень и штукатурка одним цветом), затем группировка
+    # по альбедо всех кусков сразу: палитра схемы дробная, один материал — один слой
+    pieces = []
+    for m in sorted(walls_by_colour.values(), key=lambda m: -m.sum()):
+        pieces += _split_materials(rgb, feat, m) if m.sum() > 0.01 * H * W else [m]
+    pieces = [p for p in pieces if p.any()]
+    groups = _material_groups(feat, pieces) if len(pieces) > 1 else [0] * len(pieces)
+    mats = {}
+    for g, p in zip(groups, pieces):
+        mats[g] = mats.get(g, np.zeros((H, W), bool)) | p
+    walls = sorted(mats.values(), key=lambda m: -m.sum())
+    # мелкие группы (обрезки по краям пятен схемы) — к соседнему материалу с самой длинной общей границей
+    total = sum(int(m.sum()) for m in walls) or 1
+    big = [m for m in walls if m.sum() >= 0.02 * total] or walls[:1]
+    for m in walls:
+        if any(m is b for b in big):
+            continue
+        ring = ndimage.binary_dilation(m, iterations=2) & ~m
+        best = max(big, key=lambda b: int((ring & b).sum()))
+        best |= m
+    walls = big
+    for n, m in enumerate(walls, 1):
+        out.insert(0, ["Стены" if len(walls) == 1 else f"Стены · материал {n}", m, "material"])
+    # части, которым схема не дала своего пятна (светильник того же цвета, что стена), — по рамке детектора поверх
+    for name, pm in part_masks:
+        if name != "Окно" and not (claimed[name] & pm).any() and pm.sum() > 30:
+            out.append([name, pm, "part"])
+    return out
+
+
+def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     """(карта id (H, W) int32, альфа растительности (H, W) float32, id растительности под альфой (H, W) int32,
     [{id, label, kind, group}])."""
     img = Image.fromarray(rgb)
@@ -658,31 +869,84 @@ def build_zone_map(rgb: np.ndarray):
             continue
         if dil is not None:
             m = m & dil
+        if name.startswith(QUAD) and m.sum() > 30:
+            m = _quad(m) if _quad(m) is not None else m  # примитив: ровный четырёхугольник по контуру
         if m.sum() > 30:
             parts.append([name, m, "part"])
+    # порядок слоёв (позже — поверх): крыша, рамы, стекло, остальные части; мелкие детали (светильники) — последними,
+    # чтобы их не перекрывали рамки окон
+    parts.sort(key=lambda p: (p[0] != "Крыша", -int(p[1].sum())))
     if roof.sum() > 30:
         parts.insert(0, ["Крыша", roof, "part"])
+    if schema is not None:
+        # стекло — со схемы, одним слоем-материалом; рамы и импосты — окна без стекла, тоже одним слоем; двери —
+        # без своего остекления
+        glass = _schema_glass(schema, dil)
+        # каждое стекло — ровный четырёхугольник
+        gl, gn = ndimage.label(glass)
+        for k in range(1, gn + 1):
+            q = _quad(gl == k)
+            if q is not None:
+                glass = (glass & (gl != k)) | q
+        windows = np.zeros((H, W), bool)
+        rest = []
+        for p in parts:
+            if p[0] == "Окно":
+                windows |= p[1]
+            else:
+                if p[0] in ("Дверь", "Ворота"):
+                    p[1] = p[1] & ~glass
+                rest.append(p)
+        frames = windows & ~glass
+        mats = []
+        if frames.sum() > 30:
+            mats.append(["Рамы", frames, "material"])
+        if glass.sum() > 30:
+            mats.append(["Стекло", glass, "material"])
+        # после крыши — рамы и стекло, поверх — двери, светильники и прочие части
+        parts = rest[:1] + mats + rest[1:] if rest and rest[0][0] == "Крыша" else mats + rest
+        log.info("INEGO zones: со схемы стекло %.1f%% кадра, рамы %.1f%%", 100 * glass.mean(), 100 * frames.mean())
     occupied = np.zeros((H, W), bool)
     for p in parts:
         occupied |= p[1]
+    exact: set[str] = set()
+    if schema is not None:
+        # здание целиком по схеме: её края ровные, наши (SAM, детекторы, прижатие к фото) волнились
+        open_mask = np.zeros((H, W), bool)
+        for z in zones:
+            if z[0] in ("Небо",) or z[2] == "veg":
+                open_mask |= z[1]
+        area = (dil if dil is not None else bmask) & ~open_mask
+        floor = np.zeros((H, W), bool)
+        for f, horizontal in _faces(rgb, bmask & ~occupied, geo):
+            if horizontal:
+                floor |= f
+        part_masks = [("Окно", windows)] + [(p[0], p[1]) for p in parts if p[0] not in ("Крыша", "Стекло", "Рамы")]
+        bzones = _schema_building(rgb, schema, area, glass, part_masks, roof if roof.sum() > 30 else None,
+                                  floor, _features(rgb))
+        exact = {z[0] for z in bzones}
+        zones += bzones
+        parts = []
     # стены — без частей; горизонтальные плоскости — покрытие; остальное — по материалам, слой на материал
-    walls = bmask & ~occupied
+    walls = bmask & ~occupied if schema is None else np.zeros((H, W), bool)
     floor = np.zeros((H, W), bool)
-    for f, horizontal in _faces(rgb, walls, geo):
-        if horizontal:
-            floor |= f
-    if floor.sum() > 0.002 * H * W:
-        zones.append(["Покрытие", floor, "part"])
+    if schema is None:
+        for f, horizontal in _faces(rgb, walls, geo):
+            if horizontal:
+                floor |= f
+        if floor.sum() > 0.002 * H * W:
+            zones.append(["Покрытие", floor, "part"])
     walls &= ~floor
-    feat = _features(rgb)
-    pieces = _split_materials(rgb, feat, walls)
-    groups = _material_groups(feat, pieces) if len(pieces) > 1 else [0]
-    mats = {}
-    for g, m in zip(groups, pieces):
-        mats[g] = mats.get(g, np.zeros((H, W), bool)) | m
-    mats = sorted(mats.values(), key=lambda m: -m.sum())
-    for n, m in enumerate(mats, 1):
-        zones.append(["Стены" if len(mats) == 1 else f"Стены · материал {n}", m, "material"])
+    if schema is None:
+        feat = _features(rgb)
+        pieces = _split_materials(rgb, feat, walls)
+        groups = _material_groups(feat, pieces) if len(pieces) > 1 else [0]
+        mats = {}
+        for g, m in zip(groups, pieces):
+            mats[g] = mats.get(g, np.zeros((H, W), bool)) | m
+        mats = sorted(mats.values(), key=lambda m: -m.sum())
+        for n, m in enumerate(mats, 1):
+            zones.append(["Стены" if len(mats) == 1 else f"Стены · материал {n}", m, "material"])
     zones += parts
 
     # карта: позже — поверх
@@ -693,8 +957,16 @@ def build_zone_map(rgb: np.ndarray):
         idmap[m] = i
         labels[i] = name if sum(1 for z in zones if z[0] == name) == 1 else f"{name} {counts[name]}"
         kinds[i] = kind
+    pre = idmap.copy()
+    exact_ids = np.array([i for i, n in labels.items() if n.split(" · ")[0].rstrip("0123456789 ") in exact
+                          or n.rstrip("0123456789 ") in exact or n in exact] + [-99])
     idmap = _finish(idmap, rgb)
-    idmap = _straighten_arch(idmap, labels, rgb)
+    free = {i: n for i, n in labels.items() if i not in set(exact_ids.tolist())}
+    idmap = _straighten_arch(idmap, free, rgb)
+    idmap = _quadify(idmap, free)
+    # края здания — как в схеме: ни прижатие к фото, ни выпрямление их не трогают
+    keep = np.isin(pre, exact_ids) | np.isin(idmap, exact_ids)
+    idmap = np.where(keep, pre, idmap)
     idmap, alpha, vegid = _matte(idmap, labels, rgb)
     present = set(np.unique(idmap).tolist()) | set(np.unique(vegid).tolist())
     out = [{"id": i, "label": labels[i], "kind": kinds[i], "group": None} for i in labels if i in present]
@@ -707,18 +979,22 @@ class InegoZoneMap:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"image": ("IMAGE",)}}
+        # schema — схема материалов (кадр плоскими цветами от модели генерации): из неё стекло
+        return {"required": {"image": ("IMAGE",)}, "optional": {"schema": ("IMAGE",)}}
 
     RETURN_TYPES = ()
     FUNCTION = "run"
     OUTPUT_NODE = True
     CATEGORY = "inego"
 
-    def run(self, image):
+    def run(self, image, schema=None):
         _free_vram()
         rgb = _to_uint8(image[0])
+        sch = None
+        if schema is not None:
+            sch = np.asarray(Image.fromarray(_to_uint8(schema[0])[..., :3]).resize((rgb.shape[1], rgb.shape[0]), Image.NEAREST))
         try:
-            idmap, alpha, vegid, zones = build_zone_map(rgb)
+            idmap, alpha, vegid, zones = build_zone_map(rgb, sch)
         finally:
             # ~4.5 ГБ моделей карты не держим в RAM рядом с Qwen и klein (25 ГБ у контейнера): следующая карта
             # загрузит их заново за ~10 с

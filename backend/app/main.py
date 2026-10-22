@@ -126,10 +126,19 @@ def _parse_box(raw: str | None) -> list[float] | None:
 TEXTURE_MAX_BYTES = 64 * 2**20
 
 @app.post("/api/zones")
-async def zones(image: UploadFile = File(...), _user: User = Depends(current_user)):
+async def zones(
+    image: UploadFile = File(...),
+    # модель из шапки: ею рисуется схема материалов (стекло); пусто — без схемы
+    model: str | None = Form(None),
+    _user: User = Depends(current_user),
+):
     """Карта зон кадра (Render pass): небо, газон, деревья, окна, двери, крыша, отделка стен — готовые маски."""
+    if model is not None and model not in INPAINT_MODELS:
+        raise HTTPException(400, f"Unknown model: {model}")
     try:
-        return await zone_map.build_zones(await image.read())
+        return await zone_map.build_zones(await image.read(), model)
+    except comfy.ModelUnavailable as e:
+        raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:
         log.exception("zones failed")
         raise HTTPException(502, f"Карта зон не построена: {e}") from e

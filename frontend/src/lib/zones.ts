@@ -40,9 +40,11 @@ async function decode(url: string, width: number, height: number): Promise<Uint8
   return out
 }
 
-export async function buildZones(file: File, signal?: AbortSignal): Promise<ZoneMap> {
+/** model — модель генерации из шапки: ею рисуется схема материалов (стекло без отражений) */
+export async function buildZones(file: File, model: string, signal?: AbortSignal): Promise<ZoneMap> {
   const body = new FormData()
   body.append('image', file)
+  body.append('model', model)
   const res = await fetch('/api/zones', { method: 'POST', body, signal })
   if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
   if (res.status === 413) throw new Error('Файл слишком большой')
