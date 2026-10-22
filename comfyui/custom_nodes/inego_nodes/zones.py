@@ -21,6 +21,7 @@
 растительности под альфой и список зон {id, label, kind, group} в ui.zones (JSON).
 """
 
+import io
 import json
 import logging
 import os
@@ -777,31 +778,114 @@ def _schema_building(schema, area, part_masks, roof, floor):
     return [z for z in out if z[1].sum() > 30]
 
 
-def _vector_zones(schema: np.ndarray):
-    """Кадр по вектору как есть: каждый цвет иллюстрации — одна маска на весь кадр (рамы, дверь, стекло,
-    штукатурка, газон…), края — как нарисованы; ничего не додумывается. Подписи даёт проверка DeepSeek."""
+VECTOR_DE = 9.0  # цвета вектора ближе этого ΔE (настоящий Lab, L 0..100) — один материал
+VECTOR_MIN = 0.0005  # цвет вектора меньше этой доли кадра (листики, блики) — к ближайшему по цвету
+
+
+def _lab(rgb) -> np.ndarray:
     import cv2
 
+    return cv2.cvtColor(np.asarray(rgb, np.float32).reshape(1, 1, 3) / 255, cv2.COLOR_RGB2LAB)[0, 0]
+
+
+VECTOR_MERGE_DE = 14.0  # соседние цвета здания ближе этого — один материал (оттенок той же заливки на свету и в тени)
+
+
+def _vector_building(schema: np.ndarray, area: np.ndarray):
+    """Материалы здания — цвета вектора в здании (где здание — решает сценовая модель по фото): слой на цвет,
+    края — полигоны VTracer. Соседние почти одинаковые цвета сливаются (граф смежности областей: оттенок одной
+    заливки), несоседние одинаковые — и так один цвет. [подпись, маска, вид, цвет]."""
+    H, W = area.shape
+    vid, _, _, vz = _vector_zones(schema)
+    items = []
+    for z in vz:
+        m = (vid == z["id"]) & area
+        if m.sum() >= VECTOR_MIN * H * W:
+            items.append([m, z["color"], int(m.sum())])
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(items)):
+            for j in range(len(items)):
+                if i == j:
+                    continue
+                a, b = items[i], items[j]
+                de = np.linalg.norm(_lab([int(a[1][k:k + 2], 16) for k in (1, 3, 5)])
+                                    - _lab([int(b[1][k:k + 2], 16) for k in (1, 3, 5)]))
+                if de < VECTOR_MERGE_DE and (ndimage.binary_dilation(a[0], iterations=2) & b[0]).sum() > 20:
+                    keep, drop = (i, j) if a[2] >= b[2] else (j, i)
+                    items[keep][0] = items[keep][0] | items[drop][0]
+                    items[keep][2] += items[drop][2]
+                    del items[drop]
+                    merged = True
+                    break
+            if merged:
+                break
+    items.sort(key=lambda it: -it[2])
+    return [[f"Материал {n}", it[0], "material", it[1]] for n, it in enumerate(items, 1)]
+
+
+def _vector_zones(schema: np.ndarray):
+    """Кадр по вектору: иллюстрация трассируется VTracer'ом (как векторизуют растровую графику: кластеры цветов,
+    крапинки выкинуты, близкие слои склеены, полигоны с прямыми рёбрами, без перекрытий), каждый цвет — одна маска
+    на весь кадр, края — рёбра полигонов. Ничего не додумывается: имена — «Материал N»."""
+    import re
+
+    import cv2
+    import vtracer
+    from PIL import ImageDraw
+
     H, W = schema.shape[:2]
-    reg, colour = _schema_regions(schema, np.ones((H, W), bool), k_max=32)
+    # остатки градиентов и сглаженные края — ровнее (mean shift выравнивает заливки, края не размывает)
+    flat = cv2.pyrMeanShiftFiltering(np.ascontiguousarray(schema), 6, 12)
+    buf = io.BytesIO()
+    Image.fromarray(flat).save(buf, "PNG")
+    svg = vtracer.convert_raw_image_to_svg(
+        buf.getvalue(), img_format="png", colormode="color", hierarchical="cutout", mode="polygon",
+        filter_speckle=8, color_precision=6, layer_difference=10, corner_threshold=60, length_threshold=4.0,
+        splice_threshold=45, path_precision=2,
+    )
+    paths = re.findall(r'<path d="([^"]+)" fill="(#[0-9A-Fa-f]{6})" transform="translate\(([-\d.]+),([-\d.]+)\)"', svg)
+    masks, area = [], {}
+    for d, fill, tx, ty in paths:
+        m = Image.new("1", (W, H), 0)
+        dr = ImageDraw.Draw(m)
+        for sub in re.findall(r"M[^M]+", d):
+            nums = [float(v) for v in re.findall(r"[-\d.]+", sub)]
+            pts = [(nums[i] + float(tx), nums[i + 1] + float(ty)) for i in range(0, len(nums) - 1, 2)]
+            if len(pts) >= 3:
+                dr.polygon(pts, fill=1)
+        mm = np.asarray(m)
+        masks.append((fill, mm))
+        area[fill] = area.get(fill, 0) + int(mm.sum())
+    lab = {f: _lab([int(f[i:i + 2], 16) for i in (1, 3, 5)]) for f in area}
+    # палитра — по площади, каждый новый дальше VECTOR_DE от взятых (без цепочек); мелкие — к ближайшему
+    palette = []
+    for f in sorted(area, key=lambda f: -area[f]):
+        if area[f] < VECTOR_MIN * H * W and palette:
+            continue
+        if all(np.linalg.norm(lab[f] - lab[p]) >= VECTOR_DE for p in palette):
+            palette.append(f)
     idmap = np.zeros((H, W), np.int32)
+    for f, mm in masks:
+        k = int(np.argmin([np.linalg.norm(lab[f] - lab[p]) for p in palette]))
+        idmap[mm & (idmap == 0)] = k + 1
+    if (idmap == 0).any() and (idmap > 0).any():  # щели между полигонами — ближайшему
+        idmap = _fill(np.where(idmap == 0, -1, idmap), idmap == 0)
+    sizes = np.bincount(idmap.ravel(), minlength=len(palette) + 1)
+    order = [k for k in np.argsort(-sizes[1:]) + 1 if sizes[k] > 0]
+    out = np.zeros((H, W), np.int32)
     zones = []
-    lab = cv2.cvtColor(schema, cv2.COLOR_RGB2LAB)
-    for n, c in enumerate(sorted(set(colour.values()), key=lambda c: -sum(int((reg == r).sum()) for r, cc in colour.items() if cc == c)), 1):
-        m = np.isin(reg, [r for r, cc in colour.items() if cc == c])
-        idmap[m] = n
-        rgb = np.median(schema[m], 0).astype(int)
-        zones.append({"id": n, "label": f"Материал {n}", "kind": "material", "group": None,
-                      "color": "#%02x%02x%02x" % tuple(rgb)})
-    log.info("INEGO zones: по вектору %d цветов", len(zones))
-    return idmap, np.zeros((H, W), np.float32), np.zeros((H, W), np.int32), zones
+    for n, k in enumerate(order, 1):
+        out[idmap == k] = n
+        zones.append({"id": n, "label": f"Материал {n}", "kind": "material", "group": None, "color": palette[k - 1].lower()})
+    log.info("INEGO zones: по вектору %d путей, %d цветов", len(paths), len(zones))
+    return out, np.zeros((H, W), np.float32), np.zeros((H, W), np.int32), zones
 
 
 def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     """(карта id (H, W) int32, альфа растительности (H, W) float32, id растительности под альфой (H, W) int32,
     [{id, label, kind, group}])."""
-    if schema is not None:
-        return _vector_zones(schema)
     img = Image.fromarray(rgb)
     H, W = rgb.shape[:2]
     t0 = time.time()
@@ -817,7 +901,8 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     found, extra = [], []
     for kind in ("gdino", "owl"):
         with _on_gpu(_detector(kind)[1]):
-            for _, q, thr, name in (p for p in PARTS if p[0] == kind):
+            # со схемой части здания не ищутся: материалы здания — цвета вектора
+            for _, q, thr, name in (p for p in PARTS if p[0] == kind and schema is None):
                 for b, s in _nms(_detect(img, kind, q, thr)):
                     if near is not None:
                         x0, y0, x1, y1 = (int(v) for v in b)
@@ -835,7 +920,8 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
                         if name in ("Живая изгородь", "Забор"):
                             name, zkind = _hedge_or_fence(img, b)
                         extra.append((name, b, zkind))
-                found += _details(img, bmask)
+                if schema is None:
+                    found += _details(img, bmask)
     found = _clean_parts(found, bmask, H, W)
     masks = _sam_boxes(rgb, [f[1] for f in found] + [e[1] for e in extra])
     part_masks, extra_masks = masks[: len(found)], masks[len(found):]
@@ -935,12 +1021,7 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
             if z[0] in ("Небо",) or z[2] == "veg":
                 open_mask |= z[1]
         area = (dil if dil is not None else bmask) & ~open_mask
-        floor = np.zeros((H, W), bool)
-        for f, horizontal in _faces(rgb, bmask & ~occupied, geo):
-            if horizontal:
-                floor |= f
-        part_masks = [("Окно", windows)] + [(p[0], p[1]) for p in parts if p[0] not in ("Крыша", "Стекло", "Рамы")]
-        bzones = _schema_building(schema, area, part_masks, roof if roof.sum() > 30 else None, floor)
+        bzones = _vector_building(schema, area)
         exact = {z[0] for z in bzones}
         zones += bzones
         parts = []
@@ -969,7 +1050,11 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     # карта: позже — поверх
     idmap = np.zeros((H, W), np.int32)
     labels, kinds, counts = {}, {}, {}
-    for i, (name, m, kind) in enumerate(zones, 1):
+    colors = {}
+    for i, z in enumerate(zones, 1):
+        name, m, kind = z[0], z[1], z[2]
+        if len(z) > 3:
+            colors[i] = z[3]  # цвет материала в векторе
         counts[name] = counts.get(name, 0) + 1
         idmap[m] = i
         labels[i] = name if sum(1 for z in zones if z[0] == name) == 1 else f"{name} {counts[name]}"
@@ -986,7 +1071,8 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     idmap = np.where(keep, pre, idmap)
     idmap, alpha, vegid = _matte(idmap, labels, rgb)
     present = set(np.unique(idmap).tolist()) | set(np.unique(vegid).tolist())
-    out = [{"id": i, "label": labels[i], "kind": kinds[i], "group": None} for i in labels if i in present]
+    out = [{"id": i, "label": labels[i], "kind": kinds[i], "group": None, **({"color": colors[i]} if i in colors else {})}
+           for i in labels if i in present]
     log.info("INEGO zones: %d зон за %.1f с: %s", len(out), time.time() - t0, ", ".join(z["label"] for z in out))
     return idmap, alpha, vegid, out
 

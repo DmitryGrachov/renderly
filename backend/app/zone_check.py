@@ -103,9 +103,9 @@ async def check_zones(src: Image.Image, ids: np.ndarray, veg: np.ndarray, zones:
     """Исправленные (ids, veg, zones). Без DeepSeek или при сбое — как было."""
     if not DEEPSEEK_API_KEY or not zones:
         return ids, veg, zones
-    if all("color" in z for z in zones):
-        # кадр по вектору: цвет — маска как есть, «Материал N» с образцом цвета. Подписи DeepSeek здесь путались
-        # (цоколь — «дверь», изгородь — «окно»: у одного цвета много кусков по всему кадру) — ничего не додумываем
+    if any("color" in z for z in zones):
+        # здание по вектору: материалы — «Материал N» с образцом цвета (подписи DeepSeek путались: цоколь —
+        # «дверь», изгородь — «окно»), окружение подписано сценовой моделью — ничего не додумываем
         return ids, veg, zones
     listing = "\n".join(f"{z['id']}: {z['label']}" for z in zones)
     key = hashlib.sha256(

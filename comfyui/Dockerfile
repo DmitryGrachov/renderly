@@ -18,7 +18,7 @@ RUN pip install --no-deps \
         "git+https://github.com/microsoft/MoGe.git@74fbce054ebed49800de42d0ad0e83495065719a" \
         "git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37" \
         "git+https://github.com/EasternJournalist/pipeline.git@1c511390d90226c00c101f34b84df26a0f8789b4" \
-    && pip install opencv-python-headless==5.0.0.93 diffusers==0.41.0
+    && pip install opencv-python-headless==5.0.0.93 diffusers==0.41.0 vtracer==0.6.15
 
 COPY custom_nodes/inego_nodes /opt/ComfyUI/custom_nodes/inego_nodes
 COPY entrypoint.sh /entrypoint.sh
