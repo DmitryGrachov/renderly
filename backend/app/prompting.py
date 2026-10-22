@@ -31,7 +31,7 @@ from contextvars import ContextVar
 import httpx
 from PIL import Image
 
-from .config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL
+from .config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_URL, DEEPSEEK_VISION_MODEL, DEEPSEEK_VISION_MODELS
 
 # модель DeepSeek текущего запроса (переключатель Flash / Pro в шапке); по умолчанию — из DEEPSEEK_MODEL
 llm_model: ContextVar[str] = ContextVar("llm_model", default=DEEPSEEK_MODEL)
@@ -296,7 +296,12 @@ def _data_url(image: bytes, max_side: int = 1536) -> str:
 
 
 async def _chat(messages: list[dict], json_mode: bool = False) -> str:
-    body = {"model": llm_model.get(), "messages": messages, "temperature": 0}
+    model = llm_model.get()
+    seeing = any(isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m["content"])
+                 for m in messages)
+    if seeing and model not in DEEPSEEK_VISION_MODELS:
+        model = DEEPSEEK_VISION_MODEL  # модель без зрения отвечала бы вслепую
+    body = {"model": model, "messages": messages, "temperature": 0}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=120) as client:

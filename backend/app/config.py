@@ -25,6 +25,10 @@ DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 # модели DeepSeek, между которыми можно переключаться из шапки сайта (поле llm в запросах)
 DEEPSEEK_MODELS = [m.strip() for m in os.getenv("DEEPSEEK_MODELS", "deepseek-flash,deepseek-v4-pro").split(",") if m.strip()]
+# модели, которые видят картинки; запросы с картинками к остальным (deepseek-v4-pro — только текст: картинку он
+# молча не видит и отвечает «image not visible») уходят на DEEPSEEK_VISION_MODEL
+DEEPSEEK_VISION_MODELS = {m.strip() for m in os.getenv("DEEPSEEK_VISION_MODELS", "deepseek-flash").split(",") if m.strip()}
+DEEPSEEK_VISION_MODEL = os.getenv("DEEPSEEK_VISION_MODEL", "deepseek-flash")
 
 # FLUX.2 [klein] (distilled) в ComfyUI: модель выбирается в запросе, VAE общий.
 # 9B закрыта лицензией BFL — ComfyUI скачает её только при заданном HF_TOKEN.
