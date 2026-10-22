@@ -276,6 +276,26 @@ def _faces(rgb, walls):
     return [(owner == i, abs(float(np.dot(n, axes[0]))) > np.cos(np.radians(35))) for i, (n, _) in enumerate(planes)]
 
 
+def _is_roof(m: np.ndarray, bmask: np.ndarray) -> bool:
+    """Крыша — верх здания: на высотке «roof» обводит всю башню, и SAM по рамке отдаёт здание целиком. Не крыша,
+    если зона закрывает больше половины здания под собой (в тех же столбцах кадра) или почти всю его высоту."""
+    if not m.any() or not bmask.any():
+        return bool(m.any())
+    cols = m.any(0)
+    below = bmask[:, cols]
+    if not below.any():
+        return True
+    ys = np.nonzero(m)[0]
+    by = np.nonzero(below.any(1))[0]
+    covers = (m[:, cols] & below).sum() / below.sum()
+    tall = np.ptp(ys) / max(1, np.ptp(by))
+    ok = covers < 0.5 and tall < 0.8  # двускатная крыша дома — до ~60% высоты здания
+    if not ok:
+        log.info("INEGO zones: «крыша» закрывает %.0f%% здания под собой и %.0f%% его высоты — не крыша",
+                 100 * covers, 100 * tall)
+    return ok
+
+
 def _features(rgb):
     """Признаки материала на пиксель: альбедо Marigold-IID в Lab (цвет без света — штукатурка на солнце и в тени
     одна) и фактура — локальный перепад яркости, делённый на местную яркость (тень её не меняет): камень и кирпич —
@@ -603,7 +623,8 @@ def build_zone_map(rgb: np.ndarray):
     parts = []
     for (name, b, s), m in zip(found, part_masks):
         if name == "Крыша":
-            roof |= m  # крыша — один слой
+            if _is_roof(m, bmask):
+                roof |= m  # крыша — один слой
             continue
         if dil is not None:
             m = m & dil
