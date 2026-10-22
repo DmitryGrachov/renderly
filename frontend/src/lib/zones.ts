@@ -9,6 +9,8 @@ export interface Zone {
   kind: ZoneKind
   /** буква отделки: одна буква — один материал на всех гранях */
   group: string | null
+  /** цвет материала в векторной схеме (#rrggbb): зона — этот цвет иллюстрации */
+  color?: string
 }
 
 export interface ZoneMap {

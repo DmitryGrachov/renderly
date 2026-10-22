@@ -646,12 +646,12 @@ def _schema_glass(schema: np.ndarray, area: np.ndarray | None) -> np.ndarray:
     return glass
 
 
-SCHEMA_DE = 12.0  # цвета схемы ближе этого (ΔE) — один цвет
+SCHEMA_DE = 15.0  # цвета схемы ближе этого (ΔE) — один цвет (у иллюстрации заливка не идеально ровная)
 SCHEMA_MIN = 0.0002  # пятно схемы мельче этой доли кадра — соседям
 PART_COVER = 0.5  # пятно — часть (окно, дверь, светильник…), если её рамка покрывает хотя бы такую долю пятна
 
 
-def _schema_regions(schema: np.ndarray, area: np.ndarray):
+def _schema_regions(schema: np.ndarray, area: np.ndarray, k_max: int = 12):
     """Пятна схемы в здании: цвета сводятся к палитре (k-means в Lab, близкие слиты), пятно — связный кусок
     одного цвета; крошки — соседям. Края — ровно как нарисовала модель. (метки пятен (H, W), цвет пятна)."""
     import cv2
@@ -661,26 +661,31 @@ def _schema_regions(schema: np.ndarray, area: np.ndarray):
     X = lab[area]
     if len(X) < 100:
         return np.zeros((H, W), np.int32), {}
-    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    k = min(12, len(X))
-    _, cl, cen = cv2.kmeans(X[:: max(1, len(X) // 200000)], k, None, crit, 2, cv2.KMEANS_PP_CENTERS)
-    # близкие центры — один цвет
-    root = list(range(k))
-    for i in range(k):
-        for j in range(i):
-            if np.linalg.norm(cen[i] - cen[j]) < SCHEMA_DE:
-                a, b = i, j
-                while root[a] != a:
-                    a = root[a]
-                while root[b] != b:
-                    b = root[b]
-                root[a] = b
-    for i in range(k):
-        while root[root[i]] != root[i]:
-            root[i] = root[root[i]]
-    d = ((X[:, None, :] - cen[None]) ** 2).sum(-1)
+    # палитра — частые цвета заливок: по убыванию частоты, каждый новый дальше SCHEMA_DE от уже взятых. Без
+    # k-means и слияния по цепочке: сглаженные края между заливками давали промежуточные цвета, и цепочка склеивала
+    # разные материалы (кремовую штукатурку с бежевым цоколем)
+    q = np.round(X / 3).astype(np.int32)
+    keys, inv, counts = np.unique(q[:, 0] * 1_000_000 + q[:, 1] * 1000 + q[:, 2], return_inverse=True, return_counts=True)
+    means = np.zeros((len(keys), 3), np.float64)
+    np.add.at(means, inv.ravel(), X)
+    means /= counts[:, None]
+    palette = []
+    for i in np.argsort(-counts):
+        if counts[i] < max(20, 0.0005 * len(X)) or len(palette) >= k_max:
+            break
+        if all(np.linalg.norm(means[i] - p) >= SCHEMA_DE for p in palette):
+            palette.append(means[i])
+    if not palette:
+        palette = [X.mean(0)]
+    best = np.full(len(X), np.inf, np.float32)
+    arg = np.zeros(len(X), np.int32)
+    for i, p in enumerate(palette):  # ближайший цвет палитры — без матрицы пиксели × палитра в памяти
+        dist = ((X - np.asarray(p, np.float32)) ** 2).sum(-1)
+        better = dist < best
+        best[better] = dist[better]
+        arg[better] = i
     col = np.full((H, W), -1, np.int32)
-    col[area] = np.array(root)[d.argmin(1)]
+    col[area] = arg
     # пятна: связные куски одного цвета; крошки — ближайшему пятну
     reg = np.zeros((H, W), np.int32)
     colour = {}
@@ -703,87 +708,100 @@ def _schema_regions(schema: np.ndarray, area: np.ndarray):
     return reg, colour
 
 
-def _schema_building(rgb, schema, area, glass, part_masks, roof, floor, feat):
-    """Здание по схеме: пятна схемы с её ровными краями, имена — от стекла, рамок частей, крыши и альбедо.
-    [подпись, маска, вид]."""
+def _schema_building(schema, area, part_masks, roof, floor):
+    """Здание по схеме-иллюстрации (плоские заливки в натуральных цветах): слой на цвет схемы, края — как нарисовала
+    модель. Имена: цвета, лежащие в основном в рамках окон, — стекло (крупный) и рамы (остальные); пятна в рамках
+    дверей, светильников, труб, водостоков — эти части; цвета на крыше и горизонтальных плоскостях — крыша и
+    покрытие; остальное — материалы стен (названия даёт проверка DeepSeek). [подпись, маска, вид]."""
     H, W = area.shape
     reg, colour = _schema_regions(schema, area)
-    out = []
-    walls_by_colour: dict[int, np.ndarray] = {}
-    claimed = {name: np.zeros((H, W), bool) for name, _ in part_masks}
+    windows = np.zeros((H, W), bool)
+    objects = []
+    for name, pm in part_masks:
+        if name == "Окно":
+            windows |= pm
+        elif name in ("Дверь", "Ворота", "Светильник", "Труба", "Водосток"):
+            objects.append((name, pm))
+    claimed = [np.zeros((H, W), bool) for _ in objects]
+    by_colour: dict[int, np.ndarray] = {}
     for r in range(1, reg.max() + 1):
         m = reg == r
         if not m.any():
             continue
-        if (m & glass).sum() > 0.5 * m.sum():
-            out.append(["Стекло", m, "material"])
-            continue
-        hit = None
-        for name, pm in part_masks:
-            if (m & pm).sum() >= PART_COVER * m.sum():
-                hit = name
-                break
-        if hit:
+        hit = next((k for k, (_, pm) in enumerate(objects) if (m & pm).sum() >= PART_COVER * m.sum()), None)
+        if hit is not None:
             claimed[hit] |= m
             continue
-        if roof is not None and (m & roof).sum() >= PART_COVER * m.sum():
-            out.append(["Крыша", m, "part"])
-            continue
-        if floor is not None and (m & floor).sum() >= 0.6 * m.sum():
-            out.append(["Покрытие", m, "part"])
-            continue
         c = colour.get(r, 0)
-        walls_by_colour[c] = walls_by_colour.get(c, np.zeros((H, W), bool)) | m
-    # стекло, крыша, покрытие — по одному слою
-    merged = {}
-    rest = []
-    for z in out:
-        if z[0] in ("Стекло", "Крыша", "Покрытие"):
-            if z[0] in merged:
-                merged[z[0]][1] |= z[1]
-            else:
-                merged[z[0]] = [z[0], z[1].copy(), z[2]]
+        by_colour[c] = by_colour.get(c, np.zeros((H, W), bool)) | m
+    out = []
+    # окна: цвета, лежащие в основном в рамках окон; крупнейший — стекло, остальные — рамы
+    win = {c: m for c, m in by_colour.items() if windows.any() and (m & windows).sum() >= 0.6 * m.sum()}
+    glass = frames = None
+    if win:
+        gc = max(win, key=lambda c: int((win[c] & windows).sum()))
+        glass = win[gc]
+        frames = np.zeros((H, W), bool)
+        for c, m in win.items():
+            if c != gc:
+                frames |= m
+        for c in win:
+            by_colour.pop(c)
+    roof_m = np.zeros((H, W), bool)
+    floor_m = np.zeros((H, W), bool)
+    walls = []
+    for c, m in sorted(by_colour.items(), key=lambda kv: -kv[1].sum()):
+        if roof is not None and (m & roof).sum() >= PART_COVER * m.sum():
+            roof_m |= m
+        elif floor is not None and (m & floor).sum() >= 0.6 * m.sum():
+            floor_m |= m
         else:
-            rest.append(z)
-    out = rest + list(merged.values())
-    # окна без стекла — рамы; остальные части — своими именами (пятна схемы внутри их рамок)
-    for name, m in claimed.items():
-        if m.sum() > 30:
-            out.append(["Рамы" if name == "Окно" else name, m, "material" if name == "Окно" else "part"])
-    # стены — слой на цвет схемы; если в одном цвете два материала (камень и штукатурка одним цветом) — по альбедо
-    # куски: цвета схемы (крупный цвет ещё и по альбедо — камень и штукатурка одним цветом), затем группировка
-    # по альбедо всех кусков сразу: палитра схемы дробная, один материал — один слой
-    pieces = []
-    for m in sorted(walls_by_colour.values(), key=lambda m: -m.sum()):
-        pieces += _split_materials(rgb, feat, m) if m.sum() > 0.01 * H * W else [m]
-    pieces = [p for p in pieces if p.any()]
-    groups = _material_groups(feat, pieces) if len(pieces) > 1 else [0] * len(pieces)
-    mats = {}
-    for g, p in zip(groups, pieces):
-        mats[g] = mats.get(g, np.zeros((H, W), bool)) | p
-    walls = sorted(mats.values(), key=lambda m: -m.sum())
-    # мелкие группы (обрезки по краям пятен схемы) — к соседнему материалу с самой длинной общей границей
+            walls.append(m)
+    # мелкие цвета стен (обрезки по краям, оттенки той же заливки) — к соседнему слою с самой длинной общей границей
     total = sum(int(m.sum()) for m in walls) or 1
-    big = [m for m in walls if m.sum() >= 0.02 * total] or walls[:1]
+    big = [m for m in walls if m.sum() >= 0.04 * total] or walls[:1]
     for m in walls:
         if any(m is b for b in big):
             continue
         ring = ndimage.binary_dilation(m, iterations=2) & ~m
-        best = max(big, key=lambda b: int((ring & b).sum()))
-        best |= m
-    walls = big
-    for n, m in enumerate(walls, 1):
-        out.insert(0, ["Стены" if len(walls) == 1 else f"Стены · материал {n}", m, "material"])
-    # части, которым схема не дала своего пятна (светильник того же цвета, что стена), — по рамке детектора поверх
-    for name, pm in part_masks:
-        if name != "Окно" and not (claimed[name] & pm).any() and pm.sum() > 30:
-            out.append([name, pm, "part"])
-    return out
+        max(big, key=lambda b: int((ring & b).sum()))[...] |= m
+    for n, m in enumerate(big, 1):
+        out.append(["Стены" if len(big) == 1 else f"Стены · материал {n}", m, "material"])
+    for name, m, kind in (("Крыша", roof_m, "part"), ("Покрытие", floor_m, "part"), ("Рамы", frames, "material"),
+                          ("Стекло", glass, "material")):
+        if m is not None and m.sum() > 30:
+            out.append([name, m, kind])
+    # части: пятна схемы в их рамках; без своего пятна (светильник того же цвета, что стена) — по рамке поверх
+    for (name, pm), m in zip(objects, claimed):
+        out.append([name, m if m.sum() > 30 else pm, "part"])
+    return [z for z in out if z[1].sum() > 30]
+
+
+def _vector_zones(schema: np.ndarray):
+    """Кадр по вектору как есть: каждый цвет иллюстрации — одна маска на весь кадр (рамы, дверь, стекло,
+    штукатурка, газон…), края — как нарисованы; ничего не додумывается. Подписи даёт проверка DeepSeek."""
+    import cv2
+
+    H, W = schema.shape[:2]
+    reg, colour = _schema_regions(schema, np.ones((H, W), bool), k_max=32)
+    idmap = np.zeros((H, W), np.int32)
+    zones = []
+    lab = cv2.cvtColor(schema, cv2.COLOR_RGB2LAB)
+    for n, c in enumerate(sorted(set(colour.values()), key=lambda c: -sum(int((reg == r).sum()) for r, cc in colour.items() if cc == c)), 1):
+        m = np.isin(reg, [r for r, cc in colour.items() if cc == c])
+        idmap[m] = n
+        rgb = np.median(schema[m], 0).astype(int)
+        zones.append({"id": n, "label": f"Материал {n}", "kind": "material", "group": None,
+                      "color": "#%02x%02x%02x" % tuple(rgb)})
+    log.info("INEGO zones: по вектору %d цветов", len(zones))
+    return idmap, np.zeros((H, W), np.float32), np.zeros((H, W), np.int32), zones
 
 
 def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
     """(карта id (H, W) int32, альфа растительности (H, W) float32, id растительности под альфой (H, W) int32,
     [{id, label, kind, group}])."""
+    if schema is not None:
+        return _vector_zones(schema)
     img = Image.fromarray(rgb)
     H, W = rgb.shape[:2]
     t0 = time.time()
@@ -922,8 +940,7 @@ def build_zone_map(rgb: np.ndarray, schema: np.ndarray | None = None):
             if horizontal:
                 floor |= f
         part_masks = [("Окно", windows)] + [(p[0], p[1]) for p in parts if p[0] not in ("Крыша", "Стекло", "Рамы")]
-        bzones = _schema_building(rgb, schema, area, glass, part_masks, roof if roof.sum() > 30 else None,
-                                  floor, _features(rgb))
+        bzones = _schema_building(schema, area, part_masks, roof if roof.sum() > 30 else None, floor)
         exact = {z[0] for z in bzones}
         zones += bzones
         parts = []
@@ -1010,5 +1027,10 @@ class InegoZoneMap:
                            ("veg", vegid.astype(np.uint8))):
             fn = f"zones_{tag}_{name}.png"
             Image.fromarray(data, "L").save(os.path.join(folder, fn))
+            files.append({"filename": fn, "subfolder": "inego", "type": "output"})
+        if sch is not None:
+            # сама схема — во вкладке её можно показать рядом с картой
+            fn = f"zones_{tag}_schema.png"
+            Image.fromarray(sch).save(os.path.join(folder, fn))
             files.append({"filename": fn, "subfolder": "inego", "type": "output"})
         return {"ui": {"images": files, "zones": [json.dumps(zones, ensure_ascii=False)]}}

@@ -320,6 +320,8 @@ function ZoneRow({ zone, active, hovered, onHover, onClick }: {
         }`}
       >
         <span className="size-3 shrink-0 rounded-[4px] ring-1 ring-black/10" style={{ background: `rgb(${r},${g},${b})` }} />
+        {/* цвет материала в векторной схеме (заливка оверлея — контрастная, иначе натуральные цвета сливаются с фото) */}
+        {zone.color && <span className="size-3 shrink-0 rounded-full ring-1 ring-black/10" style={{ background: zone.color }} />}
         <span className="truncate">{zone.label}</span>
         {active && <span className="ml-auto text-[11px] font-semibold text-accent">выбрано</span>}
       </button>

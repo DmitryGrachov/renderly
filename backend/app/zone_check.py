@@ -103,6 +103,10 @@ async def check_zones(src: Image.Image, ids: np.ndarray, veg: np.ndarray, zones:
     """Исправленные (ids, veg, zones). Без DeepSeek или при сбое — как было."""
     if not DEEPSEEK_API_KEY or not zones:
         return ids, veg, zones
+    if all("color" in z for z in zones):
+        # кадр по вектору: цвет — маска как есть, «Материал N» с образцом цвета. Подписи DeepSeek здесь путались
+        # (цоколь — «дверь», изгородь — «окно»: у одного цвета много кусков по всему кадру) — ничего не додумываем
+        return ids, veg, zones
     listing = "\n".join(f"{z['id']}: {z['label']}" for z in zones)
     key = hashlib.sha256(
         ids.tobytes() + listing.encode() + src.tobytes()[:1_000_000] + llm_model.get().encode() + ZONE_CHECK_EFFORT.encode()
@@ -149,6 +153,26 @@ async def check_zones(src: Image.Image, ids: np.ndarray, veg: np.ndarray, zones:
     by_id = {z["id"]: z for z in zones}
     ids, veg = ids.copy(), veg.copy()
     changes = []
+    if all("color" in z for z in zones):
+        # кадр по вектору: каждый цвет — маска как есть; модель только подписывает, ничего не сливает и не удаляет
+        out = []
+        for z in zones:
+            cls, material = verdict.get(z["id"], ("", ""))
+            if material and (cls or "").startswith("Стены"):
+                label = f"Стены · {material.lower()}"
+            elif cls in CLASSES and cls not in ("Удалить", "Прочее"):
+                label = cls + (f" · {material.lower()}" if material else "")
+            else:
+                label = z["label"]
+            out.append({**z, "label": label, "kind": CLASSES.get(cls, z["kind"]) if cls in CLASSES else z["kind"]})
+        counts: dict[str, int] = {}
+        totals = {lab: sum(1 for z in out if z["label"] == lab) for lab in {z["label"] for z in out}}
+        for z in out:
+            if totals[z["label"]] > 1:
+                counts[z["label"]] = counts.get(z["label"], 0) + 1
+                z["label"] = f"{z['label']} {counts[z['label']]}"
+        log.info("проверка зон DeepSeek (вектор): %s", ", ".join(z["label"] for z in out))
+        return ids, veg, out
 
     # объединения: всё в первую зону группы (класс — по большинству площади)
     for group in data.get("merge") or []:

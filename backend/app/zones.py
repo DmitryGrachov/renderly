@@ -32,17 +32,18 @@ def _png_url(arr: np.ndarray) -> str:
     return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
 
 
-# схема материалов: выбранная модель перерисовывает кадр плоскими цветами, как Material ID проход 3D-рендера —
-# без отражений и теней. Из неё берётся стекло: во всех пробах оно чисто голубое и точно по краям, а у рам, стоек и
-# глухих панелей отражения сбивали остальные способы. Цвета остальных материалов модель выбирает нестабильно (камень
-# и штукатурку то разделяет, то нет), поэтому материалы стен — по альбедо в самой ноде
+# схема материалов: выбранная модель перерисовывает кадр плоской векторной иллюстрацией в натуральных цветах — каждый
+# материал одной заливкой своего цвета, без фактуры, отражений и теней. По её цветам режется здание (края ровные,
+# как нарисованы). Натуральные цвета модель держит стабильно (камень и штукатурка — разные), а условные цвета
+# Material ID — нет: то сливала материалы, то красила всё одним цветом
 SCHEMA_PROMPT = (
-    "Convert image 1 into a flat-colour material ID map of the same image, like a 3D render's material ID pass: "
-    "every distinct material is filled with one solid, uniform, flat colour with no shading, no shadows, no "
-    "reflections, no texture and no gradients. All glass and windows are one flat cyan; each different wall "
-    "material (each brick, plaster, panel colour) is its own distinct flat saturated colour; metal frames and "
-    "railings flat yellow; roof flat purple; sky flat white; trees and grass flat green. Keep every edge, "
-    "outline, window, mullion, balcony and building exactly in place, same camera and framing."
+    "Redraw image 1 as a clean flat vector illustration of the same scene, in its natural colours: every surface "
+    "and material is one solid flat fill of its own real colour, with no texture, no brick or stone pattern, no "
+    "reflections, no shading, no shadows, no cast shadows and no gradients: the sunlit and the shaded sides of one "
+    "material are exactly the same colour. Different materials keep clearly different colours "
+    "(stone cladding, plaster, dark panels, window frames, glass, roofing, paving, lawn, trees and sky each their "
+    "own flat colour); glass is a flat solid tint without reflections. Keep every edge, window, frame, door, panel, "
+    "balcony, railing and building exactly in place, same camera and framing, crisp straight edges."
 )
 SCHEMA_SEED = 7
 
@@ -126,6 +127,7 @@ async def build_zones(image: bytes, model: str | None = None) -> dict:
                     "map": _png_url(ids),
                     "alpha": "data:image/png;base64," + base64.b64encode(files[1]).decode(),
                     "veg": _png_url(veg),
+                    "schema": ("data:image/png;base64," + base64.b64encode(files[3]).decode()) if len(files) > 3 else None,
                     "zones": zones,
                 }
         raise ComfyError("ComfyUI не ответил вовремя")
