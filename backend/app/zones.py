@@ -11,12 +11,20 @@ import json
 import uuid
 
 import httpx
+import numpy as np
 from PIL import Image
 
 from .comfy import ComfyError, _upload, _use_family, to_png
 from .config import COMFY_TIMEOUT, COMFYUI_URL, log
+from .zone_check import check_zones
 
 ZONES_MAX_SIDE = 2048  # карта строится в этом размере (по длинной стороне); фронтенд растягивает её на кадр
+
+
+def _png_url(arr: np.ndarray) -> str:
+    b = io.BytesIO()
+    Image.fromarray(arr.astype(np.uint8), "L").save(b, "PNG")
+    return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
 
 
 async def build_zones(image: bytes) -> dict:
@@ -54,12 +62,16 @@ async def build_zones(image: bytes) -> dict:
                     files.append(v.content)
                 zones = json.loads(out["zones"][0])
                 log.info("карта зон %dx%d: %d зон", src.width, src.height, len(zones))
+                # подписи проверяет зрячая модель: детекторы находят самое похожее на слово, а не то, что есть
+                ids = np.asarray(Image.open(io.BytesIO(files[0])).convert("L"))
+                veg = np.asarray(Image.open(io.BytesIO(files[2])).convert("L"))
+                ids, veg, zones = await check_zones(src, ids, veg, zones)
                 return {
                     "width": src.width,
                     "height": src.height,
-                    "map": "data:image/png;base64," + base64.b64encode(files[0]).decode(),
+                    "map": _png_url(ids),
                     "alpha": "data:image/png;base64," + base64.b64encode(files[1]).decode(),
-                    "veg": "data:image/png;base64," + base64.b64encode(files[2]).decode(),
+                    "veg": _png_url(veg),
                     "zones": zones,
                 }
         raise ComfyError("ComfyUI не ответил вовремя")
