@@ -778,7 +778,7 @@ def _schema_building(schema, area, part_masks, roof, floor):
     return [z for z in out if z[1].sum() > 30]
 
 
-VECTOR_DE = 9.0  # цвета вектора ближе этого ΔE (настоящий Lab, L 0..100) — один материал
+VECTOR_DE = 7.0  # цвета вектора ближе этого ΔE (настоящий Lab, L 0..100) — один материал
 VECTOR_MIN = 0.0005  # цвет вектора меньше этой доли кадра (листики, блики) — к ближайшему по цвету
 
 
@@ -788,12 +788,12 @@ def _lab(rgb) -> np.ndarray:
     return cv2.cvtColor(np.asarray(rgb, np.float32).reshape(1, 1, 3) / 255, cv2.COLOR_RGB2LAB)[0, 0]
 
 
-VECTOR_MERGE_DE = 14.0  # соседние цвета здания ближе этого — один материал (оттенок той же заливки на свету и в тени)
+SMALL_LAYER = 0.015  # слой меньше этой доли здания …
+SMALL_LAYER_DE = 20.0  # … и по цвету ближе этого к соседу — часть соседа (кромка крыши — крыша)
+VECTOR_MERGE_DE = 6.0  # соседние цвета здания ближе этого — одна заливка (сглаженные края, остаток градиента);
+# больше нельзя: бежевый камень и кремовая штукатурка различаются на ~10
 
 
-SHADE_DC = 6.0  # соседние куски одной ориентации с цветностью (a*, b*) ближе этого …
-SHADE_DL = 35.0  # … и яркостью ближе этого — один материал на свету и в тени (тень меняет яркость, не оттенок)
-SHADE_MIN_C = 10.0  # правило тени — только для цветных (цветность не меньше этого)
 
 
 def _orientation(normals: np.ndarray) -> np.ndarray:
@@ -812,8 +812,7 @@ def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray |
     VTracer. Логика материала, а не только цвета:
       - один цвет на поверхностях разной ориентации — разные материалы (тёмная полоса цоколя внизу и тёмный скат
         крыши почти одного цвета, но цоколь вертикальный, а крыша наклонная);
-      - соседние куски одной ориентации с одним оттенком и разной яркостью — один материал на свету и в тени
-        (освещённый и затенённый скаты крыши).
+      - свет и тень вектор не рисует (проход без освещения), поэтому сливаются только почти одинаковые цвета.
     [подпись, маска, вид, цвет]."""
     H, W = area.shape
     vid, _, _, vz = _vector_zones(schema)
@@ -844,13 +843,10 @@ def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray |
                     continue
                 a, b = items[i], items[j]
                 la, lb = lab_of(a[1]), lab_of(b[1])
+                # свет и тень вектор не рисует (проход без освещения); правило «тот же оттенок, другая яркость —
+                # тень» склеивало бежевый камень с кремовой штукатуркой — сливаются только почти одинаковые цвета
                 close = np.linalg.norm(la - lb) < VECTOR_MERGE_DE
-                # у почти серых нет оттенка — они различаются только яркостью (светлое стекло и тёмные рамы),
-                # правило тени — только для цветных
-                chroma = min(np.linalg.norm(la[1:]), np.linalg.norm(lb[1:]))
-                shade = (chroma >= SHADE_MIN_C and np.linalg.norm(la[1:] - lb[1:]) < SHADE_DC
-                         and abs(la[0] - lb[0]) < SHADE_DL)
-                if (close or shade) and (ndimage.binary_dilation(a[0], iterations=2) & b[0]).sum() > 20:
+                if close and (ndimage.binary_dilation(a[0], iterations=2) & b[0]).sum() > 20:
                     keep, drop = (i, j) if a[2] >= b[2] else (j, i)
                     items[keep][0] = items[keep][0] | items[drop][0]
                     items[keep][2] += items[drop][2]
@@ -859,6 +855,21 @@ def _vector_building(schema: np.ndarray, area: np.ndarray, normals: np.ndarray |
                     break
             if merged:
                 break
+    # мелкие слои (кромки, торцы, обрезки) — к соседу с самой длинной общей границей, если цвет не сильно другой;
+    # явно другие по цвету детали (дверь, светильник) остаются
+    total = sum(it[2] for it in items) or 1
+    items.sort(key=lambda it: -it[2])
+    for it in sorted(items, key=lambda it: it[2]):
+        if it[2] >= SMALL_LAYER * total or len(items) < 2:
+            continue
+        ring = ndimage.binary_dilation(it[0], iterations=2) & ~it[0]
+        others = [o for o in items if o is not it]
+        nb = max(others, key=lambda o: int((ring & o[0]).sum()))
+        if (ring & nb[0]).sum() == 0 or np.linalg.norm(lab_of(it[1]) - lab_of(nb[1])) >= SMALL_LAYER_DE:
+            continue
+        nb[0] = nb[0] | it[0]
+        nb[2] += it[2]
+        items = [o for o in items if o is not it]
     items.sort(key=lambda it: -it[2])
     return [[f"Материал {n}", it[0], "material", it[1]] for n, it in enumerate(items, 1)]
 
