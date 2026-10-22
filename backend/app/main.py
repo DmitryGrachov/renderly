@@ -8,7 +8,7 @@ from fastapi.responses import Response
 
 from . import comfy
 from . import inpaint as inpainting
-from . import zones as zone_map
+from . import materials as material_map
 from .auth import current_user
 from .auth import router as auth_router
 from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, log
@@ -125,23 +125,16 @@ def _parse_box(raw: str | None) -> list[float] | None:
 # BaseColor 4K в EXR весит 25-30 МБ
 TEXTURE_MAX_BYTES = 64 * 2**20
 
-@app.post("/api/zones")
-async def zones(
-    image: UploadFile = File(...),
-    # модель из шапки: ею рисуется схема материалов (стекло); пусто — без схемы
-    model: str | None = Form(None),
-    _user: User = Depends(current_user),
-):
-    """Карта зон кадра (Render pass): небо, газон, деревья, окна, двери, крыша, отделка стен — готовые маски."""
-    if model is not None and model not in INPAINT_MODELS:
-        raise HTTPException(400, f"Unknown model: {model}")
+@app.post("/api/materials")
+async def materials_map(image: UploadFile = File(...), _user: User = Depends(current_user)):
+    """Кадр по материалам (Render pass): одинаковый материал — одна группа и маска, свет и тени не в счёт."""
     try:
-        return await zone_map.build_zones(await image.read(), model)
+        return await material_map.build_materials(await image.read())
     except comfy.ModelUnavailable as e:
         raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:
-        log.exception("zones failed")
-        raise HTTPException(502, f"Карта зон не построена: {e}") from e
+        log.exception("materials failed")
+        raise HTTPException(502, f"Материалы не разобраны: {e}") from e
 
 
 @app.post("/api/inpaint/plan")

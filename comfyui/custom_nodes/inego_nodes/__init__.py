@@ -1410,11 +1410,12 @@ def _manhattan_faces(A: np.ndarray, P: np.ndarray, N: np.ndarray, valid: np.ndar
     return owner, out
 
 
-from .zones import InegoZoneMap  # noqa: E402 — модуль берёт помощники отсюда
+from .materials import InegoIntrinsicAlbedo, InegoMaterialGroups  # noqa: E402 — модуль берёт помощники отсюда
 
-NODE_CLASS_MAPPINGS = {"InegoZoneMap": InegoZoneMap, "InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight}
+NODE_CLASS_MAPPINGS = {"InegoIntrinsicAlbedo": InegoIntrinsicAlbedo, "InegoMaterialGroups": InegoMaterialGroups, "InegoKeepZones": InegoKeepZones, "InegoZoneRestyle": InegoZoneRestyle, "InegoSkyMatch": InegoSkyMatch, "InegoObjectMask": InegoObjectMask, "InegoAlign": InegoAlign, "InegoSurfaceMask": InegoSurfaceMask, "InegoTextureProject": InegoTextureProject, "InegoRelight": InegoRelight}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "InegoZoneMap": "INEGO Zone Map (scene, building parts, finishes; EoMT + Grounding DINO + OWLv2 + SAM 2.1)",
+    "InegoIntrinsicAlbedo": "INEGO Intrinsic Albedo (frame without light, Intrinsic v2)",
+    "InegoMaterialGroups": "INEGO Material Groups (same material = one mask; Materialistic + SAM 2.1 edges)",
     "InegoRelight": "INEGO Relight (source lighting onto an edited surface, Marigold-IID)",
     "InegoTextureProject": "INEGO Texture Project (sample texture 1:1 onto planar faces, MoGe-2 + Marigold-IID)",
     "InegoSurfaceMask": "INEGO Surface Mask (exact surface under a stroke, SAM 2.1)",

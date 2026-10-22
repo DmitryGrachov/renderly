@@ -77,4 +77,32 @@ for r in ('tue-mps/ade20k_panoptic_eomt_large_1280', 'IDEA-Research/grounding-di
     d(r, cache_dir='$M/zones', allow_patterns=['*.json', '*.safetensors', '*.txt', '*.model'])
 " || echo "[models] модели карты зон не скачаны — докачаются при первом запросе"
 
+# Materialistic (Render pass, нод InegoMaterialGroups): чекпойнт с Google Drive авторов (zip ~485 МБ); бэкбон DINO
+# ViT-B/8 модель докачивает сама через torch.hub в $M/materialistic/hub
+if [ ! -s "$M/materialistic/model.ckpt" ]; then
+  mkdir -p "$M/materialistic"
+  echo "[models] скачиваю Materialistic ..."
+  curl -fL --retry 5 --retry-delay 5 -o "$M/materialistic/ckpt.zip.part"     "https://drive.usercontent.google.com/download?id=1AlHQ6InyVrYk6-F7P_1bHRctrzfi5Hhz&export=download&confirm=t"     && python -c "
+import zipfile; zipfile.ZipFile('$M/materialistic/ckpt.zip.part').extract('materialistic_checkpoint/model.ckpt', '$M/materialistic')
+" && mv "$M/materialistic/materialistic_checkpoint/model.ckpt" "$M/materialistic/model.ckpt"     || echo "[models] Materialistic не скачан — Render pass не заработает"
+  rm -rf "$M/materialistic/ckpt.zip.part" "$M/materialistic/materialistic_checkpoint"
+fi
+
+# DMS46 (Apple, ECCV 2022; лицензия модели — LICENSE.txt репозитория apple/ml-dms-dataset): находит стекло для нода
+# InegoMaterialGroups — одинаковые стёкла с разными отражениями сводятся в одну группу
+if [ ! -s "$M/zones/dms46/DMS46_v1.pt" ]; then
+  mkdir -p "$M/zones/dms46"
+  echo "[models] скачиваю DMS46 ..."
+  curl -fL --retry 5 --retry-delay 5 -o "$M/zones/dms46/dms46.zip.part" \
+    "https://docs-assets.developer.apple.com/ml-research/datasets/dms/dms46_v1.zip" \
+    && python -c "
+import zipfile, os
+z = zipfile.ZipFile('$M/zones/dms46/dms46.zip.part')
+for n in z.namelist():
+    if n.endswith('DMS46_v1.pt') and not os.path.basename(n).startswith('._'):
+        open('$M/zones/dms46/' + os.path.basename(n), 'wb').write(z.read(n))
+" || echo "[models] DMS46 не скачан — стёкла с разными отражениями останутся разными группами"
+  rm -f "$M/zones/dms46/dms46.zip.part"
+fi
+
 exec python main.py --listen 0.0.0.0 --port 8188 ${COMFYUI_ARGS:-}
