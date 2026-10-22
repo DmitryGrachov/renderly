@@ -60,6 +60,7 @@ PARTS = [
 DETAILS = [("lamp", 0.40, "Светильник")]
 DETAIL_SIDE = 1600  # длинная сторона увеличенной вырезки здания
 MAT_MIN = 0.03  # кусок материала стен — не меньше этой доли стен
+FAR_DEPTH = 2.0  # здание дальше стольких глубин основного — фон (город на горизонте)
 # по всему кадру (EoMT их пропускает или сливает): запрос, порог, подпись, вид
 SCENE_EXTRA = [
     ("hedge", 0.30, "Живая изгородь", "veg"),
@@ -245,18 +246,42 @@ def _sam_boxes(rgb, boxes):
     return res
 
 
-def _faces(rgb, walls):
-    """Грани стен по осям здания; [(маска, горизонтальная)]."""
-    if walls.sum() < 0.01 * walls.size:
-        return [(walls, False)]
+def _geometry(rgb):
+    """Точки, нормали и камера MoGe-2 (один прогон на карту)."""
     src = rgb.astype(np.float32) / 255
     model = _moge()
     with _on_gpu(model):
         with torch.no_grad():
             g = model.infer(torch.from_numpy(src).permute(2, 0, 1).to(_device()))
-    P = g["points"].float().cpu().numpy()
-    Nn = g["normal"].float().cpu().numpy()
-    K = g["intrinsics"].float().cpu().numpy()
+    return (g["points"].float().cpu().numpy(), g["normal"].float().cpu().numpy(),
+            g["intrinsics"].float().cpu().numpy())
+
+
+def _far_buildings(bmask, P):
+    """Здания далеко за основным (город на горизонте): EoMT называет их тем же «building», и они уходили в стены.
+    Основное здание — крупнейший связный кусок; дальше FAR_DEPTH его глубины — фон."""
+    depth = np.linalg.norm(np.where(np.isfinite(P), P, np.inf), axis=-1)
+    lab, n = ndimage.label(ndimage.binary_opening(bmask, iterations=1))
+    if not n:
+        return np.zeros_like(bmask)
+    sizes = ndimage.sum(np.ones_like(lab), lab, range(1, n + 1))
+    main = lab == int(np.argmax(sizes)) + 1
+    d = depth[main & np.isfinite(depth)]
+    if not d.size:
+        return np.zeros_like(bmask)
+    far = bmask & (depth > FAR_DEPTH * float(np.median(d)))
+    far = ndimage.binary_opening(far, iterations=1)
+    if far.any():
+        log.info("INEGO zones: здания дальше %.1f× основного — фон (%.1f%% кадра)", FAR_DEPTH, 100 * far.mean())
+    return far
+
+
+def _faces(rgb, walls, geo):
+    """Грани стен по осям здания; [(маска, горизонтальная)]."""
+    if walls.sum() < 0.01 * walls.size:
+        return [(walls, False)]
+    src = rgb.astype(np.float32) / 255
+    P, Nn, K = geo
     H, W = walls.shape
     Kp = K.copy()
     Kp[0] *= W
@@ -556,6 +581,9 @@ def build_zone_map(rgb: np.ndarray):
     for lab, m in segs:
         if lab in BUILDING:
             bmask |= m
+    geo = _geometry(rgb)
+    far = _far_buildings(bmask, geo[0]) if bmask.any() else np.zeros((H, W), bool)
+    bmask &= ~far
     near = ndimage.binary_dilation(bmask, iterations=max(3, round(0.02 * max(H, W)))) if bmask.any() else None
     found, extra = [], []
     for kind in ("gdino", "owl"):
@@ -584,6 +612,8 @@ def build_zone_map(rgb: np.ndarray):
     part_masks, extra_masks = masks[: len(found)], masks[len(found):]
 
     zones = []  # [подпись, маска, вид]
+    if far.sum() > 0.001 * H * W:
+        zones.append(["Здания (фон)", far, "scene"])
     for lab, m in segs:
         if lab in BUILDING:
             continue
@@ -638,7 +668,7 @@ def build_zone_map(rgb: np.ndarray):
     # стены — без частей; горизонтальные плоскости — покрытие; остальное — по материалам, слой на материал
     walls = bmask & ~occupied
     floor = np.zeros((H, W), bool)
-    for f, horizontal in _faces(rgb, walls):
+    for f, horizontal in _faces(rgb, walls, geo):
         if horizontal:
             floor |= f
     if floor.sum() > 0.002 * H * W:
