@@ -606,6 +606,13 @@ def build_workflow(
         wf["ref_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["ref_img", 0], "vae": ["vae", 0]}}
         wf["cond_ref"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["ref_lat", 0]}}
         positive = ["cond_ref", 0]
+    if texture:
+        # следующая картинка — образец материала (вкладка «Материалы»): klein берёт несколько референсов
+        # ReferenceLatent-цепочкой, в промпте — «image 3» (или «image 2» без разметки)
+        wf["tex_img"] = {"class_type": "LoadImage", "inputs": {"image": texture}}
+        wf["tex_lat"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["tex_img", 0], "vae": ["vae", 0]}}
+        wf["cond_tex"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": ["tex_lat", 0]}}
+        positive = ["cond_tex", 0]
     # steps < TOTAL_STEPS — хвост расписания: стартует с латента кропа (второй прогон «детализации»)
     image = _sampling(wf, "", positive, ["noise_lat", 0], width, height, steps, seed, model=["diffdiff", 0])
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": f"inego/{prefix}"}}
@@ -1773,6 +1780,11 @@ TEXTURE_RULE = (
     "the photo. Anything else in image 3 (background, objects, light) is not part of the material."
 )
 # в запрос Qwen-2.1: образец — третьей картинкой
+# klein: образец — следующей картинкой после кропа (и разметки); коротко — бюджет ~512 токенов
+FLUX_TEXTURE = (
+    " The new material is exactly the material in image {n}: same colour, pattern, element shapes and joints, at true "
+    "real-world scale, following the surface plane and perspective. Image {n} is only a material sample."
+)
 Q21_TEXTURE = (
     " The new material is exactly the material shown in the sample photo <image3>: the same colour, pattern, grain, "
     "element shapes, joints and surface finish, laid on the marked surface at true real-world scale (not at the "
@@ -2070,6 +2082,8 @@ async def run_edit(
             prompt += Q2511_TEXTURE
     else:
         prompt = EDIT_PROMPT.format(**what) + (MARK_RULE if mark else "")
+        if tex is not None:
+            prompt += FLUX_TEXTURE.format(n=3 if mark else 2)
     if what.get("material"):
         keep = MATERIAL_KEEP.format(keep=what["keep_in_surface"][:1].upper() + what["keep_in_surface"][1:])             if what.get("keep_in_surface") else ""
         text = MATERIAL_PROMPT.format(material=what["material"], surface=what.get("surface") or "the marked surface", keep=keep)
@@ -2088,6 +2102,6 @@ async def run_edit(
     subject = subject[:1].lower() + subject[1:]
     return await r.generate(
         prompt, seed, model, "edit", EDIT_EDGE, reference, unleak, unveil=add, refine=refine, native=native,
-        texture=tex if model in (*QWEN21_MODELS, QWEN_EDIT_MODEL) else None,
+        texture=tex,
         harmonize=(f"{subject} was just {'added' if add else 'changed'}", False), scene=scene,
     ), seed
