@@ -89,7 +89,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
 
   useEffect(() => setSelected(new Set()), [map])
 
-  // оверлей: все маски полупрозрачно, наведённая и выбранные — ярче, их край — белым; линии схемы (разделитель)
+  // оверлей: все маски полупрозрачно, наведённая и выбранные — ярче, без обводки; линии схемы (разделитель)
   // не рисуются никогда — на кадре они только мешают, маска разделителя берётся из списка
   useEffect(() => {
     const cv = canvas.current
@@ -112,16 +112,6 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
       px[o + 1] = colors[id * 3 + 1]
       px[o + 2] = colors[id * 3 + 2]
       px[o + 3] = a
-      if (on) {
-        const x = i % w
-        const edge =
-          (x > 0 && ids[i - 1] !== id) || (x < w - 1 && ids[i + 1] !== id) ||
-          (i >= w && ids[i - w] !== id) || (i < ids.length - w && ids[i + w] !== id)
-        if (edge) {
-          px[o] = px[o + 1] = px[o + 2] = 255
-          px[o + 3] = 255
-        }
-      }
     }
     ctx.putImageData(img, 0, 0)
   }, [map, colors, hover, selected, showAll])
