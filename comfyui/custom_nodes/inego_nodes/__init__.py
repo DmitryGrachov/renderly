@@ -564,24 +564,36 @@ class InegoAlign:
                 best = (score, float(s), dx, dy)
         return best
 
-    def run(self, image, source, max_scale, max_shift):
-        out = image[0][..., :3]
-        src_img = source[0][..., :3]
+    @classmethod
+    def transform(cls, out: torch.Tensor, src_img: torch.Tensor, max_scale: float = 0.08, max_shift: float = 0.08):
+        """Масштаб s и сдвиг (tx, ty) в долях кадра, переводящие результат на место исходника: точка результата
+        u (в долях кадра) → s·u + t. None — совмещать не нужно или нельзя."""
         coarse_w, fine_w = 512, 1024
         a = _edge_map(src_img, coarse_w)
-        _, s0, _, _ = self._search(a, out, coarse_w, np.arange(1 - max_scale, 1 + max_scale + 1e-6, 0.005), max_shift)
+        _, s0, _, _ = cls._search(a, out, coarse_w, np.arange(1 - max_scale, 1 + max_scale + 1e-6, 0.005), max_shift)
         if abs(s0 - 1) > max_scale - 0.006:
             # масштаб упёрся в край диапазона — оценка ненадёжна, лучше несовмещённый кадр, чем двоящееся здание
             log.info("INEGO align: масштаб %.3f на краю диапазона — кадр не трогаю", s0)
-            return (image,)
+            return None
         a = _edge_map(src_img, fine_w)
-        score, s, dx, dy = self._search(a, out, fine_w, np.arange(s0 - 0.005, s0 + 0.0051, 0.001), max_shift)
+        score, s, dx, dy = cls._search(a, out, fine_w, np.arange(s0 - 0.005, s0 + 0.0051, 0.001), max_shift)
         base, _, _ = _xcorr(a, _edge_map(out, fine_w)[: a.shape[0], : a.shape[1]], 0, 0)
         H, W = out.shape[:2]
         tx, ty = dx / fine_w, dy / a.shape[0]  # доли кадра
         if score <= base * 1.02 or (abs(s - 1) < 0.002 and abs(tx) * W < 1 and abs(ty) * H < 1):
             log.info("INEGO align: сдвига нет (совпадение %.3f, со сдвигом %.3f)", base, score)
+            return None
+        log.info("INEGO align: масштаб %.3f, сдвиг %+.1f%% / %+.1f%% кадра (совпадение %.3f → %.3f)",
+                 s, 100 * tx, 100 * ty, base, score)
+        return s, tx, ty
+
+    def run(self, image, source, max_scale, max_shift):
+        out = image[0][..., :3]
+        t = self.transform(out, source[0][..., :3], max_scale, max_shift)
+        if t is None:
             return (image,)
+        s, tx, ty = t
+        H, W = out.shape[:2]
         # точка результата p_out переходит в s * p_out + t; обратное отображение для grid_sample
         ys, xs = torch.meshgrid(torch.arange(H, dtype=torch.float32), torch.arange(W, dtype=torch.float32), indexing="ij")
         sx = (xs - tx * W) / s
@@ -593,8 +605,6 @@ class InegoAlign:
         # мягкий шов у открывшегося края: там остаётся несдвинутый результат
         inside = torch.from_numpy(ndimage.gaussian_filter(inside.numpy(), max(1.0, 0.004 * min(H, W)))).clamp(0, 1)
         res = (warped * inside + img * (1 - inside))[0].clamp(0, 1).permute(1, 2, 0)[None]
-        log.info("INEGO align: масштаб %.3f, сдвиг %+.1f%% / %+.1f%% кадра (совпадение %.3f → %.3f)",
-                 s, 100 * tx, 100 * ty, base, score)
         return (res,)
 
 

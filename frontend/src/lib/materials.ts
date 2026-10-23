@@ -13,14 +13,15 @@ export interface MaterialMap {
   /** размер карты (кадр уменьшен до 2048 по длинной стороне) */
   width: number
   height: number
-  /** id группы на пиксель, 0 — без материала */
-  ids: Uint8Array
+  /** id элемента на пиксель, 0 — без элемента */
+  ids: Uint16Array
   /** плоская схема материалов (Qwen-Image-2.1, без света), по ней искались группы */
   schema: string | null
   groups: MaterialGroup[]
 }
 
-async function decode(url: string, width: number, height: number): Promise<Uint8Array> {
+/** Карта — RGB PNG: id = R + 256·G (элементов бывает больше 255) */
+async function decode(url: string, width: number, height: number): Promise<Uint16Array> {
   const img = new Image()
   img.src = url
   await img.decode()
@@ -31,8 +32,8 @@ async function decode(url: string, width: number, height: number): Promise<Uint8
   ctx.imageSmoothingEnabled = false
   ctx.drawImage(img, 0, 0)
   const px = ctx.getImageData(0, 0, width, height).data
-  const out = new Uint8Array(width * height)
-  for (let i = 0; i < out.length; i++) out[i] = px[i * 4]
+  const out = new Uint16Array(width * height)
+  for (let i = 0; i < out.length; i++) out[i] = px[i * 4] | (px[i * 4 + 1] << 8)
   return out
 }
 

@@ -44,9 +44,9 @@ export function RenderPass() {
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.06 }}
           className="mt-3 text-[44px] font-semibold leading-[1.04] tracking-[-0.035em] sm:text-[64px]"
         >
-          Кадр по материалам.
+          Кадр по элементам.
           <br />
-          <span className="text-faint">Один материал — одна маска.</span>
+          <span className="text-faint">Один элемент — одна маска.</span>
         </motion.h1>
       </section>
 
@@ -81,7 +81,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
 
   const byId = useMemo(() => new Map((map?.groups ?? []).map((g) => [g.id, g])), [map])
   const colors = useMemo(() => {
-    const c = new Uint8Array(256 * 3)
+    const c = new Uint8Array(((map?.groups.length ?? 0) + 1) * 3)
     for (const g of map?.groups ?? []) c.set(groupColor(g.id), g.id * 3)
     return c
   }, [map])
@@ -181,7 +181,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
             <div className="absolute inset-0 grid place-items-center bg-black/25 backdrop-blur-[2px]">
               <div className="flex items-center gap-2.5 rounded-full bg-surface/90 px-4 py-2 text-[14px] font-medium shadow-card">
                 <Loader2 className="size-4 animate-spin text-accent" />
-                Разбираем материалы… около минуты
+                Разбираем элементы… около минуты
               </div>
             </div>
           )}
@@ -207,7 +207,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
 
       <aside className="h-fit rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] lg:sticky lg:top-20">
         <div className="flex items-center justify-between">
-          <div className="text-[17px] font-semibold tracking-[-0.02em]">Материалы{map ? ` · ${map.groups.length}` : ''}</div>
+          <div className="text-[17px] font-semibold tracking-[-0.02em]">Элементы{map ? ` · ${map.groups.length}` : ''}</div>
           <div className="flex gap-1">
             {map?.schema && (
               <button
@@ -220,7 +220,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
             )}
             <button
               onClick={() => setShowAll((v) => !v)}
-              title={showAll ? 'Скрыть заливку' : 'Показать все материалы'}
+              title={showAll ? 'Скрыть заливку' : 'Показать все элементы'}
               className="grid size-8 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.05] hover:text-ink"
             >
               {showAll ? <Eye className="size-4" /> : <EyeOff className="size-4" />}
@@ -236,7 +236,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
           </div>
         </div>
         <p className="mt-1 text-[13px] text-mute">
-          {selected.size ? `Выбрано: ${selected.size}` : 'Наведите на кадр — клик выбирает материал'}
+          {selected.size ? `Выбрано: ${selected.size}` : 'Наведите на кадр — клик выбирает элемент'}
         </p>
 
         {map && (

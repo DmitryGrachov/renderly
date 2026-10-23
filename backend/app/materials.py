@@ -1,11 +1,12 @@
 """Кадр по материалам (вкладка Render pass): нод InegoMaterialGroups в ComfyUI
 (см. comfyui/custom_nodes/inego_nodes/materials.py).
 
-Сначала Intrinsic v2 снимает с кадра свет (альбедо), по нему Qwen-Image-2.1 рисует кадр плоской заливкой
-(схема материалов, InegoAlign возвращает её на место исходника) — материалы и куски ищутся по ней, карта ложится на исходный кадр.
+Qwen-Image-Edit-2511 рисует кадр плоской иллюстрацией без света (схема); нод режет её на элементы по заливкам,
+переносит их многоугольниками на место кадра (масштаб + сдвиг InegoAlign), мелким элементам (окна, двери,
+водостоки) край уточняет SAM 2.1 по фото.
 
-Ответ — карта PNG (значение пикселя — id группы, 0 — без материала), схема JPEG и список групп
-{id, label, area, color}: одна группа — один материал по всему кадру, независимо от света и теней.
+Ответ — карта PNG (id элемента = R + 256·G, 0 — без элемента), схема JPEG и список элементов
+{id, label, area, color}: каждый кусок кадра — свой элемент, ничего не объединяется.
 """
 
 import asyncio
@@ -15,29 +16,25 @@ import json
 import uuid
 
 import httpx
-import numpy as np
 from PIL import Image
 
 from . import comfy
 from .comfy import ComfyError, _upload, to_png
-from .config import COMFY_TIMEOUT, COMFYUI_URL, QWEN21_RENDER_MEGAPIXELS, QWEN21_TURBO_MODEL, log
-from .material_judge import judge_pairs
-from .prompting import q21_tags
+from .config import COMFY_TIMEOUT, COMFYUI_URL, QWEN_EDIT_MODEL, QWEN_EDIT_RENDER_MEGAPIXELS, log
 
 MAX_SIDE = 2048  # карта строится в этом размере (по длинной стороне); фронтенд растягивает её на кадр
 
-# схема материалов: тот же кадр как base-colour (albedo) проход 3D-рендера — каждый материал одной заливкой своего
-# цвета, без света; мелкие детали (водостоки, фонари, рамы) — отдельными пятнами своего цвета
+# схема: тот же кадр плоской иллюстрацией без света (Qwen-Image-Edit-2511) — раскраска, по заливкам которой режутся
+# элементы. 2.1 по альбедо красил доску карниза в цвет стены; 2511 слушает «соседние элементы — разными цветами» и
+# проводит между ними тонкие контуры (запрет контуров не слушает — они и не мешают, нод делит их между соседями).
+# Просьбу о сегментационной карте (каждому элементу условный цвет) обе модели не выполняют, а 2511 при ней додумывает дом
 SCHEMA_PROMPT = (
-    "Redraw image 1 as a clean flat vector illustration of exactly the same scene that works like the unlit "
-    "base-colour (albedo) pass of a 3D render: there is no lighting at all, so every material is one solid flat fill "
-    "of its own real colour everywhere it appears: both roof slopes, walls in sun and in shade, sides facing away all "
-    "have exactly the same colour as the rest of that material. No texture, no reflections, no shading, no shadows, "
-    "no highlights and no gradients. Different materials keep clearly different colours: stone or brick cladding, "
-    "plaster, dark panels, window frames, glass, roofing, gutters and downpipes, chimneys, wall lamps, door, steps, "
-    "paving, lawn, trees and sky each their own flat colour; glass is a flat solid tint without reflections. Keep "
-    "every small detail: every downpipe, gutter, wall lamp, window, frame mullion, door, step, railing and chimney "
-    "stays exactly in place and the same size. Same camera and framing, crisp straight edges."
+    "Turn image 1 into a clean flat colour illustration of exactly the same scene with no lighting at all: no "
+    "shadows, no sun, no shading, no reflections, no texture, no gradients, and no outlines or contour lines "
+    "anywhere: shapes meet edge to edge. Each building element is one solid flat colour; neighbouring elements are "
+    "always separated by a clearly different colour, so the roof edge boards, fascias and soffits, window frames, "
+    "glass, doors, lamps, downpipes, stone cladding panels, plinth and steps each stand out from the wall around "
+    "them. Keep the exact geometry, positions and sizes, same camera and framing, crisp straight edges."
 )
 SCHEMA_SEED = 7
 
@@ -46,15 +43,14 @@ async def build_materials(image: bytes) -> dict:
     src = Image.open(io.BytesIO(image)).convert("RGB")
     src.thumbnail((MAX_SIDE, MAX_SIDE), Image.LANCZOS)
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
-        await comfy._check_model(client, QWEN21_TURBO_MODEL)  # веса на месте; прежняя модель другого семейства выгружается
-        qsize = comfy.fit_size(*src.size, QWEN21_RENDER_MEGAPIXELS, step=32)
+        await comfy._check_model(client, QWEN_EDIT_MODEL)  # веса на месте; прежняя модель другого семейства выгружается
+        # схема — на родных для 2511 ~1 Мп, InegoAlign возвращает её на место кадра
+        qsize = comfy.fit_size(*src.size, QWEN_EDIT_RENDER_MEGAPIXELS, step=16)
         qname = await _upload(client, to_png(src.resize(qsize, Image.LANCZOS)), f"{uuid.uuid4().hex}.png")
-        wf = comfy.build_qwen21_workflow(qname, q21_tags(SCHEMA_PROMPT), SCHEMA_SEED, None)
-        # Qwen рисует схему не по фото, а по его альбедо (Intrinsic v2): по фото в схему переходили тень под навесом
-        # и солнце на фронтоне. Совмещение (InegoAlign) — по-прежнему с фото
-        wf["albedo"] = {"class_type": "InegoIntrinsicAlbedo", "inputs": {"image": ["src_img", 0]}}
-        wf["text"]["inputs"]["images.image_1"] = ["albedo", 0]
-        schema = wf.pop("save")["inputs"]["images"]  # уже совмещена с исходником (InegoAlign)
+        wf = comfy.build_qwen2511_workflow(qname, SCHEMA_PROMPT, SCHEMA_SEED, None)
+        wf.pop("save")
+        # нод режет схему как есть и сам переносит готовые многоугольники на место кадра (InegoAlign.transform)
+        schema = wf.pop("align")["inputs"]["image"]
         name = await _upload(client, to_png(src), f"{uuid.uuid4().hex}.png")
         wf["src"] = {"class_type": "LoadImage", "inputs": {"image": name}}
         wf["materials"] = {"class_type": "InegoMaterialGroups", "inputs": {"image": ["src", 0], "schema": schema}}
@@ -81,17 +77,11 @@ async def build_materials(image: bytes) -> dict:
                     v.raise_for_status()
                     files.append(v.content)
                 groups = json.loads(out["groups"][0])
-                pairs = json.loads(out["pairs"][0]) if "pairs" in out else []
-                # спорные пары (близкий цвет на схеме, группы раздельные) — на суд DeepSeek
-                ids = np.asarray(Image.open(io.BytesIO(files[0])))
-                ids, groups = await judge_pairs(src.resize((ids.shape[1], ids.shape[0])), ids, groups, pairs)
-                buf = io.BytesIO()
-                Image.fromarray(ids, "L").save(buf, "PNG")
-                log.info("материалы %dx%d: %d групп", src.width, src.height, len(groups))
+                log.info("материалы %dx%d: %d элементов", src.width, src.height, len(groups))
                 return {
                     "width": src.width,
                     "height": src.height,
-                    "map": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(),
+                    "map": "data:image/png;base64," + base64.b64encode(files[0]).decode(),
                     "schema": "data:image/jpeg;base64," + base64.b64encode(files[1]).decode() if len(files) > 1 else None,
                     "groups": groups,
                 }
