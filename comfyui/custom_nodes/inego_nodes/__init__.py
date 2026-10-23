@@ -956,6 +956,13 @@ MF_W_NORMAL = 0.3
 MF_ALIGN_DEG = 25
 MF_MIN_ALIGNED = 0.6
 MF_PLANE_SEP = 0.06
+# направление рядов стены по её собственным линиям (_face_horizontal): отрезок — у грани (в пределах этой доли кадра),
+# горизонталь из него не дальше этого угла от оси здания; отрезков не меньше; разброс вокруг среднего — до этого угла
+FH_NEAR = 0.01
+FH_MAX_DEG = 20
+FH_MIN_SEGS = 3
+FH_INLIER_DEG = 4
+FH_FIX_DEG = 2.0  # поправка — только если ряды по осям здания и по линиям стены расходятся в кадре на столько
 
 
 def _moge():
@@ -1087,6 +1094,50 @@ class InegoTextureProject:
         owner, planes = built
         faces = [owner == i for i in range(len(planes))]
         up = axes[0]
+        # стены: направление рядов — по линиям фото на самой грани (_face_horizontal), но только если оси здания
+        # расходятся с ними в кадре явно (FH_FIX_DEG): в сгенерированном кадре перспектива в разных его частях своя,
+        # и общая поправка на все параллельные грани ломала столб у двери, где оси и так лежали верно. Грань без
+        # своих линий берёт поправку соседней примыкающей грани того же направления
+        def row_angle(u, i):
+            # наклон ряда в кадре у середины грани: точка грани и сдвиг от неё вдоль u
+            ys_, xs_ = np.nonzero(owner == i)
+            cx_, cy_ = float(np.median(xs_)), float(np.median(ys_))
+            X = rays[int(cy_), int(cx_)].astype(np.float64)
+            Y = X + 0.01 * np.asarray(u, np.float64) * np.linalg.norm(X)
+            qx, qy = Kp[0, 0] * Y[0] / Y[2] + Kp[0, 2], Kp[1, 1] * Y[1] / Y[2] + Kp[1, 2]
+            return float(np.degrees(np.arctan2(qy - cy_, qx - cx_)) + 90) % 180 - 90
+
+        walls = [i for i, (nf, _) in enumerate(planes) if abs(nf @ up) <= 0.7]
+        fixed: dict[int, tuple] = {}
+        for i in walls:
+            nf = planes[i][0]
+            u0 = np.cross(up, nf)
+            u0 = u0 / (np.linalg.norm(u0) + 1e-6)
+            got = _face_horizontal(gray, owner == i, Kp, up, u0)
+            if got is None:
+                continue
+            gap = abs(row_angle(got[0], i) - row_angle(u0, i))
+            log.info("INEGO texture: грань %d — ряды по осям здания и по %d линиям стены расходятся на %.1f°", i, got[1], gap)
+            if gap >= FH_FIX_DEG:
+                fixed[i] = got
+        for i in walls:
+            if i in fixed or not fixed:
+                continue
+            near_i = ndimage.binary_dilation(owner == i, iterations=max(2, round(FH_NEAR * max(H, W))))
+            same = [j for j in fixed if abs(planes[j][0] @ planes[i][0]) > 0.99 and (near_i & (owner == j)).any()]
+            if same:
+                fixed[i] = max((fixed[j] for j in same), key=lambda g_: g_[1])
+                log.info("INEGO texture: грань %d — поправка соседней грани %s", i, same)
+        for i, (u, n_seg) in fixed.items():
+            nf, off = planes[i]
+            n_new = np.cross(u, up)
+            n_new = n_new / (np.linalg.norm(n_new) + 1e-6)
+            if n_new @ nf < 0:
+                n_new = -n_new
+            sel = (owner == i) & np.isfinite(P).all(-1)
+            planes[i] = (n_new.astype(np.float32), float(np.median(P[sel] @ n_new)) if sel.any() else off)
+            log.info("INEGO texture: грань %d — горизонталь по линиям стены, поворот %.1f°", i,
+                     float(np.degrees(np.arccos(np.clip(abs(n_new @ nf), -1, 1)))))
         UV = np.zeros((H, W, 2), np.float32)
         for i, (nf, off) in enumerate(planes):
             if abs(nf @ up) > 0.7:
@@ -1333,6 +1384,58 @@ def _manhattan_frame(gray: np.ndarray, N: np.ndarray, S: np.ndarray, Kp: np.ndar
     log.info("INEGO texture: оси здания — %d отрезков по осям из %d, поправка к нормалям MoGe %.1f°, вертикаль %s",
              int(seg_in.sum()), len(nl), turn, np.round(A[0], 3))
     return A.astype(np.float32)
+
+
+def _face_horizontal(gray: np.ndarray, face: np.ndarray, Kp: np.ndarray, up: np.ndarray, u0: np.ndarray):
+    """Горизонталь стены (направление рядов) по линиям фото на её гранях: подоконники, низ стены, швы. Оси здания
+    задают одну систему на весь кадр, а в сгенерированном кадре стены не обязаны быть строго перпендикулярны: у
+    боковой стены точка схода по осям выходила почти вдвое ближе настоящей — ряды плитки шли под −24° вместо −8°
+    у подоконника, а грань выходила видной почти с ребра, и плитка сжималась в полоски. Горизонталь 3D-отрезка —
+    пересечение его плоскости через камеру (нормаль Kᵀl) с горизонталью: up × Kᵀl. Отрезки — у грани, не
+    вертикальные, не дальше FH_MAX_DEG от оси; среднее по длине, выбросы дальше FH_INLIER_DEG — прочь.
+    None — линий мало, остаётся ось здания."""
+    import cv2
+
+    H, W = face.shape
+    found = cv2.createLineSegmentDetector().detect(gray)[0]
+    if found is None:
+        return None
+    seg = np.asarray(found, np.float64).reshape(-1, 4)
+    length = np.hypot(seg[:, 2] - seg[:, 0], seg[:, 3] - seg[:, 1])
+    keep = length >= max(15.0, MF_MIN_SEG * max(H, W))
+    seg, length = seg[keep], length[keep]
+    if not len(seg):
+        return None
+    near = ndimage.binary_dilation(face, iterations=max(2, round(FH_NEAR * max(H, W))))
+    t = np.linspace(0, 1, 12)
+    px = np.clip(np.round(seg[:, 0:1] + t * (seg[:, 2:3] - seg[:, 0:1])).astype(int), 0, W - 1)
+    py = np.clip(np.round(seg[:, 1:2] + t * (seg[:, 3:4] - seg[:, 1:2])).astype(int), 0, H - 1)
+    on = near[py, px].mean(1) >= 0.7
+    ones = np.ones(len(seg))
+    lines = np.cross(np.stack([seg[:, 0], seg[:, 1], ones], 1), np.stack([seg[:, 2], seg[:, 3], ones], 1))
+    nl = (Kp.T @ lines.T).T
+    nl /= np.linalg.norm(nl, axis=1, keepdims=True) + 1e-12
+    upd = up.astype(np.float64)
+    d = np.cross(upd, nl)
+    dn = np.linalg.norm(d, axis=1)
+    # вертикальный отрезок: его плоскость содержит вертикаль, горизонталь из неё не определена
+    ok = on & (np.abs(nl @ upd) > 0.2) & (dn > 1e-6)
+    d = d / (dn[:, None] + 1e-12)
+    d *= np.sign(d @ u0)[:, None]
+    ang = np.degrees(np.arccos(np.clip(d @ u0, -1, 1)))
+    ok &= ang < FH_MAX_DEG
+    if ok.sum() < FH_MIN_SEGS:
+        return None
+    d, w = d[ok], length[ok]
+    u = (d * w[:, None]).sum(0)
+    for _ in range(3):
+        u /= np.linalg.norm(u)
+        inl = np.degrees(np.arccos(np.clip(d @ u, -1, 1))) < FH_INLIER_DEG
+        if inl.sum() < FH_MIN_SEGS:
+            return None
+        u = (d[inl] * w[inl, None]).sum(0)
+    u /= np.linalg.norm(u)
+    return u.astype(np.float32), int(inl.sum())
 
 
 def _manhattan_faces(A: np.ndarray, P: np.ndarray, N: np.ndarray, valid: np.ndarray, S: np.ndarray):
