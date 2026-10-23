@@ -127,7 +127,7 @@ TEXTURE_MAX_BYTES = 64 * 2**20
 
 @app.post("/api/materials")
 async def materials_map(image: UploadFile = File(...), _user: User = Depends(current_user)):
-    """Render pass: кадр → плоская иллюстрация Qwen-Image-Edit-2511 (без масок и сегментации)."""
+    """Render pass: кадр → плоская иллюстрация Qwen-Image-Edit-2511 → маски по ней, линии — разделитель."""
     try:
         return await material_map.build_materials(await image.read())
     except comfy.ModelUnavailable as e:

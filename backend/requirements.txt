@@ -10,5 +10,7 @@ email-validator>=2.1
 pillow>=10.4
 numpy>=1.26
 scipy>=1.11
+# маски Render pass по схеме: заливка, линии, многоугольники
+opencv-python-headless>=4.9
 # карты PBR-наборов в EXR (Poly Haven и т.п.)
 OpenEXR>=3.3
