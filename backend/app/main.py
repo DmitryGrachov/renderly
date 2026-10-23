@@ -127,14 +127,14 @@ TEXTURE_MAX_BYTES = 64 * 2**20
 
 @app.post("/api/materials")
 async def materials_map(image: UploadFile = File(...), _user: User = Depends(current_user)):
-    """Кадр по материалам (Render pass): одинаковый материал — одна группа и маска, свет и тени не в счёт."""
+    """Render pass: кадр → плоская иллюстрация Qwen-Image-Edit-2511 (без масок и сегментации)."""
     try:
         return await material_map.build_materials(await image.read())
     except comfy.ModelUnavailable as e:
         raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:
         log.exception("materials failed")
-        raise HTTPException(502, f"Материалы не разобраны: {e}") from e
+        raise HTTPException(502, f"Схема не построена: {e}") from e
 
 
 @app.post("/api/inpaint/plan")
