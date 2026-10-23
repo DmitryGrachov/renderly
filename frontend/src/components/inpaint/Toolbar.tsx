@@ -1,9 +1,9 @@
 import { motion } from 'motion/react'
-import { Brush, Eraser, Hand, History, Lasso, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { Brush, Eraser, Hand, History, Lasso, Loader2, MousePointerClick, Redo2, Shapes, Trash2, Undo2 } from 'lucide-react'
 import { ToolButton } from '../ToolButton'
 import type { InpaintMode } from '../../lib/inpaint'
 
-export type Tool = 'lasso' | 'brush' | 'eraser' | 'restore' | 'hand'
+export type Tool = 'lasso' | 'brush' | 'eraser' | 'restore' | 'pick' | 'hand'
 export type Shape = 'circle' | 'square'
 
 export const MODE_COLOR: Record<InpaintMode, string> = {
@@ -17,6 +17,7 @@ const TOOLS: { id: Tool; icon: typeof Brush; label: string; key: string }[] = [
   { id: 'brush', icon: Brush, label: 'Кисть', key: 'B' },
   { id: 'eraser', icon: Eraser, label: 'Ластик', key: 'E' },
   { id: 'restore', icon: History, label: 'Кисть отката — вернуть предыдущую версию там, где закрасите', key: 'R' },
+  { id: 'pick', icon: MousePointerClick, label: 'Выбор маски по схеме — клик добавляет или убирает элемент', key: 'M' },
   { id: 'hand', icon: Hand, label: 'Рука — перемещение', key: 'H / пробел' },
 ]
 
@@ -31,10 +32,17 @@ interface ToolbarProps {
   onClear: () => void
   /** Есть предыдущая версия — кисть отката доступна */
   canRestore: boolean
+  /** Маски по схеме построены для текущей версии — выбор маски доступен */
+  canPick: boolean
+  /** Построить маски по схеме (как Render Pass) для текущей версии */
+  onBuildMasks: () => void
+  buildingMasks: boolean
   disabled?: boolean
 }
 
-export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRedo, onClear, canRestore, disabled }: ToolbarProps) {
+export function Toolbar({
+  tool, onTool, canUndo, canRedo, hasMask, onUndo, onRedo, onClear, canRestore, canPick, onBuildMasks, buildingMasks, disabled,
+}: ToolbarProps) {
   return (
     <div className={`glass flex flex-col gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5 ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
       {TOOLS.map(({ id, icon: Icon, label, key }) => {
@@ -46,7 +54,7 @@ export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRed
             shortcut={key}
             onClick={() => onTool(id)}
             active={active}
-            disabled={id === 'restore' && !canRestore}
+            disabled={(id === 'restore' && !canRestore) || (id === 'pick' && !canPick)}
           >
             {active && (
               <motion.span layoutId="inpaint-tool" className="absolute inset-0 -z-10 rounded-xl bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />
@@ -55,6 +63,14 @@ export function Toolbar({ tool, onTool, canUndo, canRedo, hasMask, onUndo, onRed
           </ToolButton>
         )
       })}
+      <ToolButton
+        label={canPick ? 'Маски по схеме готовы — перестроить по текущей версии' : 'Маски по схеме — разбить кадр на элементы, как Render Pass'}
+        shortcut="~1 мин"
+        onClick={onBuildMasks}
+        disabled={buildingMasks}
+      >
+        {buildingMasks ? <Loader2 className="size-[18px] animate-spin" strokeWidth={1.75} /> : <Shapes className="size-[18px]" strokeWidth={1.75} />}
+      </ToolButton>
       <div className="mx-2 my-1 h-px bg-fg/10" />
       <ToolButton label="Отменить" shortcut="Ctrl Z" onClick={onUndo} disabled={!canUndo}>
         <Undo2 className="size-[18px]" strokeWidth={1.75} />

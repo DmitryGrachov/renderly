@@ -170,6 +170,9 @@ async def inpaint(
     texture: UploadFile | None = File(None),
     # сколько сантиметров реального материала на образце (поперёк); пусто — оценит DeepSeek
     texture_width: float | None = Form(None, gt=0, le=5000),
+    # маска собрана по схеме (Inpainting, «Выбор маски»): край доводится по фото; материал ложится ровно по ней,
+    # без запаса и SAM
+    exact: bool = Form(False),
     seed: int | None = Form(None, ge=0, lt=2**48),
     model: str = Form(DEFAULT_MODEL),
     # DeepSeek: deepseek-flash | deepseek-v4-pro (переключатель в шапке)
@@ -203,10 +206,12 @@ async def inpaint(
             result, used_seed = await inpainting.run_edit(
                 await image.read(), await mask.read(), prompt or "", seed, model, _parse_box(box),
                 material=material, texture=texture_bytes or None,
-                texture_width=texture_width / 100 if texture_width else None,
+                texture_width=texture_width / 100 if texture_width else None, exact_mask=exact,
             )
         else:
-            result, used_seed = await inpainting.run_remove(await image.read(), await mask.read(), seed, model, prompt)
+            result, used_seed = await inpainting.run_remove(
+                await image.read(), await mask.read(), seed, model, prompt, exact_mask=exact,
+            )
     except inpainting.EmptyMask as e:
         raise HTTPException(400, str(e)) from e
     except comfy.ModelUnavailable as e:

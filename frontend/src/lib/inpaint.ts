@@ -34,6 +34,8 @@ export interface InpaintRequest {
   texture?: Blob
   /** Сколько сантиметров материала на образце поперёк; пусто — оценит бэкенд */
   textureWidthCm?: number
+  /** Маска собрана по схеме («Выбор маски»): бэкенд доводит её край по фото; материал — ровно по ней, без запаса и SAM */
+  exactMask?: boolean
 }
 
 export type ProgressFn = (progress: number, stage: string) => void
@@ -76,6 +78,7 @@ async function realInpaint(req: InpaintRequest, onProgress: ProgressFn, signal?:
   if (req.prompt) body.append('prompt', req.prompt)
   if (req.model) body.append('model', req.model)
   if (req.llm) body.append('llm', req.llm)
+  if (req.exactMask) body.append('exact', 'true')
   if (req.box) body.append('box', req.box.map((v) => v.toFixed(4)).join(','))
   if (req.texture && req.mode === 'material') {
     body.append('texture', req.texture, 'texture')

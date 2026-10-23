@@ -27,6 +27,18 @@ LINE_BH = 20  # ядро линии на столько темнее окруж�
 PASSES = ((3, 6.0), (1, 2.0))
 MIN_REGION = 150  # области меньше (px кадра) — к соседям
 POLY_EPS = 1.0  # допуск упрощения многоугольников (px кадра)
+# доводка маски по фото (snap_to_photo): схема совмещена с кадром с точностью ~1% — край ищется в полосе ± этой
+# доли кадра; разошлось с маской больше SNAP_MAX её площади — GrabCut промахнулся, маска остаётся как была
+SNAP_BAND = 0.008
+SNAP_MAX = 0.35
+# выпрямление края по прямым фото (_straighten, как у InegoSurfaceMask): полоса вокруг прямой — доля размера маски;
+# отрезок не короче этой доли; не больше стольких прямых; длинный отрезок (не короче STRAIGHT_LONG), от которого
+# край отходит дальше узкой полосы, — с полосой до STRAIGHT_FAR
+STRAIGHT_TOL = 0.012
+STRAIGHT_MIN_SEG = 0.05
+STRAIGHT_MAX_SEGS = 40
+STRAIGHT_LONG = 0.08
+STRAIGHT_FAR = 0.02
 
 _M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
                 [0.2119034982, 0.6806995451, 0.1073969566],
@@ -151,3 +163,120 @@ def segment(schema_rgb: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, 
     okw = np.ascontiguousarray(oklab(sm) * np.float32([L_WEIGHT, 1, 1]) * 100)
     lbl = _absorb(_fill(okw, line))
     return _polygons(lbl), _divider(line)
+
+
+def _straighten(m: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """Прямые края маски — по прямым фото (по мотивам _straighten из InegoSurfaceMask). Кандидаты — отрезки LSD
+    вдоль края маски, только с фото: усреднённая прямая самой маски (как у InegoSurfaceMask) на ступенчатом крае
+    шла диагональю через все ступени — угол стены у лестницы оставался незалитым. Сначала ближайший к краю; уже
+    выпрямленное следующие не перекраивают. В полосе край ставится ровно по прямой, сторона «внутри» — где маски
+    больше. Кривые края (кусты, арки) и края без прямой на фото не трогаются."""
+    ys, xs = np.nonzero(m)
+    if not len(ys):
+        return m
+    size = max(np.ptp(ys), np.ptp(xs)) + 1
+    tol = max(2.5, STRAIGHT_TOL * size)
+    far = max(2 * tol, STRAIGHT_FAR * size)
+    H, W = m.shape
+    edge = m ^ ndimage.binary_erosion(m)
+    dist = ndimage.distance_transform_edt(~edge)
+    det = cv2.createLineSegmentDetector()
+    gray = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2GRAY)
+    segs = []
+    found = det.detect(gray)[0]
+    if found is not None:
+        for x1, y1, x2, y2 in np.asarray(found).reshape(-1, 4):
+            length = float(np.hypot(x2 - x1, y2 - y1))
+            if length < max(12.0, STRAIGHT_MIN_SEG * size):
+                continue
+            t = np.linspace(0, 1, 16)
+            px = np.clip(np.round(x1 + t * (x2 - x1)).astype(int), 0, W - 1)
+            py = np.clip(np.round(y1 + t * (y2 - y1)).astype(int), 0, H - 1)
+            dd = dist[py, px]
+            if (dd <= tol).mean() >= 0.75:
+                width = tol
+            elif length >= STRAIGHT_LONG * size and np.percentile(dd, 80) <= far:
+                width = min(far, float(np.percentile(dd, 90)) + 2)
+            else:
+                continue  # не вдоль края маски: шов внутри, соседняя поверхность
+            key = float(np.median(dd))
+            segs.append((key, -length, width, x1, y1, x2, y2))
+    if not segs:
+        return m
+    out = m.copy()
+    done = np.zeros_like(m)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    for _, neg_len, width, x1, y1, x2, y2 in sorted(segs)[:STRAIGHT_MAX_SEGS]:
+        length = -neg_len
+        d = np.array([x2 - x1, y2 - y1], np.float32) / length
+        along = (xx - x1) * d[0] + (yy - y1) * d[1]
+        across = (xx - x1) * -d[1] + (yy - y1) * d[0]
+        band = (np.abs(across) <= width) & (along >= 0) & (along <= length)
+        if band.sum() < 10:
+            continue
+        pos = m[band & (across > 0)].mean() if (band & (across > 0)).any() else 0
+        neg = m[band & (across < 0)].mean() if (band & (across < 0)).any() else 0
+        if abs(pos - neg) < 0.4:
+            continue  # прямая не разделяет маску и фон — это не край
+        inside = (across > 0) if pos > neg else (across < 0)
+        new = band & ~done
+        out[new] = inside[new]
+        done |= band
+    return out
+
+
+def snap_to_photo(photo_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Маска по схеме → та же маска с краем по фото. Схема 2511 совмещена с кадром не пиксель в пиксель (InegoAlign,
+    ~1%): у столба край маски уходил на соседнюю стену, а у основания недоходил — на фото оставалась полоска старого
+    камня. В полосе ± SNAP_BAND вокруг края край ставит GrabCut по цветам фото: глубина маски — объект, всё за полосой —
+    не объект. Край выпрямляется по прямым фото и
+    многоугольником, как в схеме. mask и ответ — bool в размере фото."""
+    if not mask.any():
+        return mask
+    h, w = mask.shape
+    k = max(4, round(SNAP_BAND * max(h, w)))
+    ys, xs = np.nonzero(mask)
+    y1, y2 = max(0, ys.min() - 2 * k), min(h, ys.max() + 2 * k + 1)
+    x1, x2 = max(0, xs.min() - 2 * k), min(w, xs.max() + 2 * k + 1)
+    m = mask[y1:y2, x1:x2].astype(np.uint8)
+    inner = cv2.erode(m, _disk(k)) > 0
+    outer = cv2.dilate(m, _disk(k)) > 0
+    if not inner.any():  # элемент тоньше полосы — глубины нет, держимся маски
+        inner = cv2.erode(m, _disk(1)) > 0
+        if not inner.any():
+            return mask
+    gc = np.full(m.shape, cv2.GC_BGD, np.uint8)
+    gc[outer] = cv2.GC_PR_BGD
+    gc[m > 0] = cv2.GC_PR_FGD
+    gc[inner] = cv2.GC_FGD
+    bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    img = np.ascontiguousarray(cv2.cvtColor(photo_rgb[y1:y2, x1:x2], cv2.COLOR_RGB2BGR))
+    try:
+        cv2.grabCut(img, gc, None, bgd, fgd, 4, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return mask
+    # модель цвета — одна на кроп. Пробовались и не прошли проверку на реальных местах: модели по кускам (лезли на
+    # светлую ступеньку и подоконник), запрет убирать «спорное» из схемы (схема сама залезала на штукатурку у окна),
+    # сдвиг маски по краям фото (ошибок формы схемы не правит). Остаток правится в редакторе кистью
+    out = ((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD)).astype(np.uint8)
+    # мелкие зубцы и дырки края; куски, не связанные с маской, — мимо
+    out = cv2.morphologyEx(cv2.morphologyEx(out, cv2.MORPH_OPEN, _disk(1)), cv2.MORPH_CLOSE, _disk(2))
+    out = ((out > 0) & outer) | inner
+    n, lbl = cv2.connectedComponents(out.astype(np.uint8), connectivity=8)
+    keep = np.unique(lbl[inner])
+    out = np.isin(lbl, keep[keep > 0])
+    changed = (out ^ (m > 0)).sum() / max(1, m.sum())
+    if changed > SNAP_MAX:
+        return mask
+    # где фото не дало чёткого края (серая ступенька у серого цоколя), край волной — по прямым фото
+    # (кромки ступеней, угол стены)
+    out = _straighten(out, photo_rgb[y1:y2, x1:x2]) | inner
+    poly = np.zeros(m.shape, np.uint8)
+    cs, hier = cv2.findContours(out.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if cs:
+        polys = [cv2.approxPolyDP(c, POLY_EPS * 1.5, True) for c in cs]
+        cv2.fillPoly(poly, [p for p, hh in zip(polys, hier[0]) if hh[3] < 0], 1)
+        cv2.fillPoly(poly, [p for p, hh in zip(polys, hier[0]) if hh[3] >= 0], 0)
+    res = mask.copy()
+    res[y1:y2, x1:x2] = poly > 0
+    return res

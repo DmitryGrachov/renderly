@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Check, Columns2, Download, Eye, History, X } from 'lucide-react'
+import { ArrowRight, Check, Columns2, Download, Eye, History, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
 import { ActionPopover, POPOVER_WIDTH, TEXTURE_MAX, isTextureFile } from './ActionPopover'
 import { inpaint, planInpaint, type InpaintMode } from '../../lib/inpaint'
+import { buildMaterials, DIVIDER_ID, pickMask, type MaterialMap } from '../../lib/materials'
 import { PlanBox, type Box as PlanRect } from './PlanBox'
 import type { StudioImage } from '../../lib/types'
 import { loadImage } from '../../lib/grade'
@@ -16,6 +17,8 @@ import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
 interface Version { url: string; label: string; mode?: InpaintMode }
+/** выбранное инструментом «Выбор маски»: элементы и их маска (в размере карты), нарисованная на канвасе маски */
+interface Pick { ids: Set<number>; mask: Uint8Array | null }
 
 const MASK_MAX = 2048
 const UNDO_LIMIT = 12
@@ -70,6 +73,17 @@ export function Editor({ image, onClose }: Props) {
   const [compareOn, setCompareOn] = useState(false)
   const [hist, setHist] = useState({ undo: 0, redo: 0 })
   const [restoreDirty, setRestoreDirty] = useState(false)
+  // маски по схеме (как Render Pass) и версия, по которой они построены
+  const [schema, setSchema] = useState<{ url: string; map: MaterialMap } | null>(null)
+  const [buildingMasks, setBuildingMasks] = useState(false)
+  const [hoverId, setHoverId] = useState(0)
+  const hoverRef = useRef<HTMLCanvasElement>(null)
+  const pick = useRef<Pick>({ ids: new Set(), mask: null })
+  const pickUndo = useRef<Pick[]>([])
+  const pickRedo = useRef<Pick[]>([])
+  // при выборе маски окно действия не всплывает на каждый клик (закрывало элементы позади) — открывается «Далее»
+  const [pickCount, setPickCount] = useState(0)
+  const [pickOpen, setPickOpen] = useState(false)
 
   const undoStack = useRef<ImageData[]>([])
   const redoStack = useRef<ImageData[]>([])
@@ -92,9 +106,12 @@ export function Editor({ image, onClose }: Props) {
   const baseH = image.height * fit
   // шторка доступна, когда есть с чем сравнивать и ничего не генерируется
   const compare = compareOn && current > 0 && !busy
+  // правка меняет кадр локально — маски прежней версии годятся и дальше; перестроить можно той же кнопкой
+  const canPick = !!schema
   // инструмент рисования выключает шторку — на ней левая кнопка двигает границу
   const chooseTool = (t: Tool) => {
     if (t === 'restore' && current === 0) return
+    if (t === 'pick' && !canPick) return
     setTool(t)
     if (t !== 'hand') setCompareOn(false)
   }
@@ -159,8 +176,10 @@ export function Editor({ image, onClose }: Props) {
 
   const pushUndo = () => {
     undoStack.current.push(snapshot())
-    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift()
+    pickUndo.current.push(pick.current)
+    if (undoStack.current.length > UNDO_LIMIT) { undoStack.current.shift(); pickUndo.current.shift() }
     redoStack.current = []
+    pickRedo.current = []
     syncHist()
   }
 
@@ -168,6 +187,11 @@ export function Editor({ image, onClose }: Props) {
     const s = from.pop()
     if (!s) return
     to.push(snapshot())
+    // выбор маски — тем же шагом, что и сам канвас
+    const [pf, pt] = from === undoStack.current ? [pickUndo.current, pickRedo.current] : [pickRedo.current, pickUndo.current]
+    pt.push(pick.current)
+    pick.current = pf.pop() ?? { ids: new Set(), mask: null }
+    setPickCount(pick.current.ids.size)
     ctx().putImageData(s, 0, 0)
     recolor(mode)
     setBbox(computeBox())
@@ -187,9 +211,109 @@ export function Editor({ image, onClose }: Props) {
   const clearMask = (record = true) => {
     if (record && bbox) pushUndo()
     ctx().clearRect(0, 0, maskW, maskH)
+    pick.current = { ids: new Set(), mask: null }
+    setPickCount(0)
+    setPickOpen(false)
     setBbox(null)
     setPlan(null)
   }
+
+  /* ---------------- маски по схеме ---------------- */
+
+  // кадр текущей версии → /api/materials (тот же Render Pass): схема 2511 и маски по ней, ~минута
+  async function buildMasks() {
+    if (busy) return
+    const url = versions[current].url
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    setError(null)
+    setBuildingMasks(true)
+    const start = performance.now()
+    setBusy({ progress: 0, stage: 'Рисуем схему' })
+    const timer = setInterval(() => {
+      const p = 0.95 * (1 - Math.exp(-2.2 * ((performance.now() - start) / 100000)))
+      setBusy({ progress: p, stage: p < 0.85 ? 'Рисуем схему' : 'Режем маски' })
+    }, 300)
+    try {
+      const blob = await fetch(url).then((r) => r.blob())
+      const map = await buildMaterials(new File([blob], 'frame.png', { type: blob.type || 'image/png' }), ctrl.signal)
+      pick.current = { ids: new Set(), mask: null }
+      setSchema({ url, map })
+      setTool('pick')
+      setCompareOn(false)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') setError((e as Error).message)
+    } finally {
+      clearInterval(timer)
+      setBusy(null)
+      setBuildingMasks(false)
+    }
+  }
+
+  // элемент схемы под точкой маски; на линиях-разделителях — ничего
+  const pickAt = (p: Pt) => {
+    if (!schema) return 0
+    const { map } = schema
+    const x = Math.floor((p.x / maskW) * map.width)
+    const y = Math.floor((p.y / maskH) * map.height)
+    if (x < 0 || y < 0 || x >= map.width || y >= map.height) return 0
+    const id = map.ids[y * map.width + x]
+    return id === DIVIDER_ID ? 0 : id
+  }
+
+  // клик: элемент добавляется в маску или убирается; на канвас ложится разница со старым выбором
+  const togglePick = (id: number) => {
+    if (!schema) return
+    const { map } = schema
+    const ids = new Set(pick.current.ids)
+    if (ids.has(id)) ids.delete(id)
+    else ids.add(id)
+    const next = pickMask(map, ids)
+    const prev = pick.current.mask
+    const layer = (keep: (i: number) => boolean) => {
+      const c = document.createElement('canvas')
+      c.width = map.width
+      c.height = map.height
+      const lc = c.getContext('2d')!
+      const img = lc.createImageData(map.width, map.height)
+      for (let i = 0; i < next.length; i++) if (keep(i)) img.data[i * 4 + 3] = 255
+      lc.putImageData(img, 0, 0)
+      return c
+    }
+    pushUndo()
+    const c = ctx()
+    c.imageSmoothingEnabled = false
+    if (prev) {
+      c.globalCompositeOperation = 'destination-out'
+      c.drawImage(layer((i) => prev[i] === 1 && next[i] === 0), 0, 0, maskW, maskH)
+    }
+    c.globalCompositeOperation = 'source-over'
+    c.drawImage(layer((i) => next[i] === 1), 0, 0, maskW, maskH)
+    recolor(mode)
+    pick.current = { ids, mask: next }
+    setPickCount(ids.size)
+    setPickOpen(false)
+    setBbox(computeBox())
+  }
+
+  // подсветка элемента под курсором — цветом режима, без обводки
+  useEffect(() => {
+    const cv = hoverRef.current
+    if (!cv || !schema) return
+    const { map } = schema
+    if (cv.width !== map.width || cv.height !== map.height) {
+      cv.width = map.width
+      cv.height = map.height
+    }
+    const hc = cv.getContext('2d')!
+    if (!hoverId || tool !== 'pick') { hc.clearRect(0, 0, map.width, map.height); return }
+    const img = hc.createImageData(map.width, map.height)
+    const [r, g, b] = [1, 3, 5].map((o) => parseInt(MODE_COLOR[mode].slice(o, o + 2), 16))
+    for (let i = 0; i < map.ids.length; i++) if (map.ids[i] === hoverId) img.data.set([r, g, b, 110], i * 4)
+    hc.putImageData(img, 0, 0)
+  }, [schema, hoverId, tool, mode])
+
+
 
   /* ---------------- restore brush ---------------- */
 
@@ -347,6 +471,12 @@ export function Editor({ image, onClose }: Props) {
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (busy || e.button !== 0 || panTool) return
+    if (tool === 'pick') {
+      setError(null)
+      const id = pickAt(toMask(e))
+      if (id) togglePick(id)
+      return
+    }
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* синтетические события */ }
     if (tool === 'restore') {
       restoreUndo.current.push(restoreCtx().getImageData(0, 0, maskW, maskH))
@@ -370,6 +500,11 @@ export function Editor({ image, onClose }: Props) {
 
   const onPointerMove = (e: React.PointerEvent) => {
     moveCursor(e)
+    if (tool === 'pick') {
+      const id = busy || panTool ? 0 : pickAt(toMask(e))
+      if (id !== hoverId) setHoverId(id)
+      return
+    }
     if (!drawingRef.current) return
     const p = toMask(e)
     if (tool === 'lasso') {
@@ -448,6 +583,7 @@ export function Editor({ image, onClose }: Props) {
           imageUrl: versions[current].url, scene, model, llm, mask: maskRef.current!, mode, prompt: text || undefined, box,
           texture: mode === 'material' ? texture ?? undefined : undefined,
           textureWidthCm: mode === 'material' && texture && Number(textureWidth) > 0 ? Number(textureWidth) : undefined,
+          exactMask: pick.current.ids.size > 0,
         },
         (progress, stage) => setBusy({ progress, stage }),
         ctrl.signal,
@@ -495,6 +631,7 @@ export function Editor({ image, onClose }: Props) {
       else if (e.code === 'KeyE') h.chooseTool('eraser')
       else if (e.code === 'KeyH') h.chooseTool('hand')
       else if (e.code === 'KeyR') h.chooseTool('restore')
+      else if (e.code === 'KeyM') h.chooseTool('pick')
       else if (e.code === 'BracketLeft') h.setSize((s) => Math.max(BRUSH_MIN, s - 6))
       else if (e.code === 'BracketRight') h.setSize((s) => Math.min(BRUSH_MAX, s + 6))
       else if (e.key === 'Escape') h.clearCurrent()
@@ -506,6 +643,8 @@ export function Editor({ image, onClose }: Props) {
   /* ---------------- popover placement ---------------- */
 
   const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan && tool !== 'restore'
+    && (tool !== 'pick' || pickOpen)
+  const showPickBar = tool === 'pick' && !!bbox && !pickOpen && !busy && !peek && !compare && !plan
   let pop = { x: 0, y: 0, placement: 'bottom' as 'top' | 'bottom' }
   if (bbox) {
     const bx = left + bbox.x / k
@@ -584,6 +723,15 @@ export function Editor({ image, onClose }: Props) {
             />
           </div>
 
+          {/* выбор маски: элемент схемы под курсором */}
+          {canPick && (
+            <canvas
+              ref={hoverRef}
+              className={`pointer-events-none absolute inset-0 size-full ${peek || compare || tool !== 'pick' ? 'opacity-0' : ''}`}
+              style={{ imageRendering: 'pixelated' }}
+            />
+          )}
+
           {/* план правки: рамка объекта — подвинуть, растянуть, затем сгенерировать */}
           {plan && !busy && (
             <PlanBox
@@ -620,14 +768,14 @@ export function Editor({ image, onClose }: Props) {
           <div
             ref={surfaceRef}
             className={`absolute inset-0 touch-none ${
-              panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : busy ? 'cursor-wait' : brushLike ? 'cursor-none' : 'cursor-crosshair'
+              panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : busy ? 'cursor-wait' : brushLike ? 'cursor-none' : tool === 'pick' ? (hoverId ? 'cursor-pointer' : 'cursor-default') : 'cursor-crosshair'
             }`}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
             onPointerEnter={() => cursorRef.current && (cursorRef.current.style.opacity = '1')}
-            onPointerLeave={() => cursorRef.current && (cursorRef.current.style.opacity = '0')}
+            onPointerLeave={() => { if (cursorRef.current) cursorRef.current.style.opacity = '0'; setHoverId(0) }}
           >
             {brushLike && !busy && (
               <div
@@ -695,6 +843,8 @@ export function Editor({ image, onClose }: Props) {
                   ? 'Перетаскивайте изображение · колесо — масштаб'
                   : tool === 'restore'
                   ? `Закрасьте места, где вернуть «${versions[current - 1]?.label ?? ''}»`
+                  : tool === 'pick'
+                  ? `Кликните по элементам схемы: ${mode === 'edit' ? 'что изменить' : mode === 'material' ? 'поверхности, которым сменить материал' : 'что удалить'}`
                   : `${tool === 'lasso' ? 'Обведите' : 'Закрасьте'} ${mode === 'edit' ? 'область, которую нужно изменить' : mode === 'material' ? 'поверхность, которой нужно сменить материал' : 'объект, который нужно удалить'}`}
               </motion.div>
             )}
@@ -713,6 +863,9 @@ export function Editor({ image, onClose }: Props) {
             onRedo={redo}
             onClear={clearCurrent}
             canRestore={current > 0}
+            canPick={canPick}
+            onBuildMasks={buildMasks}
+            buildingMasks={buildingMasks}
             disabled={!!busy}
           />
         </div>
@@ -761,6 +914,36 @@ export function Editor({ image, onClose }: Props) {
                   </div>
                 )}
                 <BrushOptions shape={shape} onShape={setShape} size={size} onSize={setSize} min={BRUSH_MIN} max={BRUSH_MAX} />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* выбор маски: сколько выбрано и переход к действию */}
+        <AnimatePresence>
+          {showPickBar && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+              className="absolute inset-x-0 bottom-4 flex justify-center"
+            >
+              <div className="glass flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
+                <span className="flex items-center gap-2 pl-3 pr-1.5 text-[12.5px] text-ink-2">
+                  <span className="size-2 rounded-full" style={{ background: color }} />
+                  {pickCount ? `Выбрано элементов: ${pickCount}` : 'Маска готова'}
+                </span>
+                <button
+                  onClick={() => clearMask()}
+                  className="rounded-full px-3 py-1.5 text-[12.5px] font-medium text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink"
+                >
+                  Сбросить
+                </button>
+                <button
+                  onClick={() => setPickOpen(true)}
+                  className="flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-on-ink transition-colors hover:bg-ink-hover"
+                >
+                  Далее <ArrowRight className="size-3.5" />
+                </button>
               </div>
             </motion.div>
           )}

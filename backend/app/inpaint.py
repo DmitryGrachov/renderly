@@ -275,6 +275,10 @@ GUARD_MARGIN = 0.006
 KEEP_OBJECT_CHANGED = 0.35
 # из пересчитанного кадра берётся правка и полоса вокруг неё — доля размера правки (не меньше 1% кадра)
 HARMONIZE_BAND = 0.25
+# материал по точному контуру (маска по схеме, SAM): полоса — доля кадра, а не размера правки. Маска материала
+# бывает во весь дом, и полоса в четверть её размера (496 px, половина кадра) отдавала пересчёту форму облицовки:
+# плитка скруглилась и вылезла за углы стены. Узкая полоса — только край и свет, форма остаётся по маске
+HARMONIZE_EXACT_BAND = 0.006
 EDIT_MARK = True
 EDIT_MARK_OPACITY = 0.45
 EDIT_GROW = 0.05  # запас по контуру выделения пользователя
@@ -617,6 +621,20 @@ def build_workflow(
     image = _sampling(wf, "", positive, ["noise_lat", 0], width, height, steps, seed, model=["diffdiff", 0])
     wf["save"] = {"class_type": "SaveImage", "inputs": {"images": image, "filename_prefix": f"inego/{prefix}"}}
     return wf
+
+
+def snap_mask(image: bytes, mask: bytes) -> bytes:
+    """Маска по схеме (Inpainting, «Выбор маски») с краем, доведённым по фото (schema_masks.snap_to_photo): схема
+    совмещена с кадром с точностью ~1%, и без доводки у столба оставалась полоска старого камня."""
+    import numpy as np
+
+    from .schema_masks import snap_to_photo
+
+    src = Image.open(io.BytesIO(image)).convert("RGB")
+    m = np.asarray(_binary(Image.open(io.BytesIO(mask)), src.size)) > 127
+    snapped = snap_to_photo(np.asarray(src), m)
+    log.info("маска по схеме доведена по фото: %d → %d px", m.sum(), snapped.sum())
+    return to_png(Image.fromarray((snapped * 255).astype("uint8")))
 
 
 def _load(image: bytes, mask: bytes, grow_frac: float, shadow_down: float = 0.0) -> tuple[Image.Image, Image.Image, int]:
@@ -1040,7 +1058,7 @@ class _Region:
             result = await _refine(result, obj, refine, seed + 1, model, self.gen_size[0] / self.crop.size[0])
         if harmonize:
             # пересчёт всего кадра: правка вписывается в него целиком (harmonize — что вписать и удаление ли это)
-            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model, scene=scene)
+            result = await harmonize_frame(result, seed + 3, *harmonize, area=obj, model=model, scene=scene, exact=self.exact)
         buf = io.BytesIO()
         result.save(buf, "JPEG", quality=95)
         return buf.getvalue()
@@ -1218,7 +1236,7 @@ def keep_object(after: Image.Image, before: Image.Image, area: Image.Image) -> I
 
 async def harmonize_frame(
     result: Image.Image, seed: int, subject: str, removed: bool = False, area: Image.Image | None = None,
-    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None,
+    model: str = QWEN21_TURBO_MODEL, scene: dict | None = None, exact: bool = False,
 ) -> Image.Image:
     """Пересчёт кадра после правки — img2img на Qwen-Image-2.1 Turbo (тот же путь, что страница Img to Img, с
     совмещением кадра InegoAlign): модель видит весь кадр и вписывает правку в его свет, а берётся из пересчёта
@@ -1226,7 +1244,7 @@ async def harmonize_frame(
     пересчёта (restore_colour); у удаления — защита от «вернувшегося» объекта (guard_scene). Кадр — в исходный
     размер (апскейл — дальше отдельно). Не получилось — результат правки как есть.
     model — модель правки: FLUX.2 klein пересчитывает сам (img2img страницы Img to Img + InegoAlign), остальные —
-    Qwen-Image-2.1 Turbo."""
+    Qwen-Image-2.1 Turbo. exact — правка по точному контуру (материалы): из пересчёта — узкая полоса."""
     w, h = result.size
     flux = model in FLUX_MODELS
     own = model == QWEN_EDIT_MODEL  # 2511 пересчитывает сам, ~1 Мп (FluxKontextImageScale в шаблоне ComfyUI)
@@ -1275,7 +1293,7 @@ async def harmonize_frame(
     frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize((w, h), Image.LANCZOS)
     if area is None:
         return frame
-    frame = _paste_band(frame, result, area)
+    frame = _paste_band(frame, result, area, exact)
     # полоса вокруг правки — только свет и тени: новые объекты и рисунок в ней (плитка, поползшая на соседнюю
     # стену у klein) возвращаются; у удаления проверяется и сама область
     frame = guard_scene(frame, result, area, removed)
@@ -1288,7 +1306,7 @@ async def harmonize_frame(
     return frame
 
 
-def _paste_band(frame: Image.Image, before: Image.Image, area: Image.Image) -> Image.Image:
+def _paste_band(frame: Image.Image, before: Image.Image, area: Image.Image, exact: bool = False) -> Image.Image:
     """Из пересчитанного кадра берётся только правка с широкой полосой вокруг (края, тени, переходы) — остальное
     из кадра до пересчёта. Пересчёт всего кадра у 2.1 стирал и дорисовывал чужие объекты (два деревца справа
     пропали, удалённое вернулось), а модели весь кадр нужен как контекст — поэтому пересчитывается он весь."""
@@ -1300,7 +1318,10 @@ def _paste_band(frame: Image.Image, before: Image.Image, area: Image.Image) -> I
         return before
     ys, xs = np.nonzero(m)
     size = max(frame.size)
-    band = max(round(HARMONIZE_BAND * max(np.ptp(ys), np.ptp(xs))), round(0.01 * size), 2)
+    if exact:
+        band = max(round(HARMONIZE_EXACT_BAND * size), 2)
+    else:
+        band = max(round(HARMONIZE_BAND * max(np.ptp(ys), np.ptp(xs))), round(0.01 * size), 2)
     grown = ndimage.binary_dilation(m, iterations=band)
     wgt = np.maximum(ndimage.gaussian_filter(grown.astype(np.float32), band / 2), m.astype(np.float32))[..., None]
     a = np.asarray(before.resize(frame.size), dtype=np.float32)
@@ -1526,14 +1547,18 @@ def _touches_edge(keep: Image.Image, box: tuple[int, int, int, int], size: tuple
 
 
 async def run_remove(
-    image: bytes, mask: bytes, seed: int | None = None, model: str = DEFAULT_MODEL, hint: str | None = None
+    image: bytes, mask: bytes, seed: int | None = None, model: str = DEFAULT_MODEL, hint: str | None = None,
+    exact_mask: bool = False,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении, где под маской объект удалён, и использованный сид.
 
     hint — необязательное уточнение, что именно удалить в выделении; пусто — удаляется всё выделенное.
+    exact_mask — маска по схеме: край доводится по фото (snap_mask), запас по контуру — как обычно.
     """
     if seed is None:
         seed = random.randrange(2**48)
+    if exact_mask:
+        mask = snap_mask(image, mask)
     # маска протягивается вниз — под контактную тень у ног, колёс и основания
     src, core, grow = _load(image, mask, 0.04, SHADOW_DOWN)
     scene_task = asyncio.create_task(describe_scene(src))
@@ -1962,9 +1987,13 @@ async def plan_edit(image: bytes, mask: bytes, request: str) -> dict:
 async def run_edit(
     image: bytes, mask: bytes, request: str, seed: int | None = None, model: str = DEFAULT_MODEL,
     box: list[float] | None = None, material: bool = False, texture: bytes | None = None,
-    texture_width: float | None = None,
+    texture_width: float | None = None, exact_mask: bool = False,
 ) -> tuple[bytes, int]:
     """JPEG исходника в полном разрешении с тем, что попросил пользователь, и сид.
+
+    exact_mask — маска собрана по схеме (Inpainting, «Выбор маски»): её край доводится по фото (snap_mask), у
+    материала она и есть контур поверхности — без запаса по контуру и без SAM. Запас (5% размера выделения — у маски во весь дом под сотню px, кругом) клал
+    плитку за углы стены со скруглёнными углами; SAM нужен грубому мазку кистью, точную маску он только портит.
 
     Выделение задаёт место, а не размер: DeepSeek по всему кадру (масштаб соседних объектов, перспектива)
     даёт рамку объекта в натуральную величину; генерация идёт по выделению + рамке + запасу вокруг,
@@ -1972,7 +2001,12 @@ async def run_edit(
     """
     if seed is None:
         seed = random.randrange(2**48)
+    if exact_mask:
+        mask = snap_mask(image, mask)
     src, core, grow = _load(image, mask, EDIT_GROW)
+    exact = material and exact_mask
+    if exact:
+        core = _binary(Image.open(io.BytesIO(mask)), src.size)
     # разбор сцены — параллельно с остальным (кэш по картинке)
     scene_task = asyncio.create_task(describe_scene(src))
     surface = None
@@ -1981,14 +2015,14 @@ async def run_edit(
         texture = to_png(decode_texture(texture))
     if material and texture:
         # образец — проекцией 1 в 1 (InegoTextureProject); не плоская поверхность — генеративный путь ниже
-        surface = await _surface(src, core)
+        surface = core if exact else await _surface(src, core)
         auto_width, material_name = await _sample_info(texture)
         width = texture_width or auto_width
         projected = await _project_texture(src, surface, texture, width)
         if projected is not None:
             frame = await harmonize_frame(
                 projected, seed + 3, f"the {material_name} cladding just applied to a surface", area=surface,
-                model=model, scene=await scene_task,
+                model=model, scene=await scene_task, exact=True,
             )
             buf = io.BytesIO()
             frame.save(buf, "JPEG", quality=95)
@@ -2035,7 +2069,7 @@ async def run_edit(
             core = ImageChops.multiply(extra, _rect_mask([0, (y1 + 2 * (y2 - y1) / 3) / src.size[1], 1, 1], src.size))
     if material:
         # контур поверхности под мазком по исходнику (SAM 2.1): модель правит и вклейка берёт только его
-        core = surface if surface is not None else await _surface(src, core)
+        core = surface if surface is not None else core if exact else await _surface(src, core)
     r = _Region(src, core, grow, extra, 0.0 if material else EDIT_ROOM if add else EDIT_ROOM_CHANGE)
     r.exact = material
     # «изменить» и материалы: поверхность та же — свет с исходника (Marigold-IID); «добавить / заменить» —

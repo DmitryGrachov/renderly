@@ -54,6 +54,37 @@ export async function buildMaterials(file: File, signal?: AbortSignal): Promise<
   return { width: j.width, height: j.height, ids: await decode(j.map, j.width, j.height), schema: j.schema, groups: j.groups }
 }
 
+/** Маска выбранных областей (1 — выбрано, в размере карты) для Inpainting: области плюс линии между ними —
+ * иначе у двух выбранных соседей посередине оставалась бы щель по разделителю. Пиксель линии берётся, если по
+ * горизонтали или вертикали в пределах r px по обе его стороны (сквозь линию) лежит выбранное; наружный контур
+ * выбранного и линия у края кадра не берутся */
+export function pickMask(map: MaterialMap, ids: Set<number>, r = 3): Uint8Array {
+  const { width: w, height: h, ids: px } = map
+  const sel = new Uint8Array(w * h)
+  for (let i = 0; i < px.length; i++) if (ids.has(px[i])) sel[i] = 1
+  if (!ids.size) return sel
+  // первое за линией в направлении шага: выбрано ли (не дальше r px, не за краем кадра)
+  const side = (i: number, x: number, y: number, dx: number, dy: number) => {
+    for (let k = 1; k <= r; k++) {
+      const nx = x + dx * k
+      const ny = y + dy * k
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) return false
+      const j = i + (dy * w + dx) * k
+      if (px[j] !== DIVIDER_ID) return sel[j] === 1
+    }
+    return false
+  }
+  const out = sel.slice()
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x
+      if (px[i] !== DIVIDER_ID) continue
+      if ((side(i, x, y, -1, 0) && side(i, x, y, 1, 0)) || (side(i, x, y, 0, -1) && side(i, x, y, 0, 1))) out[i] = 1
+    }
+  }
+  return out
+}
+
 /** Маска выбранных областей в размер исходного кадра: PNG, белое — выбранное */
 export async function maskPng(map: MaterialMap, ids: Set<number>, width: number, height: number): Promise<Blob> {
   const c = document.createElement('canvas')
