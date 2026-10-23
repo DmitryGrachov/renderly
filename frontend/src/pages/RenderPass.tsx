@@ -38,7 +38,7 @@ export function RenderPass() {
     <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
       <section className="pb-10 pt-12 text-center sm:pb-12 sm:pt-16">
         <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={spring} className="text-[15px] font-semibold text-gradient sm:text-[17px]">
-          Render pass
+          Render Pass
         </motion.p>
         <motion.h1
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.06 }}
