@@ -13,6 +13,7 @@ import { loadImage } from '../../lib/grade'
 import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
 import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
+import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints } from '../../lib/brush'
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
@@ -27,8 +28,11 @@ const PAD_BOTTOM = 76
 const BRUSH_MIN = 4
 const BRUSH_MAX = 200
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
-// кисть отката: мягкий край — размытие мазка на эту долю радиуса кисти
-const RESTORE_FEATHER = 0.35
+// кисть отката: мягкий край — размытие мазка на эту долю радиуса кисти при нулевой жёсткости (ползунок «Край»;
+// по умолчанию HARDNESS_DEFAULT — прежние 0.35 радиуса)
+const RESTORE_FEATHER = 0.8
+// многоугольник замыкается кликом не дальше стольких экранных px от первой точки
+const POLY_CLOSE = 10
 
 interface Props {
   image: StudioImage
@@ -55,6 +59,10 @@ export function Editor({ image, onClose }: Props) {
   const [mode, setMode] = useState<InpaintMode>('remove')
   const [shape, setShape] = useState<Shape>('circle')
   const [size, setSize] = useState(48)
+  const [hardness, setHardness] = useState(HARDNESS_DEFAULT)
+  // многоугольник: поставленные точки и «резинка» до курсора
+  const [poly, setPoly] = useState<Pt[]>([])
+  const [rubber, setRubber] = useState<Pt | null>(null)
   const [bbox, setBbox] = useState<Box | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [lasso, setLasso] = useState<Pt[]>([])
@@ -90,6 +98,11 @@ export function Editor({ image, onClose }: Props) {
   const drawingRef = useRef(false)
   const lastPt = useRef<Pt | null>(null)
   const lassoPts = useRef<Pt[]>([])
+  // прямые: конец прошлого мазка (Shift+клик — прямая от него), начало мазка и ось (Shift в мазке)
+  const lastEnd = useRef<Pt | null>(null)
+  const anchor = useRef<Pt | null>(null)
+  const axis = useRef<'x' | 'y' | null>(null)
+  const rectStart = useRef<Pt | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   // размеры маски — в пикселях исходника (с ограничением)
@@ -112,6 +125,7 @@ export function Editor({ image, onClose }: Props) {
   const chooseTool = (t: Tool) => {
     if (t === 'restore' && current === 0) return
     if (t === 'pick' && !canPick) return
+    if (t !== tool) { setPoly([]); setRubber(null); lastEnd.current = null }
     setTool(t)
     if (t !== 'hand') setCompareOn(false)
   }
@@ -326,7 +340,7 @@ export function Editor({ image, onClose }: Props) {
     }
     return restoreRef.current.getContext('2d', { willReadFrequently: true })!
   }
-  const restoreFeather = () => Math.max(1, (size / 2) * k * RESTORE_FEATHER)
+  const restoreFeather = () => Math.max(1, (size / 2) * k * RESTORE_FEATHER * (1 - hardness))
 
   // превью: предыдущая версия, видимая только под мазками (с мягким краем)
   const drawPreview = () => {
@@ -392,6 +406,9 @@ export function Editor({ image, onClose }: Props) {
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, versions])
+
+  // мягкость края отката — сразу в превью
+  useEffect(() => { drawPreview() }, [hardness]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // стек отмены и кнопки панели — свои у кисти отката
   useEffect(() => {
@@ -469,8 +486,31 @@ export function Editor({ image, onClose }: Props) {
     el.style.transform = `translate(${e.clientX - r.left - size / 2}px, ${e.clientY - r.top - size / 2}px)`
   }
 
+  /** многоугольник → маска: заливка цветом режима, точки сбрасываются */
+  const closePoly = (pts = poly) => {
+    if (pts.length >= 3) {
+      pushUndo()
+      fillPolygon(ctx(), pts, MODE_COLOR[mode])
+      setBbox(computeBox())
+    }
+    setPoly([])
+    setRubber(null)
+  }
+
   const onPointerDown = (e: React.PointerEvent) => {
     if (busy || e.button !== 0 || panTool) return
+    if (tool === 'poly') {
+      setError(null)
+      const p = toMask(e)
+      // двойной клик или клик в первую точку — замкнуть
+      if (poly.length >= 3 && (e.detail >= 2 || Math.hypot(p.x - poly[0].x, p.y - poly[0].y) <= POLY_CLOSE * k)) {
+        closePoly()
+        return
+      }
+      if (e.detail >= 2) return
+      setPoly((ps) => [...ps, p])
+      return
+    }
     if (tool === 'pick') {
       setError(null)
       const id = pickAt(toMask(e))
@@ -492,9 +532,16 @@ export function Editor({ image, onClose }: Props) {
     if (tool === 'lasso') {
       lassoPts.current = [p]
       setLasso([p])
+    } else if (tool === 'rect') {
+      rectStart.current = p
+      setLasso(rectPoints(p, p))
     } else {
+      // Shift+клик — прямая от конца прошлого мазка (как в Photoshop)
+      const from = e.shiftKey && lastEnd.current ? lastEnd.current : p
       lastPt.current = p
-      stampSegment(p, p)
+      anchor.current = p
+      axis.current = null
+      stampSegment(from, p)
     }
   }
 
@@ -505,8 +552,30 @@ export function Editor({ image, onClose }: Props) {
       if (id !== hoverId) setHoverId(id)
       return
     }
+    if (tool === 'poly') {
+      if (poly.length && !busy && !panTool) setRubber(toMask(e))
+      return
+    }
     if (!drawingRef.current) return
-    const p = toMask(e)
+    let p = toMask(e)
+    if (tool === 'rect' && rectStart.current) {
+      const a = rectStart.current
+      if (e.shiftKey) {
+        // Shift — квадрат
+        const d = Math.max(Math.abs(p.x - a.x), Math.abs(p.y - a.y))
+        p = { x: a.x + Math.sign(p.x - a.x || 1) * d, y: a.y + Math.sign(p.y - a.y || 1) * d }
+      }
+      setLasso(rectPoints(a, p))
+      return
+    }
+    if (tool !== 'lasso' && e.shiftKey && anchor.current) {
+      // Shift в мазке — строго по горизонтали или вертикали
+      const locked = lockAxis(anchor.current, p, axis.current, 4 * k)
+      p = locked.p
+      axis.current = locked.axis
+    } else {
+      axis.current = null
+    }
     if (tool === 'lasso') {
       const last = lassoPts.current[lassoPts.current.length - 1]
       if (Math.hypot(p.x - last.x, p.y - last.y) > 2 * k) {
@@ -538,7 +607,18 @@ export function Editor({ image, onClose }: Props) {
       }
       lassoPts.current = []
       setLasso([])
+    } else if (tool === 'rect') {
+      const pts = lasso
+      if (pts.length === 4 && Math.abs(pts[2].x - pts[0].x) > 2 * k && Math.abs(pts[2].y - pts[0].y) > 2 * k) {
+        fillPolygon(ctx(), pts, MODE_COLOR[mode])
+      } else {
+        undoStack.current.pop()
+        syncHist()
+      }
+      rectStart.current = null
+      setLasso([])
     }
+    if (lastPt.current) lastEnd.current = lastPt.current
     lastPt.current = null
     if (tool === 'restore') syncRestore()
     else setBbox(computeBox())
@@ -614,8 +694,17 @@ export function Editor({ image, onClose }: Props) {
   /* ---------------- shortcuts ---------------- */
 
   const clearCurrent = () => (tool === 'restore' ? clearRestore() : clearMask())
-  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool })
-  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool }
+  // многоугольник в работе: Enter — замкнуть, Backspace — убрать точку, Esc — отменить (а не очистить маску)
+  const polyKey = (key: string) => {
+    if (tool !== 'poly' || !poly.length) return false
+    if (key === 'Enter') closePoly()
+    else if (key === 'Backspace') setPoly((ps) => ps.slice(0, -1))
+    else if (key === 'Escape') { setPoly([]); setRubber(null) }
+    else return false
+    return true
+  }
+  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool, polyKey })
+  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool, polyKey }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -626,7 +715,10 @@ export function Editor({ image, onClose }: Props) {
       if (mod && e.code === 'KeyZ') { e.preventDefault(); e.shiftKey ? h.redo() : h.undo(); return }
       if (mod && e.code === 'KeyY') { e.preventDefault(); h.redo(); return }
       if (mod) return
+      if (h.polyKey(e.key)) { e.preventDefault(); return }
       if (e.code === 'KeyL') h.chooseTool('lasso')
+      else if (e.code === 'KeyP') h.chooseTool('poly')
+      else if (e.code === 'KeyU') h.chooseTool('rect')
       else if (e.code === 'KeyB') h.chooseTool('brush')
       else if (e.code === 'KeyE') h.chooseTool('eraser')
       else if (e.code === 'KeyH') h.chooseTool('hand')
@@ -642,7 +734,7 @@ export function Editor({ image, onClose }: Props) {
 
   /* ---------------- popover placement ---------------- */
 
-  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan && tool !== 'restore'
+  const showPopover = !!bbox && !drawing && !busy && !peek && !panning && !compare && !plan && tool !== 'restore' && !poly.length
     && (tool !== 'pick' || pickOpen)
   const showPickBar = tool === 'pick' && !!bbox && !pickOpen && !busy && !peek && !compare && !plan
   let pop = { x: 0, y: 0, placement: 'bottom' as 'top' | 'bottom' }
@@ -744,7 +836,21 @@ export function Editor({ image, onClose }: Props) {
             />
           )}
 
-          {/* превью лассо */}
+          {/* превью многоугольника: точки и «резинка» до курсора */}
+          {poly.length > 0 && (
+            <svg viewBox={`0 0 ${maskW} ${maskH}`} preserveAspectRatio="none" className="pointer-events-none absolute inset-0 size-full">
+              <path d={`M${[...poly, ...(rubber ? [rubber] : [])].map((p) => `${p.x},${p.y}`).join('L')}Z`} fill={color} fillOpacity={0.18} stroke="none" />
+              <path
+                d={`M${[...poly, ...(rubber ? [rubber] : [])].map((p) => `${p.x},${p.y}`).join('L')}`}
+                fill="none" stroke="#fff" strokeWidth={1.5} strokeDasharray="6 6" vectorEffect="non-scaling-stroke" className="animate-ants"
+              />
+              {poly.map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r={(i ? 3 : 5) * k} fill={i ? '#fff' : color} stroke="#000" strokeOpacity={0.4} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+              ))}
+            </svg>
+          )}
+
+          {/* превью лассо и прямоугольника */}
           {lasso.length > 1 && (
             <svg viewBox={`0 0 ${maskW} ${maskH}`} preserveAspectRatio="none" className="pointer-events-none absolute inset-0 size-full">
               <path d={`M${lasso.map((p) => `${p.x},${p.y}`).join('L')}Z`} fill={color} fillOpacity={0.22} stroke="none" />
@@ -834,7 +940,7 @@ export function Editor({ image, onClose }: Props) {
             )}
           </AnimatePresence>
           <AnimatePresence>
-            {(tool === 'restore' ? !restoreDirty : !bbox) && !busy && !drawing && !compare && (
+            {(tool === 'restore' ? !restoreDirty : !bbox || (tool === 'poly' && poly.length > 0)) && !busy && !drawing && !compare && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                 className="glass rounded-full px-3.5 py-1.5 text-[12.5px] text-ink-2 shadow-soft ring-1 ring-fg/5"
@@ -845,6 +951,10 @@ export function Editor({ image, onClose }: Props) {
                   ? `Закрасьте места, где вернуть «${versions[current - 1]?.label ?? ''}»`
                   : tool === 'pick'
                   ? `Кликните по элементам схемы: ${mode === 'edit' ? 'что изменить' : mode === 'material' ? 'поверхности, которым сменить материал' : 'что удалить'}`
+                  : tool === 'poly'
+                  ? poly.length ? 'Кликайте точки · Enter или клик в первую точку — замкнуть · Backspace — убрать точку · Esc — отменить' : 'Ставьте точки кликами — стороны прямые'
+                  : tool === 'rect'
+                  ? 'Протяните прямоугольник · Shift — квадрат'
                   : `${tool === 'lasso' ? 'Обведите' : 'Закрасьте'} ${mode === 'edit' ? 'область, которую нужно изменить' : mode === 'material' ? 'поверхность, которой нужно сменить материал' : 'объект, который нужно удалить'}`}
               </motion.div>
             )}
@@ -913,7 +1023,10 @@ export function Editor({ image, onClose }: Props) {
                     </button>
                   </div>
                 )}
-                <BrushOptions shape={shape} onShape={setShape} size={size} onSize={setSize} min={BRUSH_MIN} max={BRUSH_MAX} />
+                <BrushOptions
+                  shape={shape} onShape={setShape} size={size} onSize={setSize} min={BRUSH_MIN} max={BRUSH_MAX}
+                  {...(tool === 'restore' ? { hardness, onHardness: setHardness } : {})}
+                />
               </div>
             </motion.div>
           )}

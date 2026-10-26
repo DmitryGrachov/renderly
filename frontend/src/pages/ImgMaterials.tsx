@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Check, Download, Eraser, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Brush, Check, Download, Eraser, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
@@ -8,6 +8,9 @@ import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { RestoreBrush, type RestoreBrushHandle } from '../components/RestoreBrush'
 import { TextureDrop } from '../components/inpaint/ActionPopover'
 import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
+import { ToolButton } from '../components/ToolButton'
+import { BrushOptions } from '../components/inpaint/Toolbar'
+import { HARDNESS_DEFAULT, type DrawTool, type Shape } from '../lib/brush'
 import { useScene, type Scene } from '../lib/scene'
 import { img2imgMaterials, MATERIAL_STAGES } from '../lib/api'
 import { fmt, modelById, useAccount } from '../lib/account'
@@ -67,6 +70,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   // кисть отката: под мазками результата проявляется кадр до материала
   const [brushing, setBrushing] = useState(false)
   const [brushSize, setBrushSize] = useState(80)
+  const [brushTool, setBrushTool] = useState<DrawTool>('brush')
+  const [brushShape, setBrushShape] = useState<Shape>('circle')
+  const [hardness, setHardness] = useState(HARDNESS_DEFAULT)
   const [undoable, setUndoable] = useState(0)
   // сдвиг прежнего кадра под кистью: стрелки — на 1 px, с Shift — на 5
   const [nudge, setNudge] = useState({ x: 0, y: 0 })
@@ -77,8 +83,15 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   useEffect(() => {
     if (!brushing) return
     const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest('input, textarea')) return
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { e.preventDefault(); brush.current?.undo(); return }
+      if (e.ctrlKey || e.metaKey) return
+      const tools: Record<string, DrawTool> = { KeyB: 'brush', KeyU: 'rect', KeyP: 'poly' }
+      if (tools[e.code]) { setBrushTool(tools[e.code]); return }
+      if (e.code === 'BracketLeft') { setBrushSize((v) => Math.max(10, v - 8)); return }
+      if (e.code === 'BracketRight') { setBrushSize((v) => Math.min(300, v + 8)); return }
       const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key]
-      if (!d || (e.target as HTMLElement).closest('input, textarea')) return
+      if (!d) return
       e.preventDefault()
       const step = e.shiftKey ? 5 : 1
       setNudge((n) => ({ x: n.x + d[0] * step, y: n.y + d[1] * step }))
@@ -210,7 +223,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       brushing ? (
                         <RestoreBrush
                           ref={brush} before={source.url} after={result.url} imageStyle={imageStyle} size={brushSize}
-                          onHistory={setUndoable} offset={nudge}
+                          onHistory={setUndoable} offset={nudge} tool={brushTool} shape={brushShape} hardness={hardness}
                         />
                       ) : view === 'compare' ? (
                         <CompareSlider before={source.url} after={result.url} imageStyle={imageStyle} />
@@ -238,7 +251,19 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                   )}
                 </AnimatePresence>
 
-                {!running && (
+                {brushing && result && !running && (
+                  <BrushOverlay
+                    tool={brushTool} onTool={setBrushTool}
+                    shape={brushShape} onShape={setBrushShape}
+                    size={brushSize} onSize={setBrushSize}
+                    hardness={hardness} onHardness={setHardness}
+                    undoable={undoable} onUndo={() => brush.current?.undo()} onClear={() => brush.current?.clear()}
+                    nudge={nudge} onResetNudge={() => setNudge({ x: 0, y: 0 })}
+                    onClose={() => setBrushing(false)} onApply={applyBrush}
+                  />
+                )}
+
+                {!running && !brushing && (
                   <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-end justify-between gap-3">
                     <div className="glass pointer-events-auto flex min-w-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-soft ring-1 ring-fg/5">
                       <img src={source.url} alt="" className="size-7 rounded-full object-cover" />
@@ -280,57 +305,6 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
         {/* Result actions */}
         <AnimatePresence>
-          {result && status === 'done' && brushing && (
-            <motion.div
-              key="brush"
-              initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
-              transition={spring}
-            >
-              <div className="flex flex-col gap-4 rounded-[22px] bg-surface p-4 shadow-card ring-1 ring-fg/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[15px] font-semibold tracking-[-0.01em]">Кисть отката</div>
-                  <div className="text-[13px] text-mute">Проведите — вернётся кадр до материала. Alt — вернуть результат, пробел — двигать кадр</div>
-                  <div className="mt-1 flex items-center gap-2 text-[12.5px] text-mute">
-                    <span>
-                      Стрелки — подвинуть прежний кадр, если край двоится
-                      {(nudge.x !== 0 || nudge.y !== 0) && (
-                        <span className="tabular-nums text-ink-2"> · {nudge.x > 0 ? '→' : '←'}{Math.abs(nudge.x)} {nudge.y > 0 ? '↓' : '↑'}{Math.abs(nudge.y)} px</span>
-                      )}
-                    </span>
-                    {(nudge.x !== 0 || nudge.y !== 0) && (
-                      <button onClick={() => setNudge({ x: 0, y: 0 })} className="font-medium text-ink-2 hover:text-accent">сбросить</button>
-                    )}
-                  </div>
-                  <label className="mt-2.5 flex items-center gap-3 text-[12.5px] text-mute">
-                    <span className="shrink-0">Размер</span>
-                    <input
-                      type="range" min={10} max={300} step={2} value={brushSize}
-                      onChange={(e) => setBrushSize(Number(e.target.value))}
-                      className="range w-full max-w-[220px]"
-                      style={{ '--fill': `${((brushSize - 10) / 290) * 100}%` } as React.CSSProperties}
-                    />
-                    <span className="w-12 shrink-0 tabular-nums text-ink-2">{brushSize} px</span>
-                  </label>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <SecondaryButton onClick={() => brush.current?.undo()} disabled={undoable === 0}>
-                    <Undo2 className="size-4" /> Отменить
-                  </SecondaryButton>
-                  <SecondaryButton onClick={() => brush.current?.clear()}>
-                    <RotateCcw className="size-4" /> Сбросить
-                  </SecondaryButton>
-                  <SecondaryButton onClick={() => setBrushing(false)}>Закрыть</SecondaryButton>
-                  <motion.button
-                    whileTap={{ scale: 0.97 }}
-                    onClick={applyBrush}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[14px] font-medium text-on-ink transition-colors hover:bg-ink-hover sm:flex-none"
-                  >
-                    <Check className="size-4" /> Применить
-                  </motion.button>
-                </div>
-              </div>
-            </motion.div>
-          )}
           {result && status === 'done' && !brushing && (
             <motion.div
               key="actions"
@@ -503,5 +477,82 @@ function SizeSlider({ value, onChange, disabled }: { value: number; onChange: (v
         <span>Крупнее</span>
       </div>
     </div>
+  )
+}
+
+/** Кисть отката на кадре: инструменты слева, тонкие настройки снизу, действия сверху — как в Inpainting. */
+function BrushOverlay({
+  tool, onTool, shape, onShape, size, onSize, hardness, onHardness, undoable, onUndo, onClear, nudge, onResetNudge, onClose, onApply,
+}: {
+  tool: DrawTool
+  onTool: (t: DrawTool) => void
+  shape: Shape
+  onShape: (s: Shape) => void
+  size: number
+  onSize: (n: number) => void
+  hardness: number
+  onHardness: (v: number) => void
+  undoable: number
+  onUndo: () => void
+  onClear: () => void
+  nudge: { x: number; y: number }
+  onResetNudge: () => void
+  onClose: () => void
+  onApply: () => void
+}) {
+  const tools: { id: DrawTool; icon: typeof Brush; label: string; key: string }[] = [
+    { id: 'brush', icon: Brush, label: 'Кисть — Shift+клик: прямая от конца мазка, Shift в мазке: по горизонтали / вертикали', key: 'B' },
+    { id: 'rect', icon: SquareDashed, label: 'Прямоугольник — протяните; Shift — квадрат', key: 'U' },
+    { id: 'poly', icon: Pentagon, label: 'Многоугольник — точки кликами; Enter или клик в первую точку', key: 'P' },
+  ]
+  const shifted = nudge.x !== 0 || nudge.y !== 0
+  return (
+    <>
+      {/* сверху: что делает кисть и действия */}
+      <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-16">
+        <div className="glass pointer-events-auto flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
+          <span className="hidden items-center gap-1.5 pl-3 pr-1 text-[12.5px] text-ink-2 md:flex">
+            <Eraser className="size-3.5" /> Вернуть кадр до материала · Alt — результат · стрелки — сдвиг
+            {shifted && (
+              <button onClick={onResetNudge} className="tabular-nums font-medium text-ink hover:text-accent" title="Сбросить сдвиг">
+                {nudge.x > 0 ? '→' : '←'}{Math.abs(nudge.x)} {nudge.y > 0 ? '↓' : '↑'}{Math.abs(nudge.y)} px
+              </button>
+            )}
+          </span>
+          <button onClick={onClose} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink">
+            Закрыть
+          </button>
+          <button onClick={onApply} className="flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-on-ink transition-colors hover:bg-ink-hover">
+            <Check className="size-3.5" /> Применить
+          </button>
+        </div>
+      </div>
+
+      {/* слева: инструменты */}
+      <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
+        <div className="glass flex flex-col gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5">
+          {tools.map(({ id, icon: Icon, label, key }) => (
+            <ToolButton key={id} label={label} shortcut={key} onClick={() => onTool(id)} active={tool === id}>
+              {tool === id && <motion.span layoutId="mat-brush-tool" className="absolute inset-0 -z-10 rounded-xl bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />}
+              <Icon className="size-[18px]" strokeWidth={1.75} />
+            </ToolButton>
+          ))}
+          <div className="mx-2 my-1 h-px bg-fg/10" />
+          <ToolButton label="Отменить" shortcut="Ctrl Z" onClick={onUndo} disabled={undoable === 0}>
+            <Undo2 className="size-[18px]" strokeWidth={1.75} />
+          </ToolButton>
+          <ToolButton label="Сбросить все мазки" shortcut="" onClick={onClear}>
+            <Trash2 className="size-[18px]" strokeWidth={1.75} />
+          </ToolButton>
+        </div>
+      </div>
+
+      {/* снизу: форма, размер, край */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
+        <div className="pointer-events-auto">
+          <BrushOptions shape={shape} onShape={onShape} size={size} onSize={onSize} min={10} max={300} hardness={hardness} onHardness={onHardness} />
+        </div>
+      </div>
+    </>
   )
 }

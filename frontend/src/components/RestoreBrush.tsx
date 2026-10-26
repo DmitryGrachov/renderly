@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
+import { fillPolygon, lockAxis, rectPoints, segment, type DrawTool, type Pt, type Shape } from '../lib/brush'
 
 export interface RestoreBrushHandle {
   /** Отменить последний мазок */
@@ -23,10 +24,18 @@ interface Props {
   onHistory?: (undoable: number) => void
   /** сдвиг прежнего кадра в пикселях кадра — дотянуть остаток рассогласования вручную (стрелки) */
   offset?: { x: number; y: number }
+  /** кисть, прямоугольник или многоугольник */
+  tool?: DrawTool
+  shape?: Shape
+  /** жёсткость края 0…1 */
+  hardness?: number
 }
 
 const HISTORY = 15 // снимков маски для отмены: кадр ~2 Мп — 8 МБ на снимок
-const HARDNESS = 0.55 // доля радиуса без спада: край мазка мягкий, шов не виден
+// мягкий край прямоугольника и многоугольника: размытие на эту долю радиуса кисти при нулевой жёсткости
+const FEATHER = 0.8
+const POLY_CLOSE = 10 // многоугольник замыкается кликом не дальше стольких экранных px от первой точки
+const MASK = 'rgba(0,0,0,1)'
 
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -38,9 +47,12 @@ function loadImage(src: string) {
 }
 
 /** Кисть отката: под мазками вместо результата — прежний кадр. Холст на месте картинки (object-contain), рисует
- *  левая кнопка, Alt — возвращает результат; пробел и средняя кнопка двигают кадр (ZoomView). */
+ *  левая кнопка, Alt — возвращает результат; пробел и средняя кнопка двигают кадр (ZoomView).
+ *  Кисть: Shift+клик — прямая от конца прошлого мазка, Shift в мазке — по горизонтали / вертикали.
+ *  Прямоугольник — протянуть (Shift — квадрат). Многоугольник — точки кликами; Enter, двойной клик или клик в первую
+ *  точку замыкают, Backspace убирает точку, Esc отменяет. */
 export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function RestoreBrush(
-  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 } },
+  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 }, tool = 'brush', shape = 'circle', hardness = 0.55 },
   ref,
 ) {
   const view = useRef<HTMLCanvasElement>(null)
@@ -50,6 +62,15 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
   const frame = useRef(0)
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
   const [restoring, setRestoring] = useState(true)
+  const lastEnd = useRef<Pt | null>(null)
+  const anchor = useRef<Pt | null>(null)
+  const axis = useRef<'x' | 'y' | null>(null)
+  const scale = useRef(1) // экранных px на пиксель кадра — для толщин и допусков
+  // контур прямоугольника / многоугольника в работе (пиксели кадра) и «резинка» до курсора
+  const [outline, setOutline] = useState<Pt[]>([])
+  const [rubber, setRubber] = useState<Pt | null>(null)
+  const rectStart = useRef<Pt | null>(null)
+  const [size2, setSize2] = useState({ w: 1, h: 1 })
   const shift = useRef(offset)
   shift.current = offset
 
@@ -67,6 +88,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
       layers.current = { after: a, before: prev, mask: canvas(), tmp: canvas() }
       view.current.width = w
       view.current.height = h
+      setSize2({ w, h })
       history.current = []
       onHistory?.(0)
       render()
@@ -104,30 +126,51 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     return { x: (e.clientX - ox) / k, y: (e.clientY - oy) / k, k }
   }
 
-  function dab(m: CanvasRenderingContext2D, x: number, y: number, r: number) {
-    const g = m.createRadialGradient(x, y, r * HARDNESS, x, y, r)
-    g.addColorStop(0, 'rgba(0,0,0,1)')
-    g.addColorStop(1, 'rgba(0,0,0,0)')
-    m.fillStyle = g
-    m.beginPath()
-    m.arc(x, y, r, 0, Math.PI * 2)
-    m.fill()
+  function snapshot() {
+    const m = layers.current!.mask
+    history.current.push(m.getContext('2d')!.getImageData(0, 0, m.width, m.height))
+    if (history.current.length > HISTORY) history.current.shift()
+    onHistory?.(history.current.length)
   }
 
-  function stroke(e: React.PointerEvent) {
-    const l = layers.current
-    if (!l) return
-    const { x, y, k } = toImage(e)
-    const r = size / 2 / k
-    const m = l.mask.getContext('2d')!
-    m.globalCompositeOperation = e.altKey ? 'destination-out' : 'source-over'
-    const from = last.current ?? { x, y }
-    // мазок — дорожка отпечатков через четверть радиуса: при быстром движении без пропусков
-    const steps = Math.max(1, Math.ceil(Math.hypot(x - from.x, y - from.y) / (r / 4)))
-    for (let i = 1; i <= steps; i++) dab(m, from.x + ((x - from.x) * i) / steps, from.y + ((y - from.y) * i) / steps, r)
-    last.current = { x, y }
+  const radius = () => size / 2 / scale.current
+  const maskCtx = (erase: boolean) => {
+    const m = layers.current!.mask.getContext('2d')!
+    m.globalCompositeOperation = erase ? 'destination-out' : 'source-over'
+    return m
+  }
+
+  /** контур → маска (Alt — вернуть результат), мягкий край по жёсткости */
+  function fillOutline(pts: Pt[], erase: boolean) {
+    if (pts.length < 3 || !layers.current) return
+    snapshot()
+    fillPolygon(maskCtx(erase), pts, MASK, radius() * FEATHER * (1 - hardness))
     schedule()
   }
+
+  function closePoly(erase: boolean) {
+    fillOutline(outline, erase)
+    setOutline([])
+    setRubber(null)
+  }
+
+  // многоугольник: Enter — замкнуть, Backspace — убрать точку, Esc — отменить
+  useEffect(() => {
+    if (tool !== 'poly' || !outline.length) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') closePoly(e.altKey)
+      else if (e.key === 'Backspace') setOutline((o) => o.slice(0, -1))
+      else if (e.key === 'Escape') { setOutline([]); setRubber(null) }
+      else return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  })
+
+  // смена инструмента — незаконченный контур и «прямая от конца мазка» не переносятся
+  useEffect(() => { setOutline([]); setRubber(null); lastEnd.current = null }, [tool])
 
   useImperativeHandle(ref, () => ({
     undo() {
@@ -160,31 +203,102 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     <>
       <canvas
         ref={view}
-        className="absolute inset-0 size-full cursor-none object-contain"
+        className={`absolute inset-0 size-full object-contain ${tool === 'brush' ? 'cursor-none' : 'cursor-crosshair'}`}
         style={imageStyle}
         onPointerDown={(e) => {
           if (e.button !== 0 || !layers.current) return
+          const { x, y, k } = toImage(e)
+          scale.current = k
+          const p = { x, y }
+          if (tool === 'poly') {
+            if (outline.length >= 3 && (e.detail >= 2 || Math.hypot(x - outline[0].x, y - outline[0].y) <= POLY_CLOSE / k)) {
+              closePoly(e.altKey)
+            } else if (e.detail < 2) {
+              setOutline((o) => [...o, p])
+            }
+            return
+          }
           e.currentTarget.setPointerCapture(e.pointerId)
-          const m = layers.current.mask
-          history.current.push(m.getContext('2d')!.getImageData(0, 0, m.width, m.height))
-          if (history.current.length > HISTORY) history.current.shift()
-          onHistory?.(history.current.length)
-          last.current = null
-          stroke(e)
+          if (tool === 'rect') {
+            rectStart.current = p
+            setOutline(rectPoints(p, p))
+            return
+          }
+          snapshot()
+          // Shift+клик — прямая от конца прошлого мазка
+          const from = e.shiftKey && lastEnd.current ? lastEnd.current : p
+          segment(maskCtx(e.altKey), from, p, radius(), shape, MASK, shape === 'circle' ? hardness : 1)
+          last.current = p
+          anchor.current = p
+          axis.current = null
+          schedule()
         }}
         onPointerMove={(e) => {
           setCursor({ x: e.clientX, y: e.clientY })
           setRestoring(!e.altKey)
-          if (e.buttons & 1 && last.current) stroke(e)
+          const { x, y, k } = toImage(e)
+          scale.current = k
+          let p = { x, y }
+          if (tool === 'poly') {
+            if (outline.length) setRubber(p)
+            return
+          }
+          if (tool === 'rect') {
+            const a = rectStart.current
+            if (!a || !(e.buttons & 1)) return
+            if (e.shiftKey) {
+              const d = Math.max(Math.abs(x - a.x), Math.abs(y - a.y))
+              p = { x: a.x + Math.sign(x - a.x || 1) * d, y: a.y + Math.sign(y - a.y || 1) * d }
+            }
+            setOutline(rectPoints(a, p))
+            return
+          }
+          if (!(e.buttons & 1) || !last.current) return
+          if (e.shiftKey && anchor.current) {
+            const locked = lockAxis(anchor.current, p, axis.current, 4 / k)
+            p = locked.p
+            axis.current = locked.axis
+          } else {
+            axis.current = null
+          }
+          segment(maskCtx(e.altKey), last.current, p, radius(), shape, MASK, shape === 'circle' ? hardness : 1)
+          last.current = p
+          schedule()
         }}
-        onPointerUp={() => { last.current = null }}
+        onPointerUp={(e) => {
+          if (tool === 'rect' && rectStart.current) {
+            const [a, , b] = outline
+            if (a && b && Math.abs(b.x - a.x) * scale.current > 2 && Math.abs(b.y - a.y) * scale.current > 2) fillOutline(outline, e.altKey)
+            rectStart.current = null
+            setOutline([])
+            return
+          }
+          if (last.current) lastEnd.current = last.current
+          last.current = null
+        }}
         onPointerLeave={() => setCursor(null)}
       />
+      {/* контур прямоугольника / многоугольника — в тех же координатах, что и холст (object-contain) */}
+      {outline.length > 0 && (
+        <svg
+          viewBox={`0 0 ${size2.w} ${size2.h}`} preserveAspectRatio="xMidYMid meet"
+          className="pointer-events-none absolute inset-0 size-full" style={imageStyle}
+        >
+          <path
+            d={`M${[...outline, ...(rubber && tool === 'poly' ? [rubber] : [])].map((q) => `${q.x},${q.y}`).join('L')}Z`}
+            fill={restoring ? '#ffffff' : '#f59e0b'} fillOpacity={0.18} stroke="#fff" strokeWidth={1.5}
+            strokeDasharray="6 6" vectorEffect="non-scaling-stroke" className="animate-ants"
+          />
+          {tool === 'poly' && outline.map((q, n) => (
+            <circle key={n} cx={q.x} cy={q.y} r={(n ? 3 : 5) / scale.current} fill={n ? '#fff' : '#f59e0b'} stroke="#000" strokeOpacity={0.4} vectorEffect="non-scaling-stroke" />
+          ))}
+        </svg>
+      )}
       {/* в body: предки с transform (анимации motion) сбили бы position: fixed */}
-      {cursor && createPortal(
+      {cursor && tool === 'brush' && createPortal(
         <div
           aria-hidden
-          className={`pointer-events-none fixed z-50 rounded-full border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] ${restoring ? 'border-white' : 'border-[#f59e0b]'}`}
+          className={`pointer-events-none fixed z-50 border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] ${shape === 'circle' ? 'rounded-full' : 'rounded-[3px]'} ${restoring ? 'border-white' : 'border-[#f59e0b]'}`}
           style={{ left: cursor.x - size / 2, top: cursor.y - size / 2, width: size, height: size }}
         />,
         document.body,

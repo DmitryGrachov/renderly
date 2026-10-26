@@ -1,10 +1,11 @@
 import { motion } from 'motion/react'
-import { Brush, Eraser, Hand, History, Lasso, Loader2, MousePointerClick, Redo2, Shapes, Trash2, Undo2 } from 'lucide-react'
+import { Brush, Eraser, Hand, History, Lasso, Loader2, MousePointerClick, Pentagon, Redo2, Shapes, SquareDashed, Trash2, Undo2 } from 'lucide-react'
 import { ToolButton } from '../ToolButton'
 import type { InpaintMode } from '../../lib/inpaint'
 
-export type Tool = 'lasso' | 'brush' | 'eraser' | 'restore' | 'pick' | 'hand'
-export type Shape = 'circle' | 'square'
+export type Tool = 'lasso' | 'poly' | 'rect' | 'brush' | 'eraser' | 'restore' | 'pick' | 'hand'
+export type { Shape } from '../../lib/brush'
+import type { Shape } from '../../lib/brush'
 
 export const MODE_COLOR: Record<InpaintMode, string> = {
   edit: '#2f7bff',
@@ -14,7 +15,9 @@ export const MODE_COLOR: Record<InpaintMode, string> = {
 
 const TOOLS: { id: Tool; icon: typeof Brush; label: string; key: string }[] = [
   { id: 'lasso', icon: Lasso, label: 'Лассо', key: 'L' },
-  { id: 'brush', icon: Brush, label: 'Кисть', key: 'B' },
+  { id: 'poly', icon: Pentagon, label: 'Многоугольник — точки кликами, стороны прямые; Enter или клик в первую точку', key: 'P' },
+  { id: 'rect', icon: SquareDashed, label: 'Прямоугольник — протяните; Shift — квадрат', key: 'U' },
+  { id: 'brush', icon: Brush, label: 'Кисть — Shift+клик: прямая от конца мазка, Shift в мазке: по горизонтали / вертикали', key: 'B' },
   { id: 'eraser', icon: Eraser, label: 'Ластик', key: 'E' },
   { id: 'restore', icon: History, label: 'Кисть отката — вернуть предыдущую версию там, где закрасите', key: 'R' },
   { id: 'pick', icon: MousePointerClick, label: 'Выбор маски по схеме — клик добавляет или убирает элемент', key: 'M' },
@@ -128,9 +131,12 @@ interface BrushOptionsProps {
   onSize: (n: number) => void
   min: number
   max: number
+  /** жёсткость края 0…1 (кисти отката); не задана — не показывается */
+  hardness?: number
+  onHardness?: (v: number) => void
 }
 
-export function BrushOptions({ shape, onShape, size, onSize, min, max }: BrushOptionsProps) {
+export function BrushOptions({ shape, onShape, size, onSize, min, max, hardness, onHardness }: BrushOptionsProps) {
   return (
     <div className="glass flex items-center gap-3 rounded-full py-1.5 pl-1.5 pr-4 shadow-float ring-1 ring-fg/5">
       <div className="flex rounded-full bg-fg/[0.05] p-0.5">
@@ -154,6 +160,19 @@ export function BrushOptions({ shape, onShape, size, onSize, min, max }: BrushOp
         aria-label="Размер кисти"
       />
       <span className="w-9 text-right text-[13px] font-semibold tabular-nums">{size}</span>
+      {hardness !== undefined && onHardness && (
+        <>
+          <span className="hidden text-[12px] font-medium text-mute sm:inline" title="Жёсткость края: мягкий край — шов не виден">Край</span>
+          <input
+            type="range" min={0} max={1} step={0.05} value={hardness}
+            onChange={(e) => onHardness(Number(e.target.value))}
+            className="range hidden w-20 sm:block sm:w-24"
+            style={{ '--fill': `${hardness * 100}%` } as React.CSSProperties}
+            aria-label="Жёсткость края"
+          />
+          <span className="hidden w-14 text-[12px] font-medium text-ink-2 sm:inline">{hardness > 0.8 ? 'жёсткий' : hardness < 0.3 ? 'мягкий' : 'средний'}</span>
+        </>
+      )}
     </div>
   )
 }
