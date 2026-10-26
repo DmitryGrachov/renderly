@@ -17,7 +17,9 @@ import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints } from '../../lib/b
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
-interface Version { url: string; label: string; mode?: InpaintMode }
+/** откат кистью: из чего собран и с каким краем — край можно поменять и после «Применить» */
+interface RestoreEdit { cur: string; prev: string; mask: HTMLCanvasElement; hardness: number }
+interface Version { url: string; label: string; mode?: InpaintMode; restore?: RestoreEdit }
 /** выбранное инструментом «Выбор маски»: элементы и их маска (в размере карты), нарисованная на канвасе маски */
 interface Pick { ids: Set<number>; mask: Uint8Array | null }
 
@@ -28,9 +30,29 @@ const PAD_BOTTOM = 76
 const BRUSH_MIN = 4
 const BRUSH_MAX = 200
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
-// кисть отката: мягкий край — размытие мазка на эту долю радиуса кисти при нулевой жёсткости (ползунок «Край»;
-// по умолчанию HARDNESS_DEFAULT — прежние 0.35 радиуса)
-const RESTORE_FEATHER = 0.8
+// кисть отката: мазки с жёстким краем, мягкость — размытием всей маски на эту долю длинной стороны кадра при нулевой
+// жёсткости (ползунок «Край»). Не зависит ни от размера кисти, ни от масштаба — и меняется после «Применить»
+const RESTORE_FEATHER = 0.012
+
+/** Откат в полном разрешении: текущая версия + предыдущая под маской с мягким краем → object URL. */
+async function composeRestore(e: RestoreEdit): Promise<string> {
+  const [cur, prev] = await Promise.all([loadImage(e.cur), loadImage(e.prev)])
+  const W = cur.naturalWidth
+  const H = cur.naturalHeight
+  const out = Object.assign(document.createElement('canvas'), { width: W, height: H })
+  const o = out.getContext('2d')!
+  o.drawImage(cur, 0, 0)
+  const layer = Object.assign(document.createElement('canvas'), { width: W, height: H })
+  const l = layer.getContext('2d')!
+  l.drawImage(prev, 0, 0, W, H)
+  l.globalCompositeOperation = 'destination-in'
+  const blur = (1 - e.hardness) * RESTORE_FEATHER * Math.max(W, H)
+  if (blur > 0.5) l.filter = `blur(${blur}px)`
+  l.drawImage(e.mask, 0, 0, W, H)
+  o.drawImage(layer, 0, 0)
+  const blob = await new Promise<Blob>((res, rej) => out.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.95))
+  return URL.createObjectURL(blob)
+}
 // многоугольник замыкается кликом не дальше стольких экранных px от первой точки
 const POLY_CLOSE = 10
 
@@ -340,7 +362,7 @@ export function Editor({ image, onClose }: Props) {
     }
     return restoreRef.current.getContext('2d', { willReadFrequently: true })!
   }
-  const restoreFeather = () => Math.max(1, (size / 2) * k * RESTORE_FEATHER * (1 - hardness))
+  const restoreFeather = () => (1 - hardness) * RESTORE_FEATHER * Math.max(maskW, maskH)
 
   // превью: предыдущая версия, видимая только под мазками (с мягким краем)
   const drawPreview = () => {
@@ -422,32 +444,34 @@ export function Editor({ image, onClose }: Props) {
     if (!restoreDirty || busy || current === 0) return
     setBusy({ progress: 0.5, stage: 'Откат кистью' })
     try {
-      const [cur, prev] = await Promise.all([loadImage(versions[current].url), loadImage(versions[current - 1].url)])
-      const W = cur.naturalWidth
-      const H = cur.naturalHeight
-      const out = document.createElement('canvas')
-      out.width = W
-      out.height = H
-      const o = out.getContext('2d')!
-      o.drawImage(cur, 0, 0)
-      const layer = document.createElement('canvas')
-      layer.width = W
-      layer.height = H
-      const l = layer.getContext('2d')!
-      l.drawImage(prev, 0, 0, W, H)
-      l.globalCompositeOperation = 'destination-in'
-      l.filter = `blur(${restoreFeather() * (W / maskW)}px)`
-      l.drawImage(restoreRef.current!, 0, 0, W, H)
-      o.drawImage(layer, 0, 0)
-      const blob = await new Promise<Blob>((res, rej) => out.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.95))
-      const url = URL.createObjectURL(blob)
-      setVersions((v) => [...v.slice(0, current + 1), { url, label: 'Откат кистью' }])
+      const mask = Object.assign(document.createElement('canvas'), { width: maskW, height: maskH })
+      mask.getContext('2d')!.drawImage(restoreRef.current!, 0, 0)
+      const edit = { cur: versions[current].url, prev: versions[current - 1].url, mask, hardness }
+      const url = await composeRestore(edit)
+      setVersions((v) => [...v.slice(0, current + 1), { url, label: 'Откат кистью', restore: edit }])
       setCurrent((c) => c + 1)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setBusy(null)
     }
+  }
+
+  // край у применённого отката: та же версия пересобирается с другой мягкостью (ползунок отпущен — без задержки)
+  const [edgeDraft, setEdgeDraft] = useState<number | null>(null)
+  const edgeTimer = useRef(0)
+  const editedRestore = versions[current]?.restore
+  useEffect(() => { setEdgeDraft(null) }, [current])
+  function changeRestoreEdge(v: number) {
+    if (!editedRestore) return
+    setEdgeDraft(v)
+    clearTimeout(edgeTimer.current)
+    const at = current
+    edgeTimer.current = window.setTimeout(async () => {
+      const edit = { ...editedRestore, hardness: v }
+      const url = await composeRestore(edit)
+      setVersions((vs) => vs.map((x, n) => (n === at ? { ...x, url, restore: edit } : x)))
+    }, 250)
   }
 
   /* ---------------- drawing ---------------- */
@@ -995,6 +1019,19 @@ export function Editor({ image, onClose }: Props) {
           <X className="size-4" />
         </button>
 
+        {/* низ: край применённого отката (без кисти — отдельно, с кистью — над её настройками) */}
+        <AnimatePresence>
+          {editedRestore && !brushLike && !busy && !showPickBar && !compare && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+              className="absolute inset-x-0 bottom-4 flex justify-center"
+            >
+              <RestoreEdge value={edgeDraft ?? editedRestore.hardness} onChange={changeRestoreEdge} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* низ: параметры кисти */}
         <AnimatePresence>
           {brushLike && !busy && (
@@ -1004,6 +1041,7 @@ export function Editor({ image, onClose }: Props) {
               className="absolute inset-x-0 bottom-4 flex justify-center"
             >
               <div className="flex flex-col items-center gap-2">
+                {editedRestore && !restoreDirty && <RestoreEdge value={edgeDraft ?? editedRestore.hardness} onChange={changeRestoreEdge} />}
                 {tool === 'restore' && restoreDirty && (
                   <div className="glass flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
                     <span className="flex items-center gap-1.5 pl-2.5 pr-1 text-[12.5px] text-ink-2">
@@ -1160,5 +1198,23 @@ function ProgressRing({ value }: { value: number }) {
         </linearGradient>
       </defs>
     </svg>
+  )
+}
+
+/** Край уже применённого отката кистью: версия пересобирается с другой мягкостью. */
+function RestoreEdge({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <div className="glass flex items-center gap-3 rounded-full py-2 pl-3.5 pr-4 shadow-float ring-1 ring-fg/5">
+      <History className="size-3.5 text-ink-2" />
+      <span className="text-[12.5px] font-medium text-ink-2">Край отката</span>
+      <input
+        type="range" min={0} max={1} step={0.05} value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="range w-28 sm:w-36"
+        style={{ '--fill': `${value * 100}%` } as React.CSSProperties}
+        aria-label="Жёсткость края отката"
+      />
+      <span className="w-14 text-[12px] font-medium text-ink-2">{value > 0.8 ? 'жёсткий' : value < 0.3 ? 'мягкий' : 'средний'}</span>
+    </div>
   )
 }

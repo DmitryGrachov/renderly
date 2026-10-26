@@ -9,6 +9,8 @@ export interface RestoreBrushHandle {
   clear: () => void
   /** Итог: результат с прежним кадром под мазками, в размере результата */
   toBlob: () => Promise<Blob>
+  /** Копия маски мазков (жёсткий край) — чтобы открыть тот же откат снова и поменять край или мазки */
+  mask: () => HTMLCanvasElement | null
 }
 
 interface Props {
@@ -27,13 +29,16 @@ interface Props {
   /** кисть, прямоугольник или многоугольник */
   tool?: DrawTool
   shape?: Shape
-  /** жёсткость края 0…1 */
+  /** жёсткость края 0…1 — для всей маски сразу, в том числе уже нарисованных мазков */
   hardness?: number
+  /** маска прошлого отката по этому результату — открыть его снова */
+  initialMask?: HTMLCanvasElement | null
 }
 
 const HISTORY = 15 // снимков маски для отмены: кадр ~2 Мп — 8 МБ на снимок
-// мягкий край прямоугольника и многоугольника: размытие на эту долю радиуса кисти при нулевой жёсткости
-const FEATHER = 0.8
+// мягкий край: мазки в маске — с жёстким краем, при показе и сохранении маска размывается на эту долю длинной
+// стороны кадра при нулевой жёсткости. Край — свойство всего отката, а не мазка: его меняют и после «Применить»
+const FEATHER = 0.012
 const POLY_CLOSE = 10 // многоугольник замыкается кликом не дальше стольких экранных px от первой точки
 const MASK = 'rgba(0,0,0,1)'
 
@@ -52,7 +57,7 @@ function loadImage(src: string) {
  *  Прямоугольник — протянуть (Shift — квадрат). Многоугольник — точки кликами; Enter, двойной клик или клик в первую
  *  точку замыкают, Backspace убирает точку, Esc отменяет. */
 export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function RestoreBrush(
-  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 }, tool = 'brush', shape = 'circle', hardness = 0.55 },
+  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 }, tool = 'brush', shape = 'circle', hardness = 0.55, initialMask },
   ref,
 ) {
   const view = useRef<HTMLCanvasElement>(null)
@@ -74,7 +79,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
   const shift = useRef(offset)
   shift.current = offset
 
-  useEffect(() => { render() }, [offset.x, offset.y]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { render() }, [offset.x, offset.y, hardness]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true
@@ -85,7 +90,9 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
       // прежний кадр — в размере результата (бэкенд отдаёт результат в размере исходника, подогнанным по краям)
       const prev = canvas()
       prev.getContext('2d')!.drawImage(b, 0, 0, w, h)
-      layers.current = { after: a, before: prev, mask: canvas(), tmp: canvas() }
+      const mask = canvas()
+      if (initialMask) mask.getContext('2d')!.drawImage(initialMask, 0, 0, w, h)
+      layers.current = { after: a, before: prev, mask, tmp: canvas() }
       view.current.width = w
       view.current.height = h
       setSize2({ w, h })
@@ -106,7 +113,10 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     t.globalCompositeOperation = 'copy'
     t.drawImage(l.before, shift.current.x, shift.current.y)
     t.globalCompositeOperation = 'destination-in'
+    const blur = (1 - hardness) * FEATHER * Math.max(l.mask.width, l.mask.height)
+    t.filter = blur > 0.5 ? `blur(${blur}px)` : 'none'
     t.drawImage(l.mask, 0, 0)
+    t.filter = 'none'
     ctx.drawImage(l.after, 0, 0)
     ctx.drawImage(l.tmp, 0, 0)
   }
@@ -140,11 +150,11 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     return m
   }
 
-  /** контур → маска (Alt — вернуть результат), мягкий край по жёсткости */
+  /** контур → маска (Alt — вернуть результат); край смягчается при показе, по всей маске */
   function fillOutline(pts: Pt[], erase: boolean) {
     if (pts.length < 3 || !layers.current) return
     snapshot()
-    fillPolygon(maskCtx(erase), pts, MASK, radius() * FEATHER * (1 - hardness))
+    fillPolygon(maskCtx(erase), pts, MASK)
     schedule()
   }
 
@@ -191,6 +201,13 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
       onHistory?.(history.current.length)
       render()
     },
+    mask() {
+      const m = layers.current?.mask
+      if (!m) return null
+      const copy = Object.assign(document.createElement('canvas'), { width: m.width, height: m.height })
+      copy.getContext('2d')!.drawImage(m, 0, 0)
+      return copy
+    },
     toBlob() {
       render()
       return new Promise<Blob>((resolve, reject) =>
@@ -227,7 +244,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
           snapshot()
           // Shift+клик — прямая от конца прошлого мазка
           const from = e.shiftKey && lastEnd.current ? lastEnd.current : p
-          segment(maskCtx(e.altKey), from, p, radius(), shape, MASK, shape === 'circle' ? hardness : 1)
+          segment(maskCtx(e.altKey), from, p, radius(), shape, MASK)
           last.current = p
           anchor.current = p
           axis.current = null
@@ -261,7 +278,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
           } else {
             axis.current = null
           }
-          segment(maskCtx(e.altKey), last.current, p, radius(), shape, MASK, shape === 'circle' ? hardness : 1)
+          segment(maskCtx(e.altKey), last.current, p, radius(), shape, MASK)
           last.current = p
           schedule()
         }}

@@ -74,6 +74,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [brushShape, setBrushShape] = useState<Shape>('circle')
   const [hardness, setHardness] = useState(HARDNESS_DEFAULT)
   const [undoable, setUndoable] = useState(0)
+  // применённый откат можно открыть снова: результат модели до отката и маска мазков
+  const [raw, setRaw] = useState<string | null>(null)
+  const [brushMask, setBrushMask] = useState<HTMLCanvasElement | null>(null)
   // сдвиг прежнего кадра под кистью: стрелки — на 1 px, с Shift — на 5
   const [nudge, setNudge] = useState({ x: 0, y: 0 })
   const brush = useRef<RestoreBrushHandle>(null)
@@ -114,7 +117,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setBrushing(false)
     setSource(img)
     setHistory([])
-    setResult(null)
+    setResult(null); setRaw(null); setBrushMask(null)
     setStatus('idle')
     setError(null)
   }
@@ -145,6 +148,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
         ctrl.signal,
       )
       setResult(res)
+      setRaw(null) // новый результат — прежний откат к нему не относится
+      setBrushMask(null)
       for (const r of ready) charge('render', `Img to Img · Материалы · ${r.target.trim()}`, model)
       setView('compare')
       setStatus('done')
@@ -174,7 +179,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     const img = await urlToStudioImage(result.url, fileName())
     setHistory((h) => [...h, source])
     setSource(img)
-    setResult(null)
+    setResult(null); setRaw(null); setBrushMask(null)
     setStatus('idle')
     setRows([newRow()])
   }
@@ -183,6 +188,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   async function applyBrush() {
     if (!result || !brush.current) return
     const blob = await brush.current.toBlob()
+    setBrushMask(brush.current.mask())
+    setRaw((r) => r ?? result.url)
     setResult({ ...result, url: URL.createObjectURL(blob) })
     setBrushing(false)
     setView('result')
@@ -193,7 +200,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     if (!prev) return
     setHistory((h) => h.slice(0, -1))
     setSource(prev)
-    setResult(null)
+    setResult(null); setRaw(null); setBrushMask(null)
     setStatus('idle')
   }
 
@@ -222,7 +229,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                     result && !running ? (
                       brushing ? (
                         <RestoreBrush
-                          ref={brush} before={source.url} after={result.url} imageStyle={imageStyle} size={brushSize}
+                          ref={brush} before={source.url} after={raw ?? result.url} initialMask={brushMask} imageStyle={imageStyle} size={brushSize}
                           onHistory={setUndoable} offset={nudge} tool={brushTool} shape={brushShape} hardness={hardness}
                         />
                       ) : view === 'compare' ? (
@@ -292,7 +299,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                           <Undo2 className="size-4" />
                         </IconButton>
                       )}
-                      <IconButton label="Убрать изображение" onClick={() => { abort.current?.abort(); setSource(null); setHistory([]); setResult(null); setStatus('idle') }}>
+                      <IconButton label="Убрать изображение" onClick={() => { abort.current?.abort(); setSource(null); setHistory([]); setResult(null); setRaw(null); setBrushMask(null); setStatus('idle') }}>
                         <X className="size-4" />
                       </IconButton>
                     </div>
@@ -320,8 +327,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                   <SecondaryButton onClick={download}>
                     <Download className="size-4" /> Скачать
                   </SecondaryButton>
-                  <SecondaryButton onClick={() => { setUndoable(0); setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
-                    <Eraser className="size-4" /> Кисть отката
+                  {/* откат уже применён — открывается он же: те же мазки, край и сдвиг можно поменять */}
+                  <SecondaryButton onClick={() => { setUndoable(0); if (!brushMask) setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
+                    <Eraser className="size-4" /> {brushMask ? 'Править откат' : 'Кисть отката'}
                   </SecondaryButton>
                   <SecondaryButton onClick={continueFromResult}>
                     <Plus className="size-4" /> Ещё материал
