@@ -21,6 +21,8 @@ interface Props {
   size: number
   /** сколько мазков можно отменить */
   onHistory?: (undoable: number) => void
+  /** сдвиг прежнего кадра в пикселях кадра — дотянуть остаток рассогласования вручную (стрелки) */
+  offset?: { x: number; y: number }
 }
 
 const HISTORY = 15 // снимков маски для отмены: кадр ~2 Мп — 8 МБ на снимок
@@ -38,7 +40,7 @@ function loadImage(src: string) {
 /** Кисть отката: под мазками вместо результата — прежний кадр. Холст на месте картинки (object-contain), рисует
  *  левая кнопка, Alt — возвращает результат; пробел и средняя кнопка двигают кадр (ZoomView). */
 export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function RestoreBrush(
-  { before, after, imageStyle, size, onHistory },
+  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 } },
   ref,
 ) {
   const view = useRef<HTMLCanvasElement>(null)
@@ -48,6 +50,10 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
   const frame = useRef(0)
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
   const [restoring, setRestoring] = useState(true)
+  const shift = useRef(offset)
+  shift.current = offset
+
+  useEffect(() => { render() }, [offset.x, offset.y]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true
@@ -55,7 +61,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
       if (!alive || !view.current) return
       const { naturalWidth: w, naturalHeight: h } = a
       const canvas = (cw = w, ch = h) => Object.assign(document.createElement('canvas'), { width: cw, height: ch })
-      // прежний кадр — в размере результата (у моделей разный размер генерации, кадры совмещены InegoAlign)
+      // прежний кадр — в размере результата (бэкенд отдаёт результат в размере исходника, подогнанным по краям)
       const prev = canvas()
       prev.getContext('2d')!.drawImage(b, 0, 0, w, h)
       layers.current = { after: a, before: prev, mask: canvas(), tmp: canvas() }
@@ -76,7 +82,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     // прежний кадр, вырезанный маской, поверх результата
     const t = l.tmp.getContext('2d')!
     t.globalCompositeOperation = 'copy'
-    t.drawImage(l.before, 0, 0)
+    t.drawImage(l.before, shift.current.x, shift.current.y)
     t.globalCompositeOperation = 'destination-in'
     t.drawImage(l.mask, 0, 0)
     ctx.drawImage(l.after, 0, 0)

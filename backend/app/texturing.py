@@ -21,13 +21,16 @@
 образцом (_rescale).
 """
 
+import asyncio
 import hashlib
 import io
 import json
 import random
 import uuid
 
+import cv2
 import httpx
+import numpy as np
 from PIL import Image
 
 from . import comfy
@@ -41,6 +44,8 @@ from .prompting import DEEPSEEK_API_KEY, _chat, _data_url, llm_model
 
 MAX_SAMPLES = 3  # образцов за раз: каждый — свой проход, кадр с каждым чуть мягче
 MIN_SCALE, MAX_SCALE = 0.25, 3.0  # ползунок «Размер»: на ×4 вырезанный кусок образца мылится, кладка с артефактами
+REGISTER_SIDE = 1536  # подгонка к исходнику — по кадру не больше этого
+REGISTER_MAX = 0.03  # подгонка больше 3% (масштаб, сдвиг) — ECC промахнулся, кадр остаётся как есть
 
 # DeepSeek по кадру, образцу и словам пользователя называет части запроса — коротко, по-английски
 TARGET_SYSTEM = (
@@ -160,6 +165,39 @@ def _sample_png(data: bytes, scale: float = 1.0) -> bytes:
     return to_png(tex)
 
 
+def _edges(gray: np.ndarray) -> np.ndarray:
+    """Сила краёв: сравнивать кадры по ней, а не по яркости — материал и свет поменялись, края остались."""
+    g = cv2.GaussianBlur(gray, (0, 0), 1.5)
+    return cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
+
+
+def _register(frame: Image.Image, src: Image.Image) -> Image.Image:
+    """Результат — в размере исходника и точно на нём (ECC по краям, сдвиг и растяжение по осям).
+
+    InegoAlign ставит кадр с точностью до пикселя по сдвигу, но масштаб у него один на обе оси: у 2511 кадр
+    оставался сжат по вертикали на 0.3% (~3 px на высоту). На тестовом доме ECC снизил медиану смещения краёв
+    с 1.45 до 0.42 px (2511), с 0.97 до 0.41 (klein 9B); остаток — местный, модель по-своему рисует края."""
+    big = frame.resize(src.size, Image.BICUBIC)
+    k = min(1.0, REGISTER_SIDE / max(src.size))
+    small = (round(src.width * k), round(src.height * k))
+    a, b = (_edges(np.asarray(im.convert("L").resize(small, Image.BILINEAR), np.float32)) for im in (src, big))
+    m = np.eye(2, 3, dtype=np.float32)
+    try:
+        _, m = cv2.findTransformECC(a, b, m, cv2.MOTION_AFFINE, (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6), None, 5)
+    except cv2.error as e:
+        log.warning("Подгонка к исходнику не сошлась: %s", e)
+        return big
+    m[:, 2] /= k  # сдвиг — в пиксели исходника
+    if np.abs(m[:, :2] - np.eye(2)).max() > REGISTER_MAX or np.abs(m[:, 2]).max() > REGISTER_MAX * max(src.size):
+        log.warning("Подгонка к исходнику отброшена — слишком большая: %s", np.round(m, 4).tolist())
+        return big
+    log.info("подгонка к исходнику: %s", np.round(m, 4).tolist())
+    out = cv2.warpAffine(
+        np.asarray(big), m, src.size, flags=cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE,
+    )
+    return Image.fromarray(out)
+
+
 def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
@@ -232,8 +270,8 @@ async def run_materials(
                 wf = _flux_workflow(src_name, tex_name, prompt, seed + i, model, size)
             out = await _run(client, wf)
             frame = Image.open(io.BytesIO(out["save"])).convert("RGB").resize(size, Image.LANCZOS)
-    # стороны кратны 16 — возвращаем точную пропорцию исходника
-    result = frame.resize((frame.width, round(frame.width * src.height / src.width)), Image.LANCZOS)
+    # в размер исходника и точно на него: кисть отката проявляет исходник пиксель в пиксель
+    result = await asyncio.to_thread(_register, frame, src)
     buf = io.BytesIO()
     result.save(buf, "JPEG", quality=95)
     return buf.getvalue(), seed

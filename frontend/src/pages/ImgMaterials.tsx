@@ -68,10 +68,24 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [brushing, setBrushing] = useState(false)
   const [brushSize, setBrushSize] = useState(80)
   const [undoable, setUndoable] = useState(0)
+  // сдвиг прежнего кадра под кистью: стрелки — на 1 px, с Shift — на 5
+  const [nudge, setNudge] = useState({ x: 0, y: 0 })
   const brush = useRef<RestoreBrushHandle>(null)
   const abort = useRef<AbortController | null>(null)
 
   useEffect(() => () => abort.current?.abort(), [])
+  useEffect(() => {
+    if (!brushing) return
+    const onKey = (e: KeyboardEvent) => {
+      const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key]
+      if (!d || (e.target as HTMLElement).closest('input, textarea')) return
+      e.preventDefault()
+      const step = e.shiftKey ? 5 : 1
+      setNudge((n) => ({ x: n.x + d[0] * step, y: n.y + d[1] * step }))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [brushing])
   useEffect(() => {
     if (incoming) takeSource(incoming)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -196,7 +210,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       brushing ? (
                         <RestoreBrush
                           ref={brush} before={source.url} after={result.url} imageStyle={imageStyle} size={brushSize}
-                          onHistory={setUndoable}
+                          onHistory={setUndoable} offset={nudge}
                         />
                       ) : view === 'compare' ? (
                         <CompareSlider before={source.url} after={result.url} imageStyle={imageStyle} />
@@ -276,6 +290,17 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[15px] font-semibold tracking-[-0.01em]">Кисть отката</div>
                   <div className="text-[13px] text-mute">Проведите — вернётся кадр до материала. Alt — вернуть результат, пробел — двигать кадр</div>
+                  <div className="mt-1 flex items-center gap-2 text-[12.5px] text-mute">
+                    <span>
+                      Стрелки — подвинуть прежний кадр, если край двоится
+                      {(nudge.x !== 0 || nudge.y !== 0) && (
+                        <span className="tabular-nums text-ink-2"> · {nudge.x > 0 ? '→' : '←'}{Math.abs(nudge.x)} {nudge.y > 0 ? '↓' : '↑'}{Math.abs(nudge.y)} px</span>
+                      )}
+                    </span>
+                    {(nudge.x !== 0 || nudge.y !== 0) && (
+                      <button onClick={() => setNudge({ x: 0, y: 0 })} className="font-medium text-ink-2 hover:text-accent">сбросить</button>
+                    )}
+                  </div>
                   <label className="mt-2.5 flex items-center gap-3 text-[12.5px] text-mute">
                     <span className="shrink-0">Размер</span>
                     <input
@@ -321,7 +346,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                   <SecondaryButton onClick={download}>
                     <Download className="size-4" /> Скачать
                   </SecondaryButton>
-                  <SecondaryButton onClick={() => { setUndoable(0); setBrushing(true) }}>
+                  <SecondaryButton onClick={() => { setUndoable(0); setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
                     <Eraser className="size-4" /> Кисть отката
                   </SecondaryButton>
                   <SecondaryButton onClick={continueFromResult}>
