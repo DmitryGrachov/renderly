@@ -178,7 +178,7 @@ export function BrushOptions({ shape, onShape, size, onSize, min, max, hardness,
       <span className="w-9 text-right text-[13px] font-semibold tabular-nums">{size}</span>
       {hardness !== undefined && onHardness && (
         <>
-          <span className="hidden text-[12px] font-medium text-mute sm:inline" title="Жёсткость края: мягкий край — шов не виден">Край</span>
+          <span className="hidden text-[12px] font-medium text-mute sm:inline" title="Жёсткость края: 0% — мягкий, шов не виден; 100% — резкая граница">Жёсткость</span>
           <input
             type="range" min={0} max={1} step={0.05} value={hardness}
             onChange={(e) => onHardness(Number(e.target.value))}
@@ -186,7 +186,7 @@ export function BrushOptions({ shape, onShape, size, onSize, min, max, hardness,
             style={{ '--fill': `${hardness * 100}%` } as React.CSSProperties}
             aria-label="Жёсткость края"
           />
-          <span className="hidden w-14 text-[12px] font-medium text-ink-2 sm:inline">{hardness > 0.8 ? 'жёсткий' : hardness < 0.3 ? 'мягкий' : 'средний'}</span>
+          <span className="hidden w-9 text-[12px] font-medium tabular-nums text-ink-2 sm:inline">{Math.round(hardness * 100)}%</span>
         </>
       )}
     </div>

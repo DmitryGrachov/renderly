@@ -127,7 +127,7 @@ export function ColorPanel({
           </div>
         )}
         <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
-          <span className="w-[92px] shrink-0" title="Граница области: жёсткая — прямые края без перехода, мягкая — плавный переход">Край</span>
+          <span className="w-[92px] shrink-0" title="Граница области: 100% — резкие прямые края, 0% — плавный переход">Жёсткость</span>
           <input
             type="range" min={0} max={1} step={0.05} value={regionHardness}
             onChange={(e) => onRegionHardness(Number(e.target.value))}
@@ -135,7 +135,7 @@ export function ColorPanel({
             style={{ '--fill': `${regionHardness * 100}%` } as React.CSSProperties}
             aria-label="Жёсткость края области"
           />
-          <span className="w-14 shrink-0 text-right text-ink-2">{regionHardness > 0.8 ? 'жёсткий' : regionHardness < 0.3 ? 'мягкий' : 'средний'}</span>
+          <span className="w-14 shrink-0 text-right tabular-nums text-ink-2">{Math.round(regionHardness * 100)}%</span>
         </label>
         <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
           <span className="w-[92px] shrink-0" title="Поджать (влево) или расширить (вправо) всю область на столько пикселей">Сдвиг края</span>

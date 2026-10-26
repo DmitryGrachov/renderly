@@ -126,7 +126,7 @@ export function RestoreBar({
       {tool === 'brush' ? (
         <BrushOptions shape={shape} onShape={onShape} size={size} onSize={onSize} min={10} max={300} hardness={hardness} onHardness={onHardness} bare />
       ) : (
-        <EdgeSlider label="Край" value={hardness} onChange={onHardness} />
+        <EdgeSlider label="Жёсткость" value={hardness} onChange={onHardness} />
       )}
       <span className="hidden text-[12px] text-faint lg:inline">Alt — вернуть результат · стрелки — сдвиг</span>
       {shifted && (
@@ -181,7 +181,7 @@ export function RegionBar({
           />
         </label>
       )}
-      <EdgeSlider label="Край" value={hardness} onChange={onHardness} />
+      <EdgeSlider label="Жёсткость" value={hardness} onChange={onHardness} />
       <label className="flex items-center gap-2 text-[12px] text-mute" title="Поджать (влево) или расширить (вправо) всю область">
         Сдвиг
         <input
@@ -207,12 +207,13 @@ export function RegionBar({
 
 function EdgeSlider({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
   return (
-    <label className="flex items-center gap-2 text-[12px] text-mute" title="Жёсткость края: мягкий — плавный переход">
+    <label className="flex items-center gap-2 text-[12px] text-mute" title="Жёсткость края: 0% — мягкий плавный переход, 100% — резкая граница">
       {label}
       <input
         type="range" min={0} max={1} step={0.05} value={value} onChange={(e) => onChange(Number(e.target.value))}
-        className="range w-20" style={{ '--fill': `${value * 100}%` } as React.CSSProperties} aria-label={`${label} — жёсткость`}
+        className="range w-20" style={{ '--fill': `${value * 100}%` } as React.CSSProperties} aria-label={`${label} края`}
       />
+      <span className="w-9 tabular-nums text-ink-2">{Math.round(value * 100)}%</span>
     </label>
   )
 }

@@ -1422,7 +1422,7 @@ function RestoreEdge({ value, onChange }: { value: number; onChange: (v: number)
   return (
     <div className="glass flex items-center gap-3 rounded-full py-2 pl-3.5 pr-4 shadow-float ring-1 ring-fg/5">
       <History className="size-3.5 text-ink-2" />
-      <span className="text-[12.5px] font-medium text-ink-2">Край отката</span>
+      <span className="text-[12.5px] font-medium text-ink-2" title="0% — мягкий переход, 100% — резкая граница">Жёсткость края отката</span>
       <input
         type="range" min={0} max={1} step={0.05} value={value}
         onChange={(e) => onChange(Number(e.target.value))}
@@ -1430,7 +1430,7 @@ function RestoreEdge({ value, onChange }: { value: number; onChange: (v: number)
         style={{ '--fill': `${value * 100}%` } as React.CSSProperties}
         aria-label="Жёсткость края отката"
       />
-      <span className="w-14 text-[12px] font-medium text-ink-2">{value > 0.8 ? 'жёсткий' : value < 0.3 ? 'мягкий' : 'средний'}</span>
+      <span className="w-9 text-[12px] font-medium tabular-nums text-ink-2">{Math.round(value * 100)}%</span>
     </div>
   )
 }
