@@ -13,8 +13,8 @@ import { loadImage } from '../../lib/grade'
 import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
 import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
-import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints } from '../../lib/brush'
-import { changedRegion, colorize, combineRegion, NEUTRAL, newEdits, type ColorValues, type RegionEdits } from '../../lib/colorAdjust'
+import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints, type DrawTool } from '../../lib/brush'
+import { changedRegion, colorize, combineRegion, NEUTRAL, newEdits, REGION_HARDNESS, type ColorValues, type RegionEdits } from '../../lib/colorAdjust'
 import { RegionBrush, type RegionBrushHandle, type RegionMode } from '../RegionBrush'
 import { ColorPanel } from '../ColorPanel'
 
@@ -23,7 +23,7 @@ interface Box { x: number; y: number; w: number; h: number }
 /** откат кистью: из чего собран и с каким краем — край можно поменять и после «Применить» */
 interface RestoreEdit { cur: string; prev: string; mask: HTMLCanvasElement; hardness: number }
 /** цвет сгенерированного: версия «Цвет» — base с поправленным цветом там, где base отличается от prev */
-interface ColorEdit { base: string; prev: string; values: ColorValues }
+interface ColorEdit { base: string; prev: string; values: ColorValues; hardness?: number }
 interface Version { url: string; label: string; mode?: InpaintMode; restore?: RestoreEdit; color?: ColorEdit }
 /** выбранное инструментом «Выбор маски»: элементы и их маска (в размере карты), нарисованная на канвасе маски */
 interface Pick { ids: Set<number>; mask: Uint8Array | null }
@@ -488,6 +488,7 @@ export function Editor({ image, onClose }: Props) {
   const [regionView, setRegionView] = useState<{ auto: HTMLCanvasElement; edits: RegionEdits } | null>(null)
   const [regionMode, setRegionMode] = useState<RegionMode | null>(null)
   const [regionSize, setRegionSize] = useState(48)
+  const [regionTool, setRegionTool] = useState<DrawTool>('brush')
   const [regionUndo, setRegionUndo] = useState(0)
   const regionBrush = useRef<RegionBrushHandle>(null)
   const colorRegion = useRef<{ key: string; auto: HTMLCanvasElement } | null>(null)
@@ -507,7 +508,7 @@ export function Editor({ image, onClose }: Props) {
 
   async function colorRegionFor(e: ColorEdit) {
     const { auto, edits } = await regionParts(e)
-    return combineRegion(auto, edits)
+    return combineRegion(auto, edits, e.hardness ?? REGION_HARDNESS)
   }
 
   // «Цвет»: на версии с цветом — открыть ползунки; иначе новая версия «Цвет» поверх текущей (пока без изменений)
@@ -552,11 +553,16 @@ export function Editor({ image, onClose }: Props) {
     }
   }
 
+  // край области — свойство версии «Цвет»: пересборка сразу
+  function changeRegionHardness(h: number) {
+    regionChanged(h)
+  }
+
   // мазок по области — версия «Цвет» пересобирается с теми же ползунками по новой области
-  async function regionChanged() {
+  async function regionChanged(hardness?: number) {
     if (!editedColor) return
     const at = current
-    const edit = { ...editedColor, values: colorDraft ?? editedColor.values }
+    const edit = { ...editedColor, values: colorDraft ?? editedColor.values, hardness: hardness ?? editedColor.hardness }
     setColorWorking(true)
     try {
       const url = await colorize(edit.base, await colorRegionFor(edit), edit.values)
@@ -1019,7 +1025,8 @@ export function Editor({ image, onClose }: Props) {
           {colorOpen && editedColor && (showRegion || regionMode) && regionView && !peek && !busy && (
             <RegionBrush
               ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
-              onCommit={regionChanged} onHistory={setRegionUndo} className="z-10"
+              tool={regionTool} hardness={editedColor.hardness ?? REGION_HARDNESS}
+              onCommit={() => regionChanged()} onHistory={setRegionUndo} className="z-10"
             />
           )}
         </div>
@@ -1099,6 +1106,8 @@ export function Editor({ image, onClose }: Props) {
                 regionMode={regionMode} onRegionMode={chooseRegionMode}
                 brushSize={regionSize} onBrushSize={setRegionSize}
                 undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
+                regionTool={regionTool} onRegionTool={setRegionTool}
+                regionHardness={editedColor.hardness ?? REGION_HARDNESS} onRegionHardness={changeRegionHardness}
                 onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
               />
             </motion.div>

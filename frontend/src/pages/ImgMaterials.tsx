@@ -11,7 +11,7 @@ import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
 import { ToolButton } from '../components/ToolButton'
 import { BrushOptions } from '../components/inpaint/Toolbar'
 import { HARDNESS_DEFAULT, type DrawTool, type Shape } from '../lib/brush'
-import { changedRegion, colorize, combineRegion, isNeutral, NEUTRAL, newEdits, type ColorValues, type RegionEdits } from '../lib/colorAdjust'
+import { changedRegion, colorize, combineRegion, isNeutral, NEUTRAL, newEdits, REGION_HARDNESS, type ColorValues, type RegionEdits } from '../lib/colorAdjust'
 import { RegionBrush, type RegionBrushHandle, type RegionMode } from '../components/RegionBrush'
 import { ColorPanel } from '../components/ColorPanel'
 import { useScene, type Scene } from '../lib/scene'
@@ -90,6 +90,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [regionView, setRegionView] = useState<{ auto: HTMLCanvasElement; edits: RegionEdits } | null>(null)
   const [regionMode, setRegionMode] = useState<RegionMode | null>(null)
   const [regionSize, setRegionSize] = useState(60)
+  const [regionTool, setRegionTool] = useState<DrawTool>('brush')
+  const [regionHardness, setRegionHardness] = useState(REGION_HARDNESS)
   const [regionUndo, setRegionUndo] = useState(0)
   const regionBrush = useRef<RegionBrushHandle>(null)
   const edits = useRef<RegionEdits | null>(null)
@@ -231,7 +233,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
   async function regionFor(url: string) {
     const { auto, edits: e } = await regionParts(url)
-    return combineRegion(auto, e)
+    return combineRegion(auto, e, regionHardness)
   }
 
   /** итог цепочки: цвет поверх кадра без цвета (только в области изменений) */
@@ -283,6 +285,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
       setRegionView(await regionParts(plain))
     }
   }
+
+  // край области — цвет сразу по новой границе
+  useEffect(() => { if (colorOpen && !isNeutral(color)) regionChanged() }, [regionHardness]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // мазок по области — цвет пересобирается по новой области
   async function regionChanged() {
@@ -339,6 +344,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                           {(showRegion || regionMode) && regionView && (
                             <RegionBrush
                               ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
+                              tool={regionTool} hardness={regionHardness}
                               imageStyle={imageStyle} onCommit={regionChanged} onHistory={setRegionUndo}
                             />
                           )}
@@ -377,6 +383,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       regionMode={regionMode} onRegionMode={chooseRegionMode}
                       brushSize={regionSize} onBrushSize={setRegionSize}
                       undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
+                      regionTool={regionTool} onRegionTool={setRegionTool}
+                      regionHardness={regionHardness} onRegionHardness={setRegionHardness}
                       onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
                     />
                   </div>

@@ -21,7 +21,11 @@ const SIDE = 768 // разница считается на кадре не бо�
 const STRONG = 60
 const WEAK = 30
 const CLOSE = 0.012 // залить дырки и убрать крошки: размытие на эту долю стороны кадра и порог
-const FEATHER = 0.004 // мягкий край области — доля длинной стороны итогового кадра
+// край области — размытие итоговой области (автоматическая + правки кистью) на эту долю длинной стороны кадра при
+// нулевой жёсткости; по умолчанию REGION_HARDNESS — примерно прежний мягкий край. Сама область — с жёстким краем,
+// чтобы прямые границы прямоугольником и многоугольником оставались прямыми
+const FEATHER = 0.009
+export const REGION_HARDNESS = 0.55
 
 export function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -80,7 +84,6 @@ export async function changedRegion(beforeUrl: string, afterUrl: string): Promis
   // в размер результата с мягким краем
   const region = canvas(W, H)
   const rc = region.getContext('2d')!
-  rc.filter = `blur(${Math.max(1, FEATHER * Math.max(W, H))}px)`
   rc.imageSmoothingQuality = 'high'
   rc.drawImage(closed, 0, 0, W, H)
   return region
@@ -134,14 +137,23 @@ export interface RegionEdits {
 
 export const newEdits = (w: number, h: number): RegionEdits => ({ add: canvas(w, h), remove: canvas(w, h) })
 
-/** Итоговая область: найденная автоматически + добавленное кистью − убранное кистью. */
-export function combineRegion(auto: HTMLCanvasElement, edits: RegionEdits | null | undefined): HTMLCanvasElement {
-  if (!edits) return auto
+/** Итоговая область: найденная автоматически + добавленное кистью − убранное кистью, с краем по жёсткости 0…1. */
+export function combineRegion(
+  auto: HTMLCanvasElement, edits: RegionEdits | null | undefined, hardness = REGION_HARDNESS,
+): HTMLCanvasElement {
   const out = canvas(auto.width, auto.height)
   const o = out.getContext('2d')!
   o.drawImage(auto, 0, 0)
-  o.drawImage(edits.add, 0, 0, auto.width, auto.height)
-  o.globalCompositeOperation = 'destination-out'
-  o.drawImage(edits.remove, 0, 0, auto.width, auto.height)
-  return out
+  if (edits) {
+    o.drawImage(edits.add, 0, 0, auto.width, auto.height)
+    o.globalCompositeOperation = 'destination-out'
+    o.drawImage(edits.remove, 0, 0, auto.width, auto.height)
+  }
+  const blur = (1 - hardness) * FEATHER * Math.max(auto.width, auto.height)
+  if (blur < 0.5) return out
+  const soft = canvas(auto.width, auto.height)
+  const c = soft.getContext('2d')!
+  c.filter = `blur(${blur}px)`
+  c.drawImage(out, 0, 0)
+  return soft
 }

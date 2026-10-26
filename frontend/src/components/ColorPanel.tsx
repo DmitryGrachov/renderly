@@ -1,4 +1,5 @@
-import { Eye, EyeOff, Minus, Plus, RotateCcw, SunMedium, Undo2 } from 'lucide-react'
+import { Brush, Eye, EyeOff, Minus, Pentagon, Plus, RotateCcw, SquareDashed, SunMedium, Undo2 } from 'lucide-react'
+import type { DrawTool } from '../lib/brush'
 import type { RegionMode } from './RegionBrush'
 import { NEUTRAL, isNeutral, type ColorValues } from '../lib/colorAdjust'
 
@@ -11,6 +12,7 @@ const SLIDERS: { key: keyof ColorValues; label: string }[] = [
 /** Цвет сгенерированного куска: яркость, контраст, насыщенность (−100…100) только в области изменений. */
 export function ColorPanel({
   values, onChange, showRegion, onShowRegion, onDone, working, regionMode, onRegionMode, brushSize, onBrushSize, undoable, onUndo,
+  regionTool, onRegionTool, regionHardness, onRegionHardness,
 }: {
   values: ColorValues
   onChange: (v: ColorValues) => void
@@ -26,6 +28,12 @@ export function ColorPanel({
   onBrushSize: (n: number) => void
   undoable: number
   onUndo: () => void
+  /** чем править область: кисть, прямоугольник, многоугольник (прямые границы) */
+  regionTool: DrawTool
+  onRegionTool: (t: DrawTool) => void
+  /** жёсткость края всей области 0…1 */
+  regionHardness: number
+  onRegionHardness: (v: number) => void
 }) {
   return (
     <div className="glass w-[min(92vw,340px)] rounded-[22px] p-3.5 shadow-float ring-1 ring-fg/5">
@@ -83,6 +91,36 @@ export function ColorPanel({
           </button>
         </div>
         {regionMode && (
+          <div className="mt-2 flex items-center gap-1">
+            <span className="w-[92px] shrink-0 text-[12px] text-mute">Инструмент</span>
+            {([
+              ['brush', Brush, 'Кисть — Shift+клик: прямая от конца мазка'],
+              ['rect', SquareDashed, 'Прямоугольник — протяните; Shift — квадрат'],
+              ['poly', Pentagon, 'Многоугольник — точки кликами; Enter или клик в первую точку'],
+            ] as const).map(([t, Icon, title]) => (
+              <button
+                key={t}
+                onClick={() => onRegionTool(t)}
+                title={title}
+                className={`grid size-8 place-items-center rounded-full transition-colors ${regionTool === t ? 'bg-ink text-on-ink' : 'text-ink-2 hover:bg-fg/[0.06] hover:text-ink'}`}
+              >
+                <Icon className="size-4" strokeWidth={1.75} />
+              </button>
+            ))}
+          </div>
+        )}
+        <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
+          <span className="w-[92px] shrink-0" title="Граница области: жёсткая — прямые края без перехода, мягкая — плавный переход">Край</span>
+          <input
+            type="range" min={0} max={1} step={0.05} value={regionHardness}
+            onChange={(e) => onRegionHardness(Number(e.target.value))}
+            className="range w-full"
+            style={{ '--fill': `${regionHardness * 100}%` } as React.CSSProperties}
+            aria-label="Жёсткость края области"
+          />
+          <span className="w-14 shrink-0 text-right text-ink-2">{regionHardness > 0.8 ? 'жёсткий' : regionHardness < 0.3 ? 'мягкий' : 'средний'}</span>
+        </label>
+        {regionMode && regionTool === 'brush' && (
           <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
             <span className="w-[92px] shrink-0">Кисть</span>
             <input
