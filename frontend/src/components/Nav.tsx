@@ -25,7 +25,7 @@ export function Nav({ tab, onChange, inpaintBadge }: Props) {
   return (
     <header className="glass-nav sticky top-0 z-50 border-b border-fg/[0.06]">
       {/* на телефоне вкладки — второй строкой: в одну строку с моделью, сценой и аккаунтом не помещаются */}
-      <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-y-2 px-5 py-2 sm:h-14 sm:flex-nowrap sm:px-8 sm:py-0">
+      <div className="mx-auto flex max-w-[1880px] flex-wrap items-center justify-between gap-y-2 px-5 py-2 sm:h-14 sm:flex-nowrap sm:px-8 sm:py-0">
         <a href="#/img2img" className="group flex items-center gap-2.5" aria-label="INEGO.dev">
           <Logo />
           <span className="hidden text-[17px] font-semibold tracking-[-0.02em] sm:inline">

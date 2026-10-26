@@ -155,7 +155,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
   const materialsMode = section === 'materials'
 
   return (
-    <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
+    <div className="mx-auto max-w-[1880px] px-5 pb-24 sm:px-8">
       {/* Hero */}
       <section className="pb-10 pt-12 text-center sm:pb-12 sm:pt-16">
         <motion.p
@@ -236,11 +236,11 @@ export function ImgToImg({ onSendToInpaint }: Props) {
       {/* Workspace */}
       <motion.section
         initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.3 }}
-        className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-6"
+        className="flex flex-col gap-5 lg:gap-6"
       >
         {/* Canvas */}
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="relative h-[400px] sm:h-auto overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/10] sm:min-h-0">
+          <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[calc(100dvh-7rem)] sm:min-h-[520px]">
             <AnimatePresence mode="wait" initial={false}>
               {!source ? (
                 <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
@@ -357,6 +357,126 @@ export function ImgToImg({ onSendToInpaint }: Props) {
             )}
           </AnimatePresence>
 
+        </div>
+
+        {/* Control panel */}
+        {/* Настройки — под кадром: свет | что сохранить и сила | запуск */}
+        <section className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(240px,0.7fr)] lg:gap-8">
+          <div>
+            <Step n={1} title="Освещение" hint="Выберите сценарий света" />
+            <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              {presetsFor(scene).map((p) => (
+                <PresetCard key={`${scene}-${p.id}`} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
+              ))}
+              <PresetCard preset={CUSTOM_PRESET} selected={preset === 'custom'} onSelect={() => setPreset('custom')} disabled={running} wide />
+            </div>
+
+            <AnimatePresence initial={false}>
+              {preset === 'custom' && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                  transition={spring} className="overflow-hidden"
+                >
+                  <div className="pt-3">
+                    {reference ? (
+                      <div className="flex items-center gap-3 rounded-2xl bg-canvas p-2 pr-3">
+                        <img src={reference.url} alt="" className="size-12 rounded-xl object-cover" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium">{reference.name}</div>
+                          <div className="text-[12px] text-faint">Референс света</div>
+                        </div>
+                        <IconButton label="Убрать референс" onClick={() => setReference(null)} plain>
+                          <X className="size-4" />
+                        </IconButton>
+                      </div>
+                    ) : (
+                      <Dropzone compact onFile={async (f) => setReference(await toStudioImage(f))} title="Загрузить референс" hint="Фото с нужным настроением света" />
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+          </div>
+
+          <div>
+            <div className="divide-y divide-line overflow-hidden rounded-2xl bg-canvas">
+              <KeepToggle
+                title="Сохранить небо"
+                hint={keepSky ? 'Те же облака, свет и цвет — по референсу' : 'Небо — по референсу'}
+                checked={keepSky} onChange={setKeepSky} disabled={running}
+              />
+              <KeepToggle
+                title="Сохранить фон"
+                hint={keepBg ? 'Та же застройка позади, свет и цвет — по референсу' : 'Фон — по референсу'}
+                checked={keepBg} onChange={setKeepBg} disabled={running}
+              />
+              <KeepToggle
+                title="Сохранить окружение"
+                hint={keepSur ? 'Те же дороги, озеленение и машины, свет — по референсу' : 'Окружение — по референсу'}
+                checked={keepSur} onChange={setKeepSur} disabled={running}
+              />
+            </div>
+
+            <div className="my-5 h-px bg-line" />
+
+            <Step n={2} title="Сила эффекта" hint={fixedStrength ? 'На Qwen не регулируется — всегда полный нейрорендер' : 'Насколько сильно менять сцену'} />
+            <div className={`mt-4 ${fixedStrength ? 'opacity-50' : ''}`}>
+              <div className="mb-3 flex items-baseline justify-between">
+                <span className="text-[13px] text-mute">{fixedStrength ? 'Полный рендер' : strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
+                <span className="text-[15px] font-semibold tabular-nums">{fixedStrength ? '100' : Math.round(strength * 100)}%</span>
+              </div>
+              <input
+                type="range" min={0.1} max={1} step={0.01} value={fixedStrength ? 1 : strength} disabled={running || fixedStrength}
+                onChange={(e) => setStrength(Number(e.target.value))}
+                className="range w-full"
+                style={{ '--fill': `${fixedStrength ? 100 : ((strength - 0.1) / 0.9) * 100}%` } as React.CSSProperties}
+              />
+            </div>
+
+          </div>
+
+          <div className="flex flex-col justify-center">
+            <motion.button
+              whileTap={canGenerate ? { scale: 0.98 } : undefined}
+              onClick={generate}
+              disabled={!canGenerate}
+              className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-fg/[0.08] disabled:text-faint"
+            >
+              {running ? (
+                <>
+                  <RefreshCw className="size-[18px] animate-spin" /> Рендерим…
+                </>
+              ) : result ? (
+                <>
+                  <RotateCcw className="size-[18px]" /> Сгенерировать заново
+                </>
+              ) : (
+                <>
+                  <Sparkles className="size-[18px]" /> Сгенерировать
+                </>
+              )}
+            </motion.button>
+            <p className="mt-3 text-center text-[12px] text-faint">
+              {!source
+                ? 'Сначала загрузите изображение'
+                : preset === 'custom' && !reference
+                  ? 'Добавьте референс для своего пресета'
+                  : `${fallback ? `${modelById(chosen).name} — только Inpainting, рендер на ` : ''}${activeModel.name} · ${activeModel.time} · ${fmt(activeModel.cost)} ток.`}
+            </p>
+
+            <AnimatePresence>
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-[13px] text-danger">
+                  {error}
+                </motion.p>
+              )}
+            </AnimatePresence>
+          </div>
+          </div>
+        </section>
+
           {/* Seed + prompt hint */}
           <div className="overflow-hidden rounded-[22px] bg-surface shadow-card ring-1 ring-fg/[0.04]">
             <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-6 sm:pl-5">
@@ -449,118 +569,6 @@ export function ImgToImg({ onSendToInpaint }: Props) {
               />
             </div>
           </div>
-        </div>
-
-        {/* Control panel */}
-        <aside className="lg:sticky lg:top-20 lg:self-start">
-          <div className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
-            <Step n={1} title="Освещение" hint="Выберите сценарий света" />
-            <div className="mt-4 grid grid-cols-2 gap-2.5">
-              {presetsFor(scene).map((p) => (
-                <PresetCard key={`${scene}-${p.id}`} preset={p} selected={preset === p.id} onSelect={() => setPreset(p.id)} disabled={running} />
-              ))}
-              <PresetCard preset={CUSTOM_PRESET} selected={preset === 'custom'} onSelect={() => setPreset('custom')} disabled={running} wide />
-            </div>
-
-            <AnimatePresence initial={false}>
-              {preset === 'custom' && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-                  transition={spring} className="overflow-hidden"
-                >
-                  <div className="pt-3">
-                    {reference ? (
-                      <div className="flex items-center gap-3 rounded-2xl bg-canvas p-2 pr-3">
-                        <img src={reference.url} alt="" className="size-12 rounded-xl object-cover" />
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-[13px] font-medium">{reference.name}</div>
-                          <div className="text-[12px] text-faint">Референс света</div>
-                        </div>
-                        <IconButton label="Убрать референс" onClick={() => setReference(null)} plain>
-                          <X className="size-4" />
-                        </IconButton>
-                      </div>
-                    ) : (
-                      <Dropzone compact onFile={async (f) => setReference(await toStudioImage(f))} title="Загрузить референс" hint="Фото с нужным настроением света" />
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <div className="mt-3 divide-y divide-line overflow-hidden rounded-2xl bg-canvas">
-              <KeepToggle
-                title="Сохранить небо"
-                hint={keepSky ? 'Те же облака, свет и цвет — по референсу' : 'Небо — по референсу'}
-                checked={keepSky} onChange={setKeepSky} disabled={running}
-              />
-              <KeepToggle
-                title="Сохранить фон"
-                hint={keepBg ? 'Та же застройка позади, свет и цвет — по референсу' : 'Фон — по референсу'}
-                checked={keepBg} onChange={setKeepBg} disabled={running}
-              />
-              <KeepToggle
-                title="Сохранить окружение"
-                hint={keepSur ? 'Те же дороги, озеленение и машины, свет — по референсу' : 'Окружение — по референсу'}
-                checked={keepSur} onChange={setKeepSur} disabled={running}
-              />
-            </div>
-
-            <div className="my-6 h-px bg-line" />
-
-            <Step n={2} title="Сила эффекта" hint={fixedStrength ? 'На Qwen не регулируется — всегда полный нейрорендер' : 'Насколько сильно менять сцену'} />
-            <div className={`mt-4 ${fixedStrength ? 'opacity-50' : ''}`}>
-              <div className="mb-3 flex items-baseline justify-between">
-                <span className="text-[13px] text-mute">{fixedStrength ? 'Полный рендер' : strength < 0.4 ? 'Деликатно' : strength < 0.75 ? 'Сбалансированно' : 'Выразительно'}</span>
-                <span className="text-[15px] font-semibold tabular-nums">{fixedStrength ? '100' : Math.round(strength * 100)}%</span>
-              </div>
-              <input
-                type="range" min={0.1} max={1} step={0.01} value={fixedStrength ? 1 : strength} disabled={running || fixedStrength}
-                onChange={(e) => setStrength(Number(e.target.value))}
-                className="range w-full"
-                style={{ '--fill': `${fixedStrength ? 100 : ((strength - 0.1) / 0.9) * 100}%` } as React.CSSProperties}
-              />
-            </div>
-
-            <div className="my-6 h-px bg-line" />
-
-            <motion.button
-              whileTap={canGenerate ? { scale: 0.98 } : undefined}
-              onClick={generate}
-              disabled={!canGenerate}
-              className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-fg/[0.08] disabled:text-faint"
-            >
-              {running ? (
-                <>
-                  <RefreshCw className="size-[18px] animate-spin" /> Рендерим…
-                </>
-              ) : result ? (
-                <>
-                  <RotateCcw className="size-[18px]" /> Сгенерировать заново
-                </>
-              ) : (
-                <>
-                  <Sparkles className="size-[18px]" /> Сгенерировать
-                </>
-              )}
-            </motion.button>
-            <p className="mt-3 text-center text-[12px] text-faint">
-              {!source
-                ? 'Сначала загрузите изображение'
-                : preset === 'custom' && !reference
-                  ? 'Добавьте референс для своего пресета'
-                  : `${fallback ? `${modelById(chosen).name} — только Inpainting, рендер на ` : ''}${activeModel.name} · ${activeModel.time} · ${fmt(activeModel.cost)} ток.`}
-            </p>
-
-            <AnimatePresence>
-              {error && (
-                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-[13px] text-danger">
-                  {error}
-                </motion.p>
-              )}
-            </AnimatePresence>
-          </div>
-        </aside>
       </motion.section>
       </div>
     </div>

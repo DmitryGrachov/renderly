@@ -35,7 +35,7 @@ export function RenderPass() {
   }
 
   return (
-    <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
+    <div className="mx-auto max-w-[1880px] px-5 pb-24 sm:px-8">
       <section className="pb-10 pt-12 text-center sm:pb-12 sm:pt-16">
         <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={spring} className="text-[15px] font-semibold text-gradient sm:text-[17px]">
           Render Pass
@@ -148,10 +148,10 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
   const hovered = byId.get(hover)
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
       <div className="relative overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04]">
         <div
-          className={`relative ${map ? 'cursor-crosshair' : ''}`}
+          className={`relative mx-auto w-fit max-w-full ${map ? 'cursor-crosshair' : ''}`}
           onMouseMove={(e) => {
             const r = e.currentTarget.getBoundingClientRect()
             setHover(idAt(e))
@@ -160,7 +160,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
           onMouseLeave={() => { setHover(0); setTip(null) }}
           onClick={(e) => { const id = idAt(e); if (id) toggle(id) }}
         >
-          <img src={showSchema && map ? map.schema : image.url} alt={image.name} className="block w-full select-none" draggable={false} />
+          <img src={showSchema && map ? map.schema : image.url} alt={image.name} className="block max-h-[calc(100dvh-7rem)] w-auto max-w-full select-none" draggable={false} />
           {map && <canvas ref={canvas} className="pointer-events-none absolute inset-0 size-full" />}
           {hovered && tip && (
             <div

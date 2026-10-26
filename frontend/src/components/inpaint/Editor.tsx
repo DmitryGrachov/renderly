@@ -945,7 +945,7 @@ export function Editor({ image, onClose }: Props) {
     <div className="flex flex-col gap-4">
       <div
         ref={stageRef}
-        className={`checker relative h-[min(78vh,760px)] min-h-[480px] touch-none select-none overflow-hidden rounded-[28px] shadow-card ring-1 ring-fg/[0.04] ${
+        className={`checker relative h-[calc(100dvh-7rem)] min-h-[480px] touch-none select-none overflow-hidden rounded-[28px] shadow-card ring-1 ring-fg/[0.04] ${
           panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : ''
         }`}
         {...panHandlers}

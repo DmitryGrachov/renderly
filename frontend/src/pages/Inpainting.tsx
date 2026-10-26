@@ -14,7 +14,7 @@ const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
 export function Inpainting({ image, onImage, onBack }: Props) {
   return (
-    <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
+    <div className="mx-auto max-w-[1880px] px-5 pb-24 sm:px-8">
       <section className="pb-10 pt-12 text-center sm:pb-12 sm:pt-16">
         <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={spring} className="text-[15px] font-semibold text-gradient sm:text-[17px]">
           Inpainting
@@ -50,7 +50,7 @@ export function Inpainting({ image, onImage, onBack }: Props) {
         {image ? (
           <Editor key={image.url} image={image} onClose={() => onImage(null)} />
         ) : (
-          <div className="relative h-[400px] sm:h-auto overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/9] sm:min-h-0">
+          <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[calc(100dvh-7rem)] sm:min-h-[520px]">
             <Dropzone onFile={async (f) => onImage(await toStudioImage(f))} listenPaste />
             <button
               onClick={onBack}

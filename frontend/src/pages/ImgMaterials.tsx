@@ -382,7 +382,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     >
       {/* Canvas */}
       <div className="flex min-w-0 flex-col gap-4">
-        <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[min(74vh,760px)] sm:min-h-[480px]">
+        <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[calc(100dvh-7rem)] sm:min-h-[520px]">
           <AnimatePresence mode="wait" initial={false}>
             {!source ? (
               <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>

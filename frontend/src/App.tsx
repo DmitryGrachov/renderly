@@ -83,7 +83,7 @@ function Studio() {
       </main>
 
       <footer className="border-t border-fg/[0.06]">
-        <div className="mx-auto flex max-w-[1280px] px-5 py-8 text-[12px] text-faint sm:px-8">
+        <div className="mx-auto flex max-w-[1880px] px-5 py-8 text-[12px] text-faint sm:px-8">
           <span>© {new Date().getFullYear()} INEGO.dev — AI-инструменты для архитектурной визуализации</span>
         </div>
       </footer>
