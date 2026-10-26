@@ -52,7 +52,7 @@ export function RenderPass() {
 
       <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.12 }}>
         {!image ? (
-          <div className="relative h-[400px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/9] sm:h-auto">
+          <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[calc(100dvh-7rem)] sm:min-h-[520px]">
             <Dropzone onFile={start} listenPaste />
           </div>
         ) : (
@@ -148,8 +148,8 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
   const hovered = byId.get(hover)
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="relative overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04]">
+    <div className="flex flex-col gap-5 lg:gap-6">
+      <div className="checker relative flex h-[420px] items-center justify-center overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[calc(100dvh-7rem)] sm:min-h-[520px]">
         <div
           className={`relative mx-auto w-fit max-w-full ${map ? 'cursor-crosshair' : ''}`}
           onMouseMove={(e) => {
@@ -160,7 +160,7 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
           onMouseLeave={() => { setHover(0); setTip(null) }}
           onClick={(e) => { const id = idAt(e); if (id) toggle(id) }}
         >
-          <img src={showSchema && map ? map.schema : image.url} alt={image.name} className="block max-h-[calc(100dvh-7rem)] w-auto max-w-full select-none" draggable={false} />
+          <img src={showSchema && map ? map.schema : image.url} alt={image.name} className="block max-h-[420px] w-auto max-w-full select-none sm:max-h-[max(calc(100dvh-7rem),520px)]" draggable={false} />
           {map && <canvas ref={canvas} className="pointer-events-none absolute inset-0 size-full" />}
           {hovered && tip && (
             <div
@@ -198,10 +198,13 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
         </button>
       </div>
 
-      <aside className="h-fit rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] lg:sticky lg:top-20">
-        <div className="flex items-center justify-between">
+      <section className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <div className="text-[17px] font-semibold tracking-[-0.02em]">Маски{map ? ` · ${map.groups.length}` : ''}</div>
-          <div className="flex gap-1">
+          <p className="text-[13px] text-mute">
+            {selected.size ? `Выбрано: ${selected.size}` : 'Наведите на кадр — клик выбирает маску'}
+          </p>
+          <div className="ml-auto flex items-center gap-1">
             {map && (
               <button
                 onClick={() => setShowSchema((v) => !v)}
@@ -226,15 +229,22 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
             >
               <RotateCcw className="size-4" />
             </button>
+            {map && (
+              <button
+                onClick={download}
+                disabled={!selected.size}
+                className="ml-2 flex items-center justify-center gap-2 rounded-full bg-ink px-4 py-2 text-[13px] font-medium text-on-ink transition-opacity disabled:opacity-30"
+              >
+                <Download className="size-4" /> Скачать маску
+              </button>
+            )}
           </div>
         </div>
-        <p className="mt-1 text-[13px] text-mute">
-          {selected.size ? `Выбрано: ${selected.size}` : 'Наведите на кадр — клик выбирает маску'}
-        </p>
 
         {map && (
           <>
-            <ul className="mt-4 max-h-[52vh] space-y-0.5 overflow-y-auto pr-1">
+            {/* маски — сеткой во всю ширину: как панель слоёв, только снизу */}
+            <ul className="mt-4 grid max-h-[40vh] gap-x-2 gap-y-0.5 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">
               {map.groups.map((g) => (
                 <GroupRow
                   key={g.id}
@@ -246,16 +256,9 @@ function Viewer({ image, map, error, onReset, onRetry }: ViewerProps) {
                 />
               ))}
             </ul>
-            <button
-              onClick={download}
-              disabled={!selected.size}
-              className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-ink px-4 py-2 text-[13px] font-medium text-on-ink transition-opacity disabled:opacity-30"
-            >
-              <Download className="size-4" /> Скачать маску
-            </button>
           </>
         )}
-      </aside>
+      </section>
     </div>
   )
 }
