@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Brush, Check, Download, Eraser, SunMedium, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Brush, Check, Download, Eraser, Eye, EyeOff, SunMedium, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
@@ -74,6 +74,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [brushing, setBrushing] = useState(false)
   const [brushSize, setBrushSize] = useState(80)
   const [brushTool, setBrushTool] = useState<DrawTool>('brush')
+  // «Показать прошлый»: кадр до материала целиком, закрашенное подсвечено — вести границы по нему
+  const [peekPrev, setPeekPrev] = useState(false)
   const [brushShape, setBrushShape] = useState<Shape>('circle')
   const [hardness, setHardness] = useState(HARDNESS_DEFAULT)
   const [undoable, setUndoable] = useState(0)
@@ -114,6 +116,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
       if (e.ctrlKey || e.metaKey) return
       const tools: Record<string, DrawTool> = { KeyB: 'brush', KeyU: 'rect', KeyP: 'poly' }
       if (tools[e.code]) { setBrushTool(tools[e.code]); return }
+      if (e.code === 'KeyV') { setPeekPrev((v) => !v); return }
       if (e.code === 'BracketLeft') { setBrushSize((v) => Math.max(10, v - 8)); return }
       if (e.code === 'BracketRight') { setBrushSize((v) => Math.min(300, v + 8)); return }
       const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key]
@@ -343,7 +346,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       brushing ? (
                         <RestoreBrush
                           ref={brush} before={source.url} after={raw ?? result.url} initialMask={brushMask} imageStyle={imageStyle} size={brushSize}
-                          onHistory={setUndoable} offset={nudge} tool={brushTool} shape={brushShape} hardness={hardness}
+                          onHistory={setUndoable} offset={nudge} tool={brushTool} shape={brushShape} hardness={hardness} peek={peekPrev}
                         />
                       ) : colorOpen ? (
                         <>
@@ -406,6 +409,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                     hardness={hardness} onHardness={setHardness}
                     undoable={undoable} onUndo={() => brush.current?.undo()} onClear={() => brush.current?.clear()}
                     nudge={nudge} onResetNudge={() => setNudge({ x: 0, y: 0 })}
+                    peek={peekPrev} onPeek={setPeekPrev}
                     onClose={() => setBrushing(false)} onApply={applyBrush}
                   />
                 )}
@@ -634,6 +638,7 @@ function SizeSlider({ value, onChange, disabled }: { value: number; onChange: (v
 /** Кисть отката на кадре: инструменты слева, тонкие настройки снизу, действия сверху — как в Inpainting. */
 function BrushOverlay({
   tool, onTool, shape, onShape, size, onSize, hardness, onHardness, undoable, onUndo, onClear, nudge, onResetNudge, onClose, onApply,
+  peek, onPeek,
 }: {
   tool: DrawTool
   onTool: (t: DrawTool) => void
@@ -650,6 +655,8 @@ function BrushOverlay({
   onResetNudge: () => void
   onClose: () => void
   onApply: () => void
+  peek: boolean
+  onPeek: (v: boolean) => void
 }) {
   const tools: { id: DrawTool; icon: typeof Brush; label: string; key: string }[] = [
     { id: 'brush', icon: Brush, label: 'Кисть — Shift+клик: прямая от конца мазка, Shift в мазке: по горизонтали / вертикали', key: 'B' },
@@ -670,6 +677,13 @@ function BrushOverlay({
               </button>
             )}
           </span>
+          <button
+            onClick={() => onPeek(!peek)}
+            title="Показать кадр до материала целиком и вести границы по нему (V)"
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition-colors ${peek ? 'bg-[#f59e0b] text-white' : 'text-ink-2 hover:bg-fg/[0.06] hover:text-ink'}`}
+          >
+            {peek ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} Прошлый
+          </button>
           <button onClick={onClose} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink">
             Закрыть
           </button>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Check, Columns2, Download, Eye, History, SunMedium, X } from 'lucide-react'
+import { ArrowRight, Brush, Check, Columns2, Download, Eye, EyeOff, History, Pentagon, SquareDashed, SunMedium, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
@@ -381,7 +381,15 @@ export function Editor({ image, onClose }: Props) {
       if (!img) return
       c.globalCompositeOperation = 'source-over'
       c.filter = 'none'
-      c.drawImage(img, 0, 0, maskW, maskH)
+      // «Показать прошлый»: под холстом уже прошлая версия целиком — закрашенное только подсвечивается
+      if (restorePeekRef.current) {
+        c.globalAlpha = 0.4
+        c.fillStyle = '#f59e0b'
+        c.fillRect(0, 0, maskW, maskH)
+        c.globalAlpha = 1
+      } else {
+        c.drawImage(img, 0, 0, maskW, maskH)
+      }
       c.globalCompositeOperation = 'destination-in'
       c.filter = `blur(${restoreFeather()}px)`
       c.drawImage(restoreRef.current, 0, 0)
@@ -389,6 +397,16 @@ export function Editor({ image, onClose }: Props) {
       c.globalCompositeOperation = 'source-over'
     })
   }
+
+  // «Показать прошлый» у кисти отката: прошлая версия целиком, закрашенное подсвечено — вести границы по ней
+  const [restorePeek, setRestorePeek] = useState(false)
+  // кисть отката рисует кистью, прямоугольником или многоугольником — прямые границы по прошлой версии
+  const [restoreShape, setRestoreShape] = useState<DrawTool>('brush')
+  useEffect(() => { setPoly([]); setRubber(null) }, [restoreShape])
+  const restorePeekRef = useRef(restorePeek)
+  restorePeekRef.current = restorePeek
+  const peekPrev = restorePeek && tool === 'restore' && current > 0
+  useEffect(() => { drawPreview() }, [restorePeek]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const restoreHasStrokes = () => {
     const d = restoreCtx().getImageData(0, 0, maskW, maskH).data
@@ -621,12 +639,34 @@ export function Editor({ image, onClose }: Props) {
     el.style.transform = `translate(${e.clientX - r.left - size / 2}px, ${e.clientY - r.top - size / 2}px)`
   }
 
-  /** многоугольник → маска: заливка цветом режима, точки сбрасываются */
+  // фигура (прямоугольник / многоугольник): инструменты маски — или кисть отката в режиме фигуры
+  const drawShape: 'rect' | 'poly' | null =
+    tool === 'rect' || tool === 'poly' ? tool : tool === 'restore' && restoreShape !== 'brush' ? restoreShape : null
+
+  const pushRestoreUndo = () => {
+    restoreUndo.current.push(restoreCtx().getImageData(0, 0, maskW, maskH))
+    if (restoreUndo.current.length > UNDO_LIMIT) restoreUndo.current.shift()
+    restoreRedo.current = []
+  }
+
+  /** фигура → маска правки (цвет режима) или мазки отката */
+  const fillShape = (pts: Pt[]) => {
+    if (tool === 'restore') fillPolygon(restoreCtx(), pts, '#fff')
+    else fillPolygon(ctx(), pts, MODE_COLOR[mode])
+  }
+
+  /** многоугольник → маска или откат, точки сбрасываются */
   const closePoly = (pts = poly) => {
     if (pts.length >= 3) {
-      pushUndo()
-      fillPolygon(ctx(), pts, MODE_COLOR[mode])
-      setBbox(computeBox())
+      if (tool === 'restore') {
+        pushRestoreUndo()
+        fillShape(pts)
+        syncRestore()
+      } else {
+        pushUndo()
+        fillShape(pts)
+        setBbox(computeBox())
+      }
     }
     setPoly([])
     setRubber(null)
@@ -634,7 +674,7 @@ export function Editor({ image, onClose }: Props) {
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (busy || e.button !== 0 || panTool) return
-    if (tool === 'poly') {
+    if (drawShape === 'poly') {
       setError(null)
       const p = toMask(e)
       // двойной клик или клик в первую точку — замкнуть
@@ -653,13 +693,8 @@ export function Editor({ image, onClose }: Props) {
       return
     }
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* синтетические события */ }
-    if (tool === 'restore') {
-      restoreUndo.current.push(restoreCtx().getImageData(0, 0, maskW, maskH))
-      if (restoreUndo.current.length > UNDO_LIMIT) restoreUndo.current.shift()
-      restoreRedo.current = []
-    } else {
-      pushUndo()
-    }
+    if (tool === 'restore') pushRestoreUndo()
+    else pushUndo()
     drawingRef.current = true
     setDrawing(true)
     setError(null)
@@ -667,7 +702,7 @@ export function Editor({ image, onClose }: Props) {
     if (tool === 'lasso') {
       lassoPts.current = [p]
       setLasso([p])
-    } else if (tool === 'rect') {
+    } else if (drawShape === 'rect') {
       rectStart.current = p
       setLasso(rectPoints(p, p))
     } else {
@@ -687,13 +722,13 @@ export function Editor({ image, onClose }: Props) {
       if (id !== hoverId) setHoverId(id)
       return
     }
-    if (tool === 'poly') {
+    if (drawShape === 'poly') {
       if (poly.length && !busy && !panTool) setRubber(toMask(e))
       return
     }
     if (!drawingRef.current) return
     let p = toMask(e)
-    if (tool === 'rect' && rectStart.current) {
+    if (drawShape === 'rect' && rectStart.current) {
       const a = rectStart.current
       if (e.shiftKey) {
         // Shift — квадрат
@@ -742,10 +777,12 @@ export function Editor({ image, onClose }: Props) {
       }
       lassoPts.current = []
       setLasso([])
-    } else if (tool === 'rect') {
+    } else if (drawShape === 'rect') {
       const pts = lasso
       if (pts.length === 4 && Math.abs(pts[2].x - pts[0].x) > 2 * k && Math.abs(pts[2].y - pts[0].y) > 2 * k) {
-        fillPolygon(ctx(), pts, MODE_COLOR[mode])
+        fillShape(pts)
+      } else if (tool === 'restore') {
+        restoreUndo.current.pop()
       } else {
         undoStack.current.pop()
         syncHist()
@@ -831,15 +868,16 @@ export function Editor({ image, onClose }: Props) {
   const clearCurrent = () => (tool === 'restore' ? clearRestore() : clearMask())
   // многоугольник в работе: Enter — замкнуть, Backspace — убрать точку, Esc — отменить (а не очистить маску)
   const polyKey = (key: string) => {
-    if (tool !== 'poly' || !poly.length) return false
+    if (drawShape !== 'poly' || !poly.length) return false
     if (key === 'Enter') closePoly()
     else if (key === 'Backspace') setPoly((ps) => ps.slice(0, -1))
     else if (key === 'Escape') { setPoly([]); setRubber(null) }
     else return false
     return true
   }
-  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool, polyKey })
-  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool, polyKey }
+  const togglePeek = () => { if (tool === 'restore') setRestorePeek((v) => !v) }
+  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek })
+  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -854,6 +892,7 @@ export function Editor({ image, onClose }: Props) {
       if (e.code === 'KeyL') h.chooseTool('lasso')
       else if (e.code === 'KeyP') h.chooseTool('poly')
       else if (e.code === 'KeyU') h.chooseTool('rect')
+      else if (e.code === 'KeyV') h.togglePeek()
       else if (e.code === 'KeyB') h.chooseTool('brush')
       else if (e.code === 'KeyE') h.chooseTool('eraser')
       else if (e.code === 'KeyH') h.chooseTool('hand')
@@ -894,8 +933,9 @@ export function Editor({ image, onClose }: Props) {
     pop = { x: Math.min(Math.max(bx + bw / 2, minX), maxX), y, placement }
   }
 
-  const shown = peek && current > 0 ? versions[current - 1] : versions[current]
+  const shown = (peek || peekPrev) && current > 0 ? versions[current - 1] : versions[current]
   const brushLike = (tool === 'brush' || tool === 'eraser' || tool === 'restore') && !spaceHeld && !compare
+  const brushRing = brushLike && !drawShape
   const color = MODE_COLOR[mode]
 
   return (
@@ -1010,7 +1050,7 @@ export function Editor({ image, onClose }: Props) {
           <div
             ref={surfaceRef}
             className={`absolute inset-0 touch-none ${
-              panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : busy ? 'cursor-wait' : brushLike ? 'cursor-none' : tool === 'pick' ? (hoverId ? 'cursor-pointer' : 'cursor-default') : 'cursor-crosshair'
+              panning ? 'cursor-grabbing' : panTool ? 'cursor-grab' : busy ? 'cursor-wait' : brushRing ? 'cursor-none' : tool === 'pick' ? (hoverId ? 'cursor-pointer' : 'cursor-default') : 'cursor-crosshair'
             }`}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
@@ -1019,7 +1059,7 @@ export function Editor({ image, onClose }: Props) {
             onPointerEnter={() => cursorRef.current && (cursorRef.current.style.opacity = '1')}
             onPointerLeave={() => { if (cursorRef.current) cursorRef.current.style.opacity = '0'; setHoverId(0) }}
           >
-            {brushLike && !busy && (
+            {brushRing && !busy && (
               <div
                 ref={cursorRef}
                 className={`pointer-events-none absolute left-0 top-0 opacity-0 transition-[width,height,border-radius] duration-150 ${shape === 'circle' ? 'rounded-full' : 'rounded-[3px]'}`}
@@ -1185,6 +1225,33 @@ export function Editor({ image, onClose }: Props) {
             >
               <div className="flex flex-col items-center gap-2">
                 {editedRestore && !restoreDirty && <RestoreEdge value={edgeDraft ?? editedRestore.hardness} onChange={changeRestoreEdge} />}
+                {tool === 'restore' && (
+                  <button
+                    onClick={() => setRestorePeek((v) => !v)}
+                    title="Показать прошлую версию целиком и вести границы по ней (V)"
+                    className={`glass flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[12.5px] font-medium shadow-float ring-1 ring-fg/5 transition-colors ${restorePeek ? 'bg-[#f59e0b] text-white' : 'text-ink-2 hover:text-ink'}`}
+                  >
+                    {restorePeek ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} Прошлый «{versions[current - 1]?.label}»
+                  </button>
+                )}
+                {tool === 'restore' && (
+                  <div className="glass flex items-center gap-0.5 rounded-full p-1 shadow-float ring-1 ring-fg/5">
+                    {([
+                      ['brush', Brush, 'Кисть отката'],
+                      ['rect', SquareDashed, 'Откат прямоугольником — протяните; Shift — квадрат'],
+                      ['poly', Pentagon, 'Откат многоугольником — точки кликами; Enter или клик в первую точку'],
+                    ] as const).map(([t, Icon, title]) => (
+                      <button
+                        key={t}
+                        onClick={() => setRestoreShape(t)}
+                        title={title}
+                        className={`grid size-8 place-items-center rounded-full transition-colors ${restoreShape === t ? 'bg-ink text-on-ink' : 'text-ink-2 hover:bg-fg/[0.06] hover:text-ink'}`}
+                      >
+                        <Icon className="size-4" strokeWidth={1.75} />
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {tool === 'restore' && restoreDirty && (
                   <div className="glass flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
                     <span className="flex items-center gap-1.5 pl-2.5 pr-1 text-[12.5px] text-ink-2">

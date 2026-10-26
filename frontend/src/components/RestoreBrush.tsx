@@ -33,6 +33,8 @@ interface Props {
   hardness?: number
   /** маска прошлого отката по этому результату — открыть его снова */
   initialMask?: HTMLCanvasElement | null
+  /** показать прежний кадр целиком, закрашенное — подсветкой: вести границы по нему (рисовать можно) */
+  peek?: boolean
 }
 
 const HISTORY = 15 // снимков маски для отмены: кадр ~2 Мп — 8 МБ на снимок
@@ -41,6 +43,7 @@ const HISTORY = 15 // снимков маски для отмены: кадр ~2
 const FEATHER = 0.012
 const POLY_CLOSE = 10 // многоугольник замыкается кликом не дальше стольких экранных px от первой точки
 const MASK = 'rgba(0,0,0,1)'
+const PEEK_TINT = '#f59e0b' // «Показать прошлый»: чем подсвечено закрашенное
 
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -57,7 +60,7 @@ function loadImage(src: string) {
  *  Прямоугольник — протянуть (Shift — квадрат). Многоугольник — точки кликами; Enter, двойной клик или клик в первую
  *  точку замыкают, Backspace убирает точку, Esc отменяет. */
 export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function RestoreBrush(
-  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 }, tool = 'brush', shape = 'circle', hardness = 0.55, initialMask },
+  { before, after, imageStyle, size, onHistory, offset = { x: 0, y: 0 }, tool = 'brush', shape = 'circle', hardness = 0.55, initialMask, peek = false },
   ref,
 ) {
   const view = useRef<HTMLCanvasElement>(null)
@@ -79,7 +82,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
   const shift = useRef(offset)
   shift.current = offset
 
-  useEffect(() => { render() }, [offset.x, offset.y, hardness]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { render() }, [offset.x, offset.y, hardness, peek]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true
@@ -104,16 +107,32 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [before, after])
 
-  function render() {
+  /** peekView — прежний кадр целиком и закрашенное подсветкой (только для глаз; в итог всегда идёт обычный вид) */
+  function render(peekView = peek) {
     const l = layers.current
     const ctx = view.current?.getContext('2d')
     if (!l || !ctx) return
-    // прежний кадр, вырезанный маской, поверх результата
     const t = l.tmp.getContext('2d')!
+    const blur = (1 - hardness) * FEATHER * Math.max(l.mask.width, l.mask.height)
+    if (peekView) {
+      ctx.drawImage(l.after, 0, 0)
+      ctx.drawImage(l.before, shift.current.x, shift.current.y)
+      t.globalCompositeOperation = 'copy'
+      t.fillStyle = PEEK_TINT
+      t.fillRect(0, 0, l.tmp.width, l.tmp.height)
+      t.globalCompositeOperation = 'destination-in'
+      t.filter = blur > 0.5 ? `blur(${blur}px)` : 'none'
+      t.drawImage(l.mask, 0, 0)
+      t.filter = 'none'
+      ctx.globalAlpha = 0.4
+      ctx.drawImage(l.tmp, 0, 0)
+      ctx.globalAlpha = 1
+      return
+    }
+    // прежний кадр, вырезанный маской, поверх результата
     t.globalCompositeOperation = 'copy'
     t.drawImage(l.before, shift.current.x, shift.current.y)
     t.globalCompositeOperation = 'destination-in'
-    const blur = (1 - hardness) * FEATHER * Math.max(l.mask.width, l.mask.height)
     t.filter = blur > 0.5 ? `blur(${blur}px)` : 'none'
     t.drawImage(l.mask, 0, 0)
     t.filter = 'none'
@@ -123,7 +142,7 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
 
   function schedule() {
     cancelAnimationFrame(frame.current)
-    frame.current = requestAnimationFrame(render)
+    frame.current = requestAnimationFrame(() => render())
   }
 
   /** точка экрана → пиксели кадра и масштаб (холст object-contain внутри своего прямоугольника после transform) */
@@ -209,9 +228,12 @@ export const RestoreBrush = forwardRef<RestoreBrushHandle, Props>(function Resto
       return copy
     },
     toBlob() {
-      render()
+      render(false)
       return new Promise<Blob>((resolve, reject) =>
-        view.current!.toBlob((b) => (b ? resolve(b) : reject(new Error('Не удалось собрать кадр'))), 'image/jpeg', 0.95),
+        view.current!.toBlob((b) => {
+          if (peek) render()
+          b ? resolve(b) : reject(new Error('Не удалось собрать кадр'))
+        }, 'image/jpeg', 0.95),
       )
     },
   }))
