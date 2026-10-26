@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Brush, Check, Columns2, Download, Eye, EyeOff, History, Pentagon, SquareDashed, SunMedium, X } from 'lucide-react'
+import { ArrowRight, Brush, Check, Columns2, Download, Eye, EyeOff, History, Pentagon, SquareDashed, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
@@ -563,6 +563,8 @@ export function Editor({ image, onClose }: Props) {
     if (on && editedColor) setRegionView(await regionParts(editedColor))
   }
 
+  const toggleColor = () => (colorOpen && editedColor ? (setColorOpen(false), setRegionMode(null), setShowRegion(false)) : openColor())
+
   async function chooseRegionMode(m: RegionMode | null) {
     setRegionMode(m)
     if (m && editedColor) {
@@ -876,8 +878,8 @@ export function Editor({ image, onClose }: Props) {
     return true
   }
   const togglePeek = () => { if (tool === 'restore') setRestorePeek((v) => !v) }
-  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek })
-  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek }
+  const handlers = useRef({ undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek, toggleColor })
+  handlers.current = { undo, redo, clearCurrent, setSize, chooseTool, polyKey, togglePeek, toggleColor }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -893,6 +895,7 @@ export function Editor({ image, onClose }: Props) {
       else if (e.code === 'KeyP') h.chooseTool('poly')
       else if (e.code === 'KeyU') h.chooseTool('rect')
       else if (e.code === 'KeyV') h.togglePeek()
+      else if (e.code === 'KeyC') h.toggleColor()
       else if (e.code === 'KeyB') h.chooseTool('brush')
       else if (e.code === 'KeyE') h.chooseTool('eraser')
       else if (e.code === 'KeyH') h.chooseTool('hand')
@@ -1184,6 +1187,9 @@ export function Editor({ image, onClose }: Props) {
             onBuildMasks={buildMasks}
             buildingMasks={buildingMasks}
             disabled={!!busy}
+            onColor={toggleColor}
+            colorActive={colorOpen && !!editedColor}
+            canColor={current > 0}
           />
         </div>
 
@@ -1380,17 +1386,6 @@ export function Editor({ image, onClose }: Props) {
             title="Шторка: исходник и текущая версия"
           >
             <Columns2 className="size-4" /> До / после
-          </button>
-          <button
-            disabled={current === 0 || !!busy}
-            onClick={() => (colorOpen && editedColor ? setColorOpen(false) : openColor())}
-            aria-pressed={colorOpen && !!editedColor}
-            className={`flex flex-1 select-none items-center justify-center gap-2 rounded-full px-4 py-2.5 text-[13.5px] font-medium transition-colors disabled:opacity-40 sm:flex-none ${
-              colorOpen && editedColor ? 'bg-ink text-on-ink hover:bg-ink-hover' : 'bg-fg/[0.05] hover:bg-fg/[0.08] active:bg-fg/[0.12]'
-            }`}
-            title="Яркость, контраст и насыщенность — только там, где эта правка изменила кадр"
-          >
-            <SunMedium className="size-4" /> Цвет
           </button>
           <button
             onClick={download}

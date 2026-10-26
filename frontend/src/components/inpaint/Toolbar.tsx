@@ -1,5 +1,5 @@
 import { motion } from 'motion/react'
-import { Brush, Eraser, Hand, History, Lasso, Loader2, MousePointerClick, Pentagon, Redo2, Shapes, SquareDashed, Trash2, Undo2 } from 'lucide-react'
+import { Brush, Eraser, Hand, History, Lasso, Loader2, MousePointerClick, Pentagon, Redo2, Shapes, SquareDashed, SunMedium, Trash2, Undo2 } from 'lucide-react'
 import { ToolButton } from '../ToolButton'
 import type { InpaintMode } from '../../lib/inpaint'
 
@@ -41,10 +41,15 @@ interface ToolbarProps {
   onBuildMasks: () => void
   buildingMasks: boolean
   disabled?: boolean
+  /** «Цвет» правки: яркость, контраст, насыщенность там, где правка изменила кадр */
+  onColor?: () => void
+  colorActive?: boolean
+  canColor?: boolean
 }
 
 export function Toolbar({
   tool, onTool, canUndo, canRedo, hasMask, onUndo, onRedo, onClear, canRestore, canPick, onBuildMasks, buildingMasks, disabled,
+  onColor, colorActive, canColor,
 }: ToolbarProps) {
   return (
     <div className={`glass flex flex-col gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5 ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
@@ -74,6 +79,15 @@ export function Toolbar({
       >
         {buildingMasks ? <Loader2 className="size-[18px] animate-spin" strokeWidth={1.75} /> : <Shapes className="size-[18px]" strokeWidth={1.75} />}
       </ToolButton>
+      {onColor && (
+        <ToolButton
+          label="Цвет — яркость, контраст и насыщенность только там, где правка изменила кадр"
+          shortcut="C" onClick={onColor} active={colorActive} disabled={!canColor}
+        >
+          {colorActive && <span className="absolute inset-0 -z-10 rounded-xl bg-ink" />}
+          <SunMedium className="size-[18px]" strokeWidth={1.75} />
+        </ToolButton>
+      )}
       <div className="mx-2 my-1 h-px bg-fg/10" />
       <ToolButton label="Отменить" shortcut="Ctrl Z" onClick={onUndo} disabled={!canUndo}>
         <Undo2 className="size-[18px]" strokeWidth={1.75} />
@@ -134,11 +148,13 @@ interface BrushOptionsProps {
   /** жёсткость края 0…1 (кисти отката); не задана — не показывается */
   hardness?: number
   onHardness?: (v: number) => void
+  /** без своей подложки — внутри другой панели */
+  bare?: boolean
 }
 
-export function BrushOptions({ shape, onShape, size, onSize, min, max, hardness, onHardness }: BrushOptionsProps) {
+export function BrushOptions({ shape, onShape, size, onSize, min, max, hardness, onHardness, bare }: BrushOptionsProps) {
   return (
-    <div className="glass flex items-center gap-3 rounded-full py-1.5 pl-1.5 pr-4 shadow-float ring-1 ring-fg/5">
+    <div className={`flex items-center gap-3 ${bare ? '' : 'glass rounded-full py-1.5 pl-1.5 pr-4 shadow-float ring-1 ring-fg/5'}`}>
       <div className="flex rounded-full bg-fg/[0.05] p-0.5">
         {(['circle', 'square'] as const).map((s) => (
           <button

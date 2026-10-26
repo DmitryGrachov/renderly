@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Brush, Check, Download, Eraser, Eye, EyeOff, SunMedium, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Download, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
@@ -8,12 +8,11 @@ import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { RestoreBrush, type RestoreBrushHandle } from '../components/RestoreBrush'
 import { TextureDrop } from '../components/inpaint/ActionPopover'
 import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
-import { ToolButton } from '../components/ToolButton'
-import { BrushOptions } from '../components/inpaint/Toolbar'
 import { HARDNESS_DEFAULT, type DrawTool, type Shape } from '../lib/brush'
 import { changedRegion, colorize, combineRegion, isNeutral, NEUTRAL, newEdits, REGION_HARDNESS, type ColorValues, type RegionEdits } from '../lib/colorAdjust'
 import { RegionBrush, type RegionBrushHandle, type RegionMode } from '../components/RegionBrush'
 import { ColorPanel } from '../components/ColorPanel'
+import { ModeRail, RegionBar, RestoreBar, type EditMode } from '../components/EditTools'
 import { useScene, type Scene } from '../lib/scene'
 import { img2imgMaterials, MATERIAL_STAGES } from '../lib/api'
 import { fmt, modelById, useAccount } from '../lib/account'
@@ -108,14 +107,26 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const abort = useRef<AbortController | null>(null)
 
   useEffect(() => () => abort.current?.abort(), [])
+  const keys = useRef<{ mode: (m: EditMode) => void; tool: (t: DrawTool) => void }>({ mode: () => {}, tool: () => {} })
   useEffect(() => {
-    if (!brushing) return
+    if (!result || status === 'running') return
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof Element && e.target.closest('input, textarea')) return
-      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { e.preventDefault(); brush.current?.undo(); return }
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
+        if (!brushing && !colorOpen) return
+        e.preventDefault()
+        if (brushing) brush.current?.undo()
+        else regionBrush.current?.undo()
+        return
+      }
       if (e.ctrlKey || e.metaKey) return
+      if (e.code === 'KeyR') { keys.current.mode('restore'); return }
+      if (e.code === 'KeyC') { keys.current.mode('color'); return }
+      if (e.key === 'Escape' && (brushing || colorOpen)) { keys.current.mode('view'); return }
+      if (!brushing && !colorOpen) return
       const tools: Record<string, DrawTool> = { KeyB: 'brush', KeyU: 'rect', KeyP: 'poly' }
-      if (tools[e.code]) { setBrushTool(tools[e.code]); return }
+      if (tools[e.code]) { keys.current.tool(tools[e.code]); return }
+      if (!brushing) return
       if (e.code === 'KeyV') { setPeekPrev((v) => !v); return }
       if (e.code === 'BracketLeft') { setBrushSize((v) => Math.max(10, v - 8)); return }
       if (e.code === 'BracketRight') { setBrushSize((v) => Math.min(300, v + 8)); return }
@@ -127,7 +138,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [brushing])
+  }, [brushing, colorOpen, result, status])
   useEffect(() => {
     if (incoming) takeSource(incoming)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -260,6 +271,50 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setView('result')
   }
 
+  // режим правки на кадре: результат / откат / цвет. Уход из отката применяет его (откат открывается снова и правится)
+  const mode: EditMode = brushing ? 'restore' : colorOpen ? 'color' : 'view'
+  async function changeMode(m: EditMode) {
+    if (!result || m === mode) return
+    if (brushing) {
+      // новые мазки — или правка уже применённого отката (край, сдвиг): применить; иначе просто закрыть
+      if (undoable > 0 || brushMask) await applyBrush()
+      else setBrushing(false)
+    }
+    if (colorOpen) {
+      setColorOpen(false)
+      setRegionMode(null)
+      setShowRegion(false)
+    }
+    if (m === 'restore') {
+      setUndoable(0)
+      if (!brushMask) setNudge({ x: 0, y: 0 })
+      setBrushing(true)
+    } else if (m === 'color') {
+      setColorOpen(true)
+      setView('result')
+    }
+  }
+
+  // инструмент слева: в откате — чем закрашивать, в цвете — чем править область (сразу рисуем «Добавить»)
+  function chooseTool(t: DrawTool) {
+    if (brushing) setBrushTool(t)
+    else if (colorOpen) {
+      setRegionTool(t)
+      if (!regionMode) chooseRegionMode('add')
+    }
+  }
+  keys.current = { mode: changeMode, tool: chooseTool }
+
+  // сбросить правки области кистью — снова только найденное автоматически
+  async function clearRegionEdits() {
+    if (!plain) return
+    const { auto } = await regionParts(plain)
+    edits.current = newEdits(auto.width, auto.height)
+    setRegionView({ auto, edits: edits.current })
+    setRegionUndo(0)
+    regionChanged()
+  }
+
   // ползунки цвета — пересборка с задержкой, пока тянут
   function changeColor(v: ColorValues) {
     if (!result || !plain) return
@@ -340,7 +395,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
                 transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
               >
-                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && (view === 'compare' || brushing || (colorOpen && regionMode)))}>
+                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && ((view === 'compare' && mode === 'view') || brushing || (colorOpen && regionMode)))}>
                   {(imageStyle) =>
                     result && !running ? (
                       brushing ? (
@@ -385,37 +440,67 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                   )}
                 </AnimatePresence>
 
-                {colorOpen && result && !running && !brushing && (
-                  <div className="absolute left-4 top-4 z-20">
-                    <ColorPanel
-                      values={color} onChange={changeColor} working={colorWorking}
-                      showRegion={showRegion} onShowRegion={toggleRegion}
-                      regionMode={regionMode} onRegionMode={chooseRegionMode}
-                      brushSize={regionSize} onBrushSize={setRegionSize}
-                      undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
-                      regionTool={regionTool} onRegionTool={setRegionTool}
-                      regionHardness={regionHardness} onRegionHardness={setRegionHardness}
-                      regionOffset={regionOffset} onRegionOffset={setRegionOffset}
-                      onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
-                    />
-                  </div>
+                {result && !running && (
+                  <>
+                    {/* слева: режимы и инструменты режима */}
+                    <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
+                      <ModeRail
+                        mode={mode} onMode={changeMode}
+                        tool={brushing ? brushTool : regionTool} onTool={chooseTool}
+                        undoable={brushing ? undoable : regionUndo}
+                        onUndo={() => (brushing ? brush.current?.undo() : regionBrush.current?.undo())}
+                        onClear={brushing ? () => brush.current?.clear() : clearRegionEdits}
+                        peek={peekPrev} onPeek={setPeekPrev}
+                        restoreEdited={!!brushMask} colorEdited={!isNeutral(color)}
+                      />
+                    </div>
+
+                    {/* сверху: параметры режима */}
+                    {mode !== 'view' && (
+                      <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-16">
+                        <div className="pointer-events-auto">
+                          {mode === 'restore' ? (
+                            <RestoreBar
+                              tool={brushTool} shape={brushShape} onShape={setBrushShape}
+                              size={brushSize} onSize={setBrushSize} hardness={hardness} onHardness={setHardness}
+                              nudge={nudge} onResetNudge={() => setNudge({ x: 0, y: 0 })}
+                              onCancel={() => setBrushing(false)} onDone={() => changeMode('view')}
+                            />
+                          ) : (
+                            <RegionBar
+                              tool={regionTool} mode={regionMode} onMode={chooseRegionMode}
+                              size={regionSize} onSize={setRegionSize}
+                              hardness={regionHardness} onHardness={setRegionHardness}
+                              offset={regionOffset} onOffset={setRegionOffset}
+                              showRegion={showRegion} onShowRegion={toggleRegion}
+                              onDone={() => changeMode('view')}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* справа внизу: ползунки цвета */}
+                    {mode === 'color' && (
+                      <div className="absolute bottom-4 right-4 z-20">
+                        <ColorPanel
+                          compact values={color} onChange={changeColor} working={colorWorking}
+                          showRegion={showRegion} onShowRegion={toggleRegion}
+                          regionMode={regionMode} onRegionMode={chooseRegionMode}
+                          brushSize={regionSize} onBrushSize={setRegionSize}
+                          undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
+                          regionTool={regionTool} onRegionTool={setRegionTool}
+                          regionHardness={regionHardness} onRegionHardness={setRegionHardness}
+                          regionOffset={regionOffset} onRegionOffset={setRegionOffset}
+                          onDone={() => changeMode('view')}
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
 
-                {brushing && result && !running && (
-                  <BrushOverlay
-                    tool={brushTool} onTool={setBrushTool}
-                    shape={brushShape} onShape={setBrushShape}
-                    size={brushSize} onSize={setBrushSize}
-                    hardness={hardness} onHardness={setHardness}
-                    undoable={undoable} onUndo={() => brush.current?.undo()} onClear={() => brush.current?.clear()}
-                    nudge={nudge} onResetNudge={() => setNudge({ x: 0, y: 0 })}
-                    peek={peekPrev} onPeek={setPeekPrev}
-                    onClose={() => setBrushing(false)} onApply={applyBrush}
-                  />
-                )}
-
-                {!running && !brushing && (
-                  <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-end justify-between gap-3">
+                {!running && mode === 'view' && (
+                  <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-end justify-between gap-3 pl-16">
                     <div className="glass pointer-events-auto flex min-w-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-soft ring-1 ring-fg/5">
                       <img src={source.url} alt="" className="size-7 rounded-full object-cover" />
                       <div className="min-w-0 text-[12px] leading-tight">
@@ -424,7 +509,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       </div>
                     </div>
                     <div className="pointer-events-auto flex gap-2">
-                      {result && !brushing && (
+                      {result && (
                         <div className="glass flex rounded-full p-1 shadow-soft ring-1 ring-fg/5">
                           {(['compare', 'result'] as const).map((v) => (
                             <button
@@ -456,7 +541,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
         {/* Result actions */}
         <AnimatePresence>
-          {result && status === 'done' && !brushing && (
+          {result && status === 'done' && (
             <motion.div
               key="actions"
               initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
@@ -470,13 +555,6 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 <div className="flex flex-wrap gap-2">
                   <SecondaryButton onClick={download}>
                     <Download className="size-4" /> Скачать
-                  </SecondaryButton>
-                  {/* откат уже применён — открывается он же: те же мазки, край и сдвиг можно поменять */}
-                  <SecondaryButton onClick={() => { setColorOpen(!colorOpen); setBrushing(false); setView('result') }}>
-                    <SunMedium className="size-4" /> {isNeutral(color) ? 'Цвет' : 'Править цвет'}
-                  </SecondaryButton>
-                  <SecondaryButton onClick={() => { setColorOpen(false); setUndoable(0); if (!brushMask) setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
-                    <Eraser className="size-4" /> {brushMask ? 'Править откат' : 'Кисть отката'}
                   </SecondaryButton>
                   <SecondaryButton onClick={continueFromResult}>
                     <Plus className="size-4" /> Ещё материал
@@ -635,89 +713,3 @@ function SizeSlider({ value, onChange, disabled }: { value: number; onChange: (v
   )
 }
 
-/** Кисть отката на кадре: инструменты слева, тонкие настройки снизу, действия сверху — как в Inpainting. */
-function BrushOverlay({
-  tool, onTool, shape, onShape, size, onSize, hardness, onHardness, undoable, onUndo, onClear, nudge, onResetNudge, onClose, onApply,
-  peek, onPeek,
-}: {
-  tool: DrawTool
-  onTool: (t: DrawTool) => void
-  shape: Shape
-  onShape: (s: Shape) => void
-  size: number
-  onSize: (n: number) => void
-  hardness: number
-  onHardness: (v: number) => void
-  undoable: number
-  onUndo: () => void
-  onClear: () => void
-  nudge: { x: number; y: number }
-  onResetNudge: () => void
-  onClose: () => void
-  onApply: () => void
-  peek: boolean
-  onPeek: (v: boolean) => void
-}) {
-  const tools: { id: DrawTool; icon: typeof Brush; label: string; key: string }[] = [
-    { id: 'brush', icon: Brush, label: 'Кисть — Shift+клик: прямая от конца мазка, Shift в мазке: по горизонтали / вертикали', key: 'B' },
-    { id: 'rect', icon: SquareDashed, label: 'Прямоугольник — протяните; Shift — квадрат', key: 'U' },
-    { id: 'poly', icon: Pentagon, label: 'Многоугольник — точки кликами; Enter или клик в первую точку', key: 'P' },
-  ]
-  const shifted = nudge.x !== 0 || nudge.y !== 0
-  return (
-    <>
-      {/* сверху: что делает кисть и действия */}
-      <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-16">
-        <div className="glass pointer-events-auto flex items-center gap-1 rounded-full p-1 shadow-float ring-1 ring-fg/5">
-          <span className="hidden items-center gap-1.5 pl-3 pr-1 text-[12.5px] text-ink-2 md:flex">
-            <Eraser className="size-3.5" /> Вернуть кадр до материала · Alt — результат · стрелки — сдвиг
-            {shifted && (
-              <button onClick={onResetNudge} className="tabular-nums font-medium text-ink hover:text-accent" title="Сбросить сдвиг">
-                {nudge.x > 0 ? '→' : '←'}{Math.abs(nudge.x)} {nudge.y > 0 ? '↓' : '↑'}{Math.abs(nudge.y)} px
-              </button>
-            )}
-          </span>
-          <button
-            onClick={() => onPeek(!peek)}
-            title="Показать кадр до материала целиком и вести границы по нему (V)"
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition-colors ${peek ? 'bg-[#f59e0b] text-white' : 'text-ink-2 hover:bg-fg/[0.06] hover:text-ink'}`}
-          >
-            {peek ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} Прошлый
-          </button>
-          <button onClick={onClose} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink">
-            Закрыть
-          </button>
-          <button onClick={onApply} className="flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-on-ink transition-colors hover:bg-ink-hover">
-            <Check className="size-3.5" /> Применить
-          </button>
-        </div>
-      </div>
-
-      {/* слева: инструменты */}
-      <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
-        <div className="glass flex flex-col gap-1 rounded-[18px] p-1.5 shadow-float ring-1 ring-fg/5">
-          {tools.map(({ id, icon: Icon, label, key }) => (
-            <ToolButton key={id} label={label} shortcut={key} onClick={() => onTool(id)} active={tool === id}>
-              {tool === id && <motion.span layoutId="mat-brush-tool" className="absolute inset-0 -z-10 rounded-xl bg-ink" transition={{ type: 'spring', stiffness: 500, damping: 38 }} />}
-              <Icon className="size-[18px]" strokeWidth={1.75} />
-            </ToolButton>
-          ))}
-          <div className="mx-2 my-1 h-px bg-fg/10" />
-          <ToolButton label="Отменить" shortcut="Ctrl Z" onClick={onUndo} disabled={undoable === 0}>
-            <Undo2 className="size-[18px]" strokeWidth={1.75} />
-          </ToolButton>
-          <ToolButton label="Сбросить все мазки" shortcut="" onClick={onClear}>
-            <Trash2 className="size-[18px]" strokeWidth={1.75} />
-          </ToolButton>
-        </div>
-      </div>
-
-      {/* снизу: форма, размер, край */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
-        <div className="pointer-events-auto">
-          <BrushOptions shape={shape} onShape={onShape} size={size} onSize={onSize} min={10} max={300} hardness={hardness} onHardness={onHardness} />
-        </div>
-      </div>
-    </>
-  )
-}

@@ -12,7 +12,7 @@ const SLIDERS: { key: keyof ColorValues; label: string }[] = [
 /** Цвет сгенерированного куска: яркость, контраст, насыщенность (−100…100) только в области изменений. */
 export function ColorPanel({
   values, onChange, showRegion, onShowRegion, onDone, working, regionMode, onRegionMode, brushSize, onBrushSize, undoable, onUndo,
-  regionTool, onRegionTool, regionHardness, onRegionHardness, regionOffset, onRegionOffset,
+  regionTool, onRegionTool, regionHardness, onRegionHardness, regionOffset, onRegionOffset, compact,
 }: {
   values: ColorValues
   onChange: (v: ColorValues) => void
@@ -37,6 +37,8 @@ export function ColorPanel({
   /** сдвиг края всей области, px кадра: > 0 — расширить, < 0 — поджать */
   regionOffset: number
   onRegionOffset: (v: number) => void
+  /** только ползунки и «Сбросить»: область правится инструментами на кадре (Img to Img, «Материалы») */
+  compact?: boolean
 }) {
   return (
     <div className="glass w-[min(92vw,340px)] rounded-[22px] p-3.5 shadow-float ring-1 ring-fg/5">
@@ -67,7 +69,19 @@ export function ColorPanel({
           )
         })}
       </div>
+      {compact && (
+        <div className="mt-2.5 flex justify-end">
+          <button
+            onClick={() => onChange(NEUTRAL)}
+            disabled={isNeutral(values)}
+            className="flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-mute transition-colors hover:bg-fg/[0.05] hover:text-ink disabled:opacity-40"
+          >
+            <RotateCcw className="size-3.5" /> Сбросить
+          </button>
+        </div>
+      )}
       {/* область: показать и поправить кистью */}
+      {!compact && <>
       <div className="mt-3 border-t border-line pt-2.5">
         <div className="flex items-center gap-1.5">
           <span className="mr-auto text-[12.5px] text-ink-2">Область</span>
@@ -171,6 +185,7 @@ export function ColorPanel({
           Готово
         </button>
       </div>
+      </>}
     </div>
   )
 }
