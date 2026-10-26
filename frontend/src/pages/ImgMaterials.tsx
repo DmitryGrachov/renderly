@@ -378,11 +378,11 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   return (
     <motion.section
       initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.1 }}
-      className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-6"
+      className="flex flex-col gap-5 lg:gap-6"
     >
       {/* Canvas */}
       <div className="flex min-w-0 flex-col gap-4">
-        <div className="relative h-[400px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:aspect-[16/10] sm:h-auto sm:min-h-0">
+        <div className="relative h-[420px] overflow-hidden rounded-[28px] bg-surface shadow-card ring-1 ring-fg/[0.04] sm:h-[min(74vh,760px)] sm:min-h-[480px]">
           <AnimatePresence mode="wait" initial={false}>
             {!source ? (
               <motion.div key="drop" className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
@@ -574,106 +574,106 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
         </AnimatePresence>
       </div>
 
-      {/* Control panel */}
-      <aside className="lg:sticky lg:top-20 lg:self-start">
-        <div className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
+      {/* Образцы — под кадром: карточки в ряд, кнопка запуска справа */}
+      <section className="rounded-[28px] bg-surface p-5 shadow-card ring-1 ring-fg/[0.04] sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <Step n={1} title="Образцы" hint="Текстура и куда её положить — нейросеть найдёт поверхность сама" />
-
-          <div className="mt-2 flex flex-col gap-3">
-            <AnimatePresence initial={false}>
-              {rows.map((r, i) => (
-                <motion.div
-                  key={r.id}
-                  initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-                  transition={spring} className="overflow-hidden"
-                >
-                  <div className={`relative ${i > 0 ? 'border-t border-line pt-1' : ''}`}>
-                    {rows.length > 1 && (
-                      <button
-                        aria-label="Убрать образец"
-                        title="Убрать образец"
-                        disabled={running}
-                        onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}
-                        className="absolute right-0 top-2 z-10 grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink disabled:opacity-40"
-                      >
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    )}
-                    <div className={rows.length > 1 ? 'pr-8' : ''}>
-                      <TextureDrop texture={r.texture} onTexture={(f) => update(r.id, { texture: f })} width="" />
-                    </div>
-                    {r.texture && <SizeSlider value={r.size} onChange={(v) => update(r.id, { size: v })} disabled={running} />}
-                    <textarea
-                      value={r.target}
-                      onChange={(e) => update(r.id, { target: e.target.value })}
-                      disabled={running}
-                      rows={2}
-                      maxLength={300}
-                      placeholder={TARGET_PLACEHOLDER[scene]}
-                      className="mt-2 w-full resize-none rounded-[14px] bg-fg/[0.04] px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-accent/40 transition-shadow placeholder:text-faint focus:bg-surface focus:ring-2 disabled:opacity-60"
-                    />
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {TARGET_CHIPS[scene].map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          disabled={running}
-                          onClick={() => addChip(r.id, c)}
-                          className="rounded-full px-2.5 py-0.5 text-[12px] font-medium text-ink-2 ring-1 ring-fg/[0.08] transition-all duration-200 hover:bg-fg/[0.04] hover:text-ink active:scale-95 disabled:opacity-50"
-                        >
-                          + {c}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
+          <div className="flex flex-col items-stretch gap-1.5 sm:items-end">
+            <motion.button
+              whileTap={canGenerate ? { scale: 0.98 } : undefined}
+              onClick={generate}
+              disabled={!canGenerate}
+              className="relative flex items-center justify-center gap-2 overflow-hidden rounded-full bg-accent px-7 py-3 text-[15px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-fg/[0.08] disabled:text-faint"
+            >
+              {running ? (
+                <><RefreshCw className="size-[18px] animate-spin" /> Кладём материал…</>
+              ) : result ? (
+                <><RotateCcw className="size-[18px]" /> Сгенерировать заново</>
+              ) : (
+                <><Sparkles className="size-[18px]" /> Применить</>
+              )}
+            </motion.button>
+            <p className="text-center text-[12px] text-faint sm:text-right">
+              {!source
+                ? 'Загрузите клей, технический или готовый рендер'
+                : incomplete || ready.length === 0
+                  ? 'К каждому образцу — куда его положить'
+                  : `${activeModel.name} · ${activeModel.time}${ready.length > 1 ? ` × ${ready.length}` : ''} · ${fmt(activeModel.cost * ready.length)} ток.`}
+            </p>
           </div>
+        </div>
 
+        <AnimatePresence>
+          {error && (
+            <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-[13px] text-danger">
+              {error}
+            </motion.p>
+          )}
+        </AnimatePresence>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <AnimatePresence initial={false}>
+            {rows.map((r) => (
+              <motion.div
+                key={r.id}
+                layout
+                initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.97 }}
+                transition={spring}
+                className="relative rounded-[20px] bg-canvas p-3.5 ring-1 ring-fg/[0.04]"
+              >
+                {rows.length > 1 && (
+                  <button
+                    aria-label="Убрать образец"
+                    title="Убрать образец"
+                    disabled={running}
+                    onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}
+                    className="absolute right-2.5 top-2.5 z-10 grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink disabled:opacity-40"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                )}
+                <div className={`-mt-3.5 ${rows.length > 1 ? 'pr-8' : ''}`}>
+                  <TextureDrop texture={r.texture} onTexture={(f) => update(r.id, { texture: f })} width="" />
+                </div>
+                {r.texture && <SizeSlider value={r.size} onChange={(v) => update(r.id, { size: v })} disabled={running} />}
+                <textarea
+                  value={r.target}
+                  onChange={(e) => update(r.id, { target: e.target.value })}
+                  disabled={running}
+                  rows={2}
+                  maxLength={300}
+                  placeholder={TARGET_PLACEHOLDER[scene]}
+                  className="mt-2 w-full resize-none rounded-[14px] bg-surface px-3.5 py-2.5 text-[14px] leading-snug outline-none ring-1 ring-fg/[0.06] ring-offset-0 transition-shadow placeholder:text-faint focus:ring-2 focus:ring-accent/40 disabled:opacity-60"
+                />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {TARGET_CHIPS[scene].map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      disabled={running}
+                      onClick={() => addChip(r.id, c)}
+                      className="rounded-full px-2.5 py-0.5 text-[12px] font-medium text-ink-2 ring-1 ring-fg/[0.08] transition-all duration-200 hover:bg-fg/[0.04] hover:text-ink active:scale-95 disabled:opacity-50"
+                    >
+                      + {c}
+                    </button>
+                  ))}
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
           {rows.length < MAX_ROWS && (
-            <button
+            <motion.button
+              layout
               onClick={() => setRows((rs) => [...rs, newRow()])}
               disabled={running}
-              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-full py-2 text-[13px] font-medium text-ink-2 ring-1 ring-fg/[0.08] transition-colors hover:bg-fg/[0.04] hover:text-ink disabled:opacity-50"
+              className="flex min-h-[120px] flex-col items-center justify-center gap-1.5 rounded-[20px] border border-dashed border-fg/15 text-[13px] font-medium text-ink-2 transition-colors hover:bg-fg/[0.03] hover:text-ink disabled:opacity-50"
             >
-              <Plus className="size-4" /> Ещё образец
-            </button>
+              <Plus className="size-5" /> Ещё образец
+              <span className="text-[11.5px] font-normal text-faint">до {MAX_ROWS} за раз — по проходу на каждый</span>
+            </motion.button>
           )}
-
-          <div className="my-6 h-px bg-line" />
-
-          <motion.button
-            whileTap={canGenerate ? { scale: 0.98 } : undefined}
-            onClick={generate}
-            disabled={!canGenerate}
-            className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-accent py-3.5 text-[16px] font-medium text-white transition-all duration-300 ease-apple hover:bg-accent-hover disabled:bg-fg/[0.08] disabled:text-faint"
-          >
-            {running ? (
-              <><RefreshCw className="size-[18px] animate-spin" /> Кладём материал…</>
-            ) : result ? (
-              <><RotateCcw className="size-[18px]" /> Сгенерировать заново</>
-            ) : (
-              <><Sparkles className="size-[18px]" /> Применить</>
-            )}
-          </motion.button>
-          <p className="mt-3 text-center text-[12px] text-faint">
-            {!source
-              ? 'Загрузите клей, технический или готовый рендер'
-              : incomplete || ready.length === 0
-                ? 'К каждому образцу — куда его положить'
-                : `${activeModel.name} · ${activeModel.time}${ready.length > 1 ? ` × ${ready.length}` : ''} · ${fmt(activeModel.cost * ready.length)} ток.`}
-          </p>
-
-          <AnimatePresence>
-            {error && (
-              <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-[13px] text-danger">
-                {error}
-              </motion.p>
-            )}
-          </AnimatePresence>
         </div>
-      </aside>
+      </section>
     </motion.section>
   )
 }
