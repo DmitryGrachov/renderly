@@ -32,7 +32,7 @@ from .comfy import fit_size as _fit16
 from .config import (
     COMFYUI_URL, DEFAULT_MODEL, FLUX_INPAINT_MEGAPIXELS, FLUX_MODELS, FLUX_VAE, INPAINT_MEGAPIXELS, QWEN21, QWEN21_BASE_STEPS,
     QWEN21_MEGAPIXELS, QWEN21_MODELS, QWEN21_TURBO_MODEL, QWEN_EDIT, RENDER_MEGAPIXELS,
-    QWEN_EDIT_MODEL, log,
+    QWEN_EDIT_MODEL, QWEN_EDIT_RENDER_MEGAPIXELS, log,
 )
 from .prompting import DEEPSEEK_API_KEY, REALISM_EDIT, REALISM_REMOVE, _box, _chat, _data_url, llm_model, q21_tags
 from .scene import PHOTO_REAL, describe_scene, scene_text
@@ -1086,7 +1086,7 @@ async def _refine(result: Image.Image, obj: Image.Image, prompt: str, seed: int,
         pad = max(16, round(scale * REFINE_PAD * max(x2 - x1, y2 - y1)))
         box = (max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad))
         bw, bh = box[2] - box[0], box[3] - box[1]
-        gw, gh = fit_size(bw, bh, INPAINT_MEGAPIXELS)
+        gw, gh = fit_size(bw, bh, QWEN_EDIT_RENDER_MEGAPIXELS if model == QWEN_EDIT_MODEL else INPAINT_MEGAPIXELS)
         crop, mask = result.crop(box), obj.crop(box)
         grow = max(2, round(0.02 * max(bw, bh)))
         room = _grow(_extend_down(mask, -round(scale * REFINE_HEADROOM * (y2 - y1)), grow), grow)
@@ -1247,8 +1247,8 @@ async def harmonize_frame(
     Qwen-Image-2.1 Turbo. exact — правка по точному контуру (материалы): из пересчёта — узкая полоса."""
     w, h = result.size
     flux = model in FLUX_MODELS
-    own = model == QWEN_EDIT_MODEL  # 2511 пересчитывает сам, ~1 Мп (FluxKontextImageScale в шаблоне ComfyUI)
-    gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else INPAINT_MEGAPIXELS if own else QWEN21_MEGAPIXELS)
+    own = model == QWEN_EDIT_MODEL  # 2511 пересчитывает сам, в своём размере кадра (QWEN_EDIT_RENDER_MEGAPIXELS)
+    gw, gh = fit_size(w, h, RENDER_MEGAPIXELS if flux else QWEN_EDIT_RENDER_MEGAPIXELS if own else QWEN21_MEGAPIXELS)
     prompt = (HARMONIZE_REMOVED if removed else HARMONIZE_PROMPT).format(subject=subject.strip().rstrip("."))
     # сцена — в какую фотографию вписывать; ультрареализм — всегда
     keys = ("light", "colour_grade", "camera", "mood") if flux else ("light", "atmosphere", "colour_grade", "camera", "mood")
@@ -1567,6 +1567,8 @@ async def run_remove(
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     elif model in FLUX_MODELS:
         r.gen_size = fit_size(*r.crop.size, FLUX_INPAINT_MEGAPIXELS)
+    elif model == QWEN_EDIT_MODEL:
+        r.gen_size = fit_size(*r.crop.size, QWEN_EDIT_RENDER_MEGAPIXELS)
     cw, ch = r.crop.size
 
     what = await describe_removal(to_png(r.crop), _highlight(r.crop, r.mask), (hint or "").strip())
@@ -2079,6 +2081,8 @@ async def run_edit(
         r.gen_size = fit_size(*r.crop.size, QWEN21_MEGAPIXELS)
     elif model in FLUX_MODELS:
         r.gen_size = fit_size(*r.crop.size, FLUX_INPAINT_MEGAPIXELS)
+    elif model == QWEN_EDIT_MODEL:
+        r.gen_size = fit_size(*r.crop.size, QWEN_EDIT_RENDER_MEGAPIXELS)
     # с рамкой (добавить / заменить) — без красной разметки: её модель копировала (кольца, дуги, красные пятна и
     # дорожки на земле); место задаёт область генерации — рамка в натуральную величину, размер — текст инструкции.
     # Разметка остаётся только для «изменить» и когда рамки нет: там она показывает, что именно меняется

@@ -8,7 +8,7 @@
 запрос — короткий (PROMPT, ~60 слов): что сохранить — первым, затем что становится материалом образца. Части запроса
 называет DeepSeek по кадру, образцу и словам пользователя (TARGET_SYSTEM), картинки в нём — как их зовёт модель.
 Свой пайплайн у каждой модели, как в рендере Img to Img:
-  - Qwen-Image-Edit-2511 — TextEncodeQwenImageEditPlus (Picture 1, Picture 2), Lightning 8 шагов, ~1 Мп; перенос
+  - Qwen-Image-Edit-2511 — TextEncodeQwenImageEditPlus (Picture 1, Picture 2), Lightning 8 шагов, ~2 Мп; перенос
     материала с образца для неё родной (шаблон ComfyUI «…to the material in image 2»);
   - Qwen-Image-2.1 — TextEncodeQwenImage21 (<image1>, <image2>), Turbo 8 шагов с чистого шума, ~1.5 Мп (со старта
     от латента кадра 2.1 почти копирует вход);

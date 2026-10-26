@@ -54,9 +54,10 @@ QWEN_EDIT = {
     "steps": int(os.getenv("QWEN_EDIT_STEPS", "4")),
     "shift": float(os.getenv("QWEN_EDIT_SHIFT", "3.1")),
 }
-# Img to Img на 2511: кадр ~1 Мп (как ImageScaleToTotalPixels в шаблоне ComfyUI — на нём модель держит Picture 1
-# без дрейфа), перерисовка сохраняемых зон — хвост расписания (доля шума)
-QWEN_EDIT_RENDER_MEGAPIXELS = float(os.getenv("QWEN_EDIT_RENDER_MEGAPIXELS", "1.0"))
+# Кадр 2511 везде, где она работает (рендер и «Материалы» Img to Img, схема Render Pass, кроп правки и пересчёт кадра в
+# Inpainting): ~2 Мп. Шаблон ComfyUI — ~1 Мп, но на нём мелкая фактура (грунт на газоне в глубине кадра) выходила
+# мылом; на RTX 5080 16 ГБ пик видеопамяти 13.7 ГБ, «Материалы» ~70 с на образец против ~50 с
+QWEN_EDIT_RENDER_MEGAPIXELS = float(os.getenv("QWEN_EDIT_RENDER_MEGAPIXELS", "2.0"))
 # Img to Img — 8 шагов (своя LoRA): на 4 фактура плоская и изредка мусорные надписи в углу кадра
 QWEN_EDIT_RENDER_LORA = os.getenv("QWEN_EDIT_RENDER_LORA", "Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors")
 QWEN_EDIT_RENDER_STEPS = int(os.getenv("QWEN_EDIT_RENDER_STEPS", "8"))
