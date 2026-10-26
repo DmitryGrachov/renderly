@@ -138,17 +138,39 @@ export interface RegionEdits {
 export const newEdits = (w: number, h: number): RegionEdits => ({ add: canvas(w, h), remove: canvas(w, h) })
 
 /** Итоговая область: найденная автоматически + добавленное кистью − убранное кистью, с краем по жёсткости 0…1. */
+export const OFFSET_MAX = 60 // «Сдвиг края»: на сколько px кадра можно поджать или расширить область
+
+/** Сдвинуть край маски на px (> 0 — расширить, < 0 — поджать): размытие гауссом σ = |px| / 2 и порог там, где
+ *  размытый край ступеньки опускается до 2.3% (erfc(√2) / 2) — прямые границы остаются прямыми, углы скругляются. */
+export function offsetEdge(mask: HTMLCanvasElement, px: number): HTMLCanvasElement {
+  if (Math.abs(px) < 0.5) return mask
+  const W = mask.width
+  const H = mask.height
+  const out = canvas(W, H)
+  const c = out.getContext('2d', { willReadFrequently: true })!
+  c.filter = `blur(${Math.abs(px) / 2}px)`
+  c.drawImage(mask, 0, 0)
+  c.filter = 'none'
+  const d = c.getImageData(0, 0, W, H)
+  const t = px > 0 ? 6 : 249
+  for (let i = 3; i < d.data.length; i += 4) d.data[i] = d.data[i] > t ? 255 : 0
+  c.putImageData(d, 0, 0)
+  return out
+}
+
+/** Итоговая область: найденная автоматически + добавленное − убранное, сдвиг края (px кадра), край по жёсткости. */
 export function combineRegion(
-  auto: HTMLCanvasElement, edits: RegionEdits | null | undefined, hardness = REGION_HARDNESS,
+  auto: HTMLCanvasElement, edits: RegionEdits | null | undefined, hardness = REGION_HARDNESS, offset = 0,
 ): HTMLCanvasElement {
-  const out = canvas(auto.width, auto.height)
-  const o = out.getContext('2d')!
+  const merged = canvas(auto.width, auto.height)
+  const o = merged.getContext('2d')!
   o.drawImage(auto, 0, 0)
   if (edits) {
     o.drawImage(edits.add, 0, 0, auto.width, auto.height)
     o.globalCompositeOperation = 'destination-out'
     o.drawImage(edits.remove, 0, 0, auto.width, auto.height)
   }
+  const out = offsetEdge(merged, offset)
   const blur = (1 - hardness) * FEATHER * Math.max(auto.width, auto.height)
   if (blur < 0.5) return out
   const soft = canvas(auto.width, auto.height)

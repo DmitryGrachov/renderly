@@ -1,7 +1,7 @@
 import { Brush, Eye, EyeOff, Minus, Pentagon, Plus, RotateCcw, SquareDashed, SunMedium, Undo2 } from 'lucide-react'
 import type { DrawTool } from '../lib/brush'
 import type { RegionMode } from './RegionBrush'
-import { NEUTRAL, isNeutral, type ColorValues } from '../lib/colorAdjust'
+import { NEUTRAL, OFFSET_MAX, isNeutral, type ColorValues } from '../lib/colorAdjust'
 
 const SLIDERS: { key: keyof ColorValues; label: string }[] = [
   { key: 'brightness', label: 'Яркость' },
@@ -12,7 +12,7 @@ const SLIDERS: { key: keyof ColorValues; label: string }[] = [
 /** Цвет сгенерированного куска: яркость, контраст, насыщенность (−100…100) только в области изменений. */
 export function ColorPanel({
   values, onChange, showRegion, onShowRegion, onDone, working, regionMode, onRegionMode, brushSize, onBrushSize, undoable, onUndo,
-  regionTool, onRegionTool, regionHardness, onRegionHardness,
+  regionTool, onRegionTool, regionHardness, onRegionHardness, regionOffset, onRegionOffset,
 }: {
   values: ColorValues
   onChange: (v: ColorValues) => void
@@ -34,6 +34,9 @@ export function ColorPanel({
   /** жёсткость края всей области 0…1 */
   regionHardness: number
   onRegionHardness: (v: number) => void
+  /** сдвиг края всей области, px кадра: > 0 — расширить, < 0 — поджать */
+  regionOffset: number
+  onRegionOffset: (v: number) => void
 }) {
   return (
     <div className="glass w-[min(92vw,340px)] rounded-[22px] p-3.5 shadow-float ring-1 ring-fg/5">
@@ -119,6 +122,18 @@ export function ColorPanel({
             aria-label="Жёсткость края области"
           />
           <span className="w-14 shrink-0 text-right text-ink-2">{regionHardness > 0.8 ? 'жёсткий' : regionHardness < 0.3 ? 'мягкий' : 'средний'}</span>
+        </label>
+        <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
+          <span className="w-[92px] shrink-0" title="Поджать (влево) или расширить (вправо) всю область на столько пикселей">Сдвиг края</span>
+          <input
+            type="range" min={-OFFSET_MAX} max={OFFSET_MAX} step={1} value={regionOffset}
+            onChange={(e) => onRegionOffset(Number(e.target.value))}
+            onDoubleClick={() => onRegionOffset(0)}
+            className="range-center w-full"
+            style={{ '--from': `${Math.min(50, 50 + (regionOffset / OFFSET_MAX) * 50)}%`, '--to': `${Math.max(50, 50 + (regionOffset / OFFSET_MAX) * 50)}%` } as React.CSSProperties}
+            aria-label="Сдвиг края области"
+          />
+          <span className="w-14 shrink-0 text-right tabular-nums text-ink-2">{regionOffset > 0 ? `+${regionOffset}` : regionOffset} px</span>
         </label>
         {regionMode && regionTool === 'brush' && (
           <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">

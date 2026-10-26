@@ -23,7 +23,7 @@ interface Box { x: number; y: number; w: number; h: number }
 /** откат кистью: из чего собран и с каким краем — край можно поменять и после «Применить» */
 interface RestoreEdit { cur: string; prev: string; mask: HTMLCanvasElement; hardness: number }
 /** цвет сгенерированного: версия «Цвет» — base с поправленным цветом там, где base отличается от prev */
-interface ColorEdit { base: string; prev: string; values: ColorValues; hardness?: number }
+interface ColorEdit { base: string; prev: string; values: ColorValues; hardness?: number; offset?: number }
 interface Version { url: string; label: string; mode?: InpaintMode; restore?: RestoreEdit; color?: ColorEdit }
 /** выбранное инструментом «Выбор маски»: элементы и их маска (в размере карты), нарисованная на канвасе маски */
 interface Pick { ids: Set<number>; mask: Uint8Array | null }
@@ -508,7 +508,7 @@ export function Editor({ image, onClose }: Props) {
 
   async function colorRegionFor(e: ColorEdit) {
     const { auto, edits } = await regionParts(e)
-    return combineRegion(auto, edits, e.hardness ?? REGION_HARDNESS)
+    return combineRegion(auto, edits, e.hardness ?? REGION_HARDNESS, e.offset ?? 0)
   }
 
   // «Цвет»: на версии с цветом — открыть ползунки; иначе новая версия «Цвет» поверх текущей (пока без изменений)
@@ -553,16 +553,29 @@ export function Editor({ image, onClose }: Props) {
     }
   }
 
-  // край области — свойство версии «Цвет»: пересборка сразу
-  function changeRegionHardness(h: number) {
-    regionChanged(h)
+  // край области и его сдвиг — свойства версии «Цвет»: черновик сразу в панели и подсветке, пересборка — с задержкой
+  const [regionDraft, setRegionDraft] = useState<{ hardness?: number; offset?: number }>({})
+  const regionTimer = useRef(0)
+  useEffect(() => { setRegionDraft({}) }, [current])
+  function changeRegionEdge(patch: { hardness?: number; offset?: number }) {
+    setRegionDraft((d) => ({ ...d, ...patch }))
+    clearTimeout(regionTimer.current)
+    regionTimer.current = window.setTimeout(() => regionChanged({ ...regionDraftRef.current, ...patch }), 150)
   }
+  const regionDraftRef = useRef(regionDraft)
+  regionDraftRef.current = regionDraft
+  const regionHardness = regionDraft.hardness ?? editedColor?.hardness ?? REGION_HARDNESS
+  const regionOffset = regionDraft.offset ?? editedColor?.offset ?? 0
 
   // мазок по области — версия «Цвет» пересобирается с теми же ползунками по новой области
-  async function regionChanged(hardness?: number) {
+  async function regionChanged(patch: { hardness?: number; offset?: number } = {}) {
     if (!editedColor) return
     const at = current
-    const edit = { ...editedColor, values: colorDraft ?? editedColor.values, hardness: hardness ?? editedColor.hardness }
+    const edit = {
+      ...editedColor, values: colorDraft ?? editedColor.values,
+      hardness: patch.hardness ?? regionDraftRef.current.hardness ?? editedColor.hardness,
+      offset: patch.offset ?? regionDraftRef.current.offset ?? editedColor.offset,
+    }
     setColorWorking(true)
     try {
       const url = await colorize(edit.base, await colorRegionFor(edit), edit.values)
@@ -1025,7 +1038,7 @@ export function Editor({ image, onClose }: Props) {
           {colorOpen && editedColor && (showRegion || regionMode) && regionView && !peek && !busy && (
             <RegionBrush
               ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
-              tool={regionTool} hardness={editedColor.hardness ?? REGION_HARDNESS}
+              tool={regionTool} hardness={regionHardness} offset={regionOffset}
               onCommit={() => regionChanged()} onHistory={setRegionUndo} className="z-10"
             />
           )}
@@ -1107,7 +1120,8 @@ export function Editor({ image, onClose }: Props) {
                 brushSize={regionSize} onBrushSize={setRegionSize}
                 undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
                 regionTool={regionTool} onRegionTool={setRegionTool}
-                regionHardness={editedColor.hardness ?? REGION_HARDNESS} onRegionHardness={changeRegionHardness}
+                regionHardness={regionHardness} onRegionHardness={(v) => changeRegionEdge({ hardness: v })}
+                regionOffset={regionOffset} onRegionOffset={(v) => changeRegionEdge({ offset: v })}
                 onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
               />
             </motion.div>

@@ -92,6 +92,8 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [regionSize, setRegionSize] = useState(60)
   const [regionTool, setRegionTool] = useState<DrawTool>('brush')
   const [regionHardness, setRegionHardness] = useState(REGION_HARDNESS)
+  const [regionOffset, setRegionOffset] = useState(0)
+  const regionTimer = useRef(0)
   const [regionUndo, setRegionUndo] = useState(0)
   const regionBrush = useRef<RegionBrushHandle>(null)
   const edits = useRef<RegionEdits | null>(null)
@@ -107,7 +109,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   useEffect(() => {
     if (!brushing) return
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest('input, textarea')) return
+      if (e.target instanceof Element && e.target.closest('input, textarea')) return
       if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { e.preventDefault(); brush.current?.undo(); return }
       if (e.ctrlKey || e.metaKey) return
       const tools: Record<string, DrawTool> = { KeyB: 'brush', KeyU: 'rect', KeyP: 'poly' }
@@ -233,7 +235,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
   async function regionFor(url: string) {
     const { auto, edits: e } = await regionParts(url)
-    return combineRegion(auto, e, regionHardness)
+    return combineRegion(auto, e, regionHardness, regionOffset)
   }
 
   /** итог цепочки: цвет поверх кадра без цвета (только в области изменений) */
@@ -287,7 +289,12 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   }
 
   // край области — цвет сразу по новой границе
-  useEffect(() => { if (colorOpen && !isNeutral(color)) regionChanged() }, [regionHardness]) // eslint-disable-line react-hooks/exhaustive-deps
+  // край и его сдвиг — цвет по новой границе, с задержкой, пока тянут
+  useEffect(() => {
+    if (!colorOpen || isNeutral(color)) return
+    clearTimeout(regionTimer.current)
+    regionTimer.current = window.setTimeout(() => regionChanged(), 150)
+  }, [regionHardness, regionOffset]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // мазок по области — цвет пересобирается по новой области
   async function regionChanged() {
@@ -344,7 +351,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                           {(showRegion || regionMode) && regionView && (
                             <RegionBrush
                               ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
-                              tool={regionTool} hardness={regionHardness}
+                              tool={regionTool} hardness={regionHardness} offset={regionOffset}
                               imageStyle={imageStyle} onCommit={regionChanged} onHistory={setRegionUndo}
                             />
                           )}
@@ -385,6 +392,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
                       regionTool={regionTool} onRegionTool={setRegionTool}
                       regionHardness={regionHardness} onRegionHardness={setRegionHardness}
+                      regionOffset={regionOffset} onRegionOffset={setRegionOffset}
                       onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
                     />
                   </div>

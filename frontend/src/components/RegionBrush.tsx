@@ -20,6 +20,8 @@ interface Props {
   tool?: DrawTool
   /** жёсткость края всей области 0…1 */
   hardness?: number
+  /** сдвиг края всей области, px кадра: > 0 — расширить, < 0 — поджать */
+  offset?: number
   /** диаметр кисти в пикселях экрана */
   size: number
   /** масштаб и сдвиг (ZoomView); холст — object-contain на месте картинки */
@@ -40,7 +42,7 @@ const INK = 'rgba(0,0,0,1)'
  *  Прямоугольник — протянуть (Shift — квадрат). Многоугольник — точки кликами; Enter, двойной клик или клик в первую
  *  точку замыкают, Backspace убирает точку, Esc отменяет. Край мазков жёсткий — мягкость задаёт «Край» всей области. */
 export const RegionBrush = forwardRef<RegionBrushHandle, Props>(function RegionBrush(
-  { auto, edits, mode, tool = 'brush', hardness = REGION_HARDNESS, size, imageStyle, onCommit, onHistory, className = '' },
+  { auto, edits, mode, tool = 'brush', hardness = REGION_HARDNESS, offset = 0, size, imageStyle, onCommit, onHistory, className = '' },
   ref,
 ) {
   const view = useRef<HTMLCanvasElement>(null)
@@ -68,12 +70,12 @@ export const RegionBrush = forwardRef<RegionBrushHandle, Props>(function RegionB
     c.fillRect(0, 0, W, H)
     c.globalAlpha = 1
     c.globalCompositeOperation = 'destination-in'
-    c.drawImage(combineRegion(auto, edits, hardness), 0, 0)
+    c.drawImage(combineRegion(auto, edits, hardness, offset), 0, 0)
     c.globalCompositeOperation = 'source-over'
   }
   const schedule = () => { cancelAnimationFrame(frame.current); frame.current = requestAnimationFrame(render) }
 
-  useEffect(() => { render(); return () => cancelAnimationFrame(frame.current) }, [auto, edits, hardness]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { render(); return () => cancelAnimationFrame(frame.current) }, [auto, edits, hardness, offset]) // eslint-disable-line react-hooks/exhaustive-deps
   // смена инструмента или режима — незаконченный контур и «прямая от конца мазка» не переносятся
   useEffect(() => { setOutline([]); setRubber(null); lastEnd.current = null }, [tool, mode])
 
