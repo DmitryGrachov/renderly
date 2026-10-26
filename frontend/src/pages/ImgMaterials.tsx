@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Download, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Check, Download, Eraser, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
 import { GeneratingOverlay } from '../components/GeneratingOverlay'
+import { RestoreBrush, type RestoreBrushHandle } from '../components/RestoreBrush'
 import { TextureDrop } from '../components/inpaint/ActionPopover'
 import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
 import { useScene, type Scene } from '../lib/scene'
@@ -63,6 +64,11 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [result, setResult] = useState<{ url: string; seed: number } | null>(null)
   const [view, setView] = useState<'compare' | 'result'>('compare')
   const [error, setError] = useState<string | null>(null)
+  // кисть отката: под мазками результата проявляется кадр до материала
+  const [brushing, setBrushing] = useState(false)
+  const [brushSize, setBrushSize] = useState(80)
+  const [undoable, setUndoable] = useState(0)
+  const brush = useRef<RestoreBrushHandle>(null)
   const abort = useRef<AbortController | null>(null)
 
   useEffect(() => () => abort.current?.abort(), [])
@@ -78,6 +84,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
   function takeSource(img: StudioImage) {
     abort.current?.abort()
+    setBrushing(false)
     setSource(img)
     setHistory([])
     setResult(null)
@@ -100,6 +107,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     if (!source || !canGenerate) return
     const ctrl = new AbortController()
     abort.current = ctrl
+    setBrushing(false)
     setStatus('running')
     setProgress(0)
     setError(null)
@@ -144,6 +152,15 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setRows([newRow()])
   }
 
+  // мазки кисти отката — в результат: дальше скачивается, продолжается и уходит в Inpainting уже он
+  async function applyBrush() {
+    if (!result || !brush.current) return
+    const blob = await brush.current.toBlob()
+    setResult({ ...result, url: URL.createObjectURL(blob) })
+    setBrushing(false)
+    setView('result')
+  }
+
   function undo() {
     const prev = history[history.length - 1]
     if (!prev) return
@@ -173,10 +190,15 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
                 transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
               >
-                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && view === 'compare')}>
+                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && (view === 'compare' || brushing))}>
                   {(imageStyle) =>
                     result && !running ? (
-                      view === 'compare' ? (
+                      brushing ? (
+                        <RestoreBrush
+                          ref={brush} before={source.url} after={result.url} imageStyle={imageStyle} size={brushSize}
+                          onHistory={setUndoable}
+                        />
+                      ) : view === 'compare' ? (
                         <CompareSlider before={source.url} after={result.url} imageStyle={imageStyle} />
                       ) : (
                         <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
@@ -212,7 +234,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       </div>
                     </div>
                     <div className="pointer-events-auto flex gap-2">
-                      {result && (
+                      {result && !brushing && (
                         <div className="glass flex rounded-full p-1 shadow-soft ring-1 ring-fg/5">
                           {(['compare', 'result'] as const).map((v) => (
                             <button
@@ -244,8 +266,49 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
         {/* Result actions */}
         <AnimatePresence>
-          {result && status === 'done' && (
+          {result && status === 'done' && brushing && (
             <motion.div
+              key="brush"
+              initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
+              transition={spring}
+            >
+              <div className="flex flex-col gap-4 rounded-[22px] bg-surface p-4 shadow-card ring-1 ring-fg/[0.04] sm:flex-row sm:items-center sm:justify-between sm:pl-5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[15px] font-semibold tracking-[-0.01em]">Кисть отката</div>
+                  <div className="text-[13px] text-mute">Проведите — вернётся кадр до материала. Alt — вернуть результат, пробел — двигать кадр</div>
+                  <label className="mt-2.5 flex items-center gap-3 text-[12.5px] text-mute">
+                    <span className="shrink-0">Размер</span>
+                    <input
+                      type="range" min={10} max={300} step={2} value={brushSize}
+                      onChange={(e) => setBrushSize(Number(e.target.value))}
+                      className="range w-full max-w-[220px]"
+                      style={{ '--fill': `${((brushSize - 10) / 290) * 100}%` } as React.CSSProperties}
+                    />
+                    <span className="w-12 shrink-0 tabular-nums text-ink-2">{brushSize} px</span>
+                  </label>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <SecondaryButton onClick={() => brush.current?.undo()} disabled={undoable === 0}>
+                    <Undo2 className="size-4" /> Отменить
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => brush.current?.clear()}>
+                    <RotateCcw className="size-4" /> Сбросить
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => setBrushing(false)}>Закрыть</SecondaryButton>
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
+                    onClick={applyBrush}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[14px] font-medium text-on-ink transition-colors hover:bg-ink-hover sm:flex-none"
+                  >
+                    <Check className="size-4" /> Применить
+                  </motion.button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+          {result && status === 'done' && !brushing && (
+            <motion.div
+              key="actions"
               initial={{ opacity: 0, y: -8, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -8, height: 0 }}
               transition={spring}
             >
@@ -257,6 +320,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 <div className="flex flex-wrap gap-2">
                   <SecondaryButton onClick={download}>
                     <Download className="size-4" /> Скачать
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => { setUndoable(0); setBrushing(true) }}>
+                    <Eraser className="size-4" /> Кисть отката
                   </SecondaryButton>
                   <SecondaryButton onClick={continueFromResult}>
                     <Plus className="size-4" /> Ещё материал

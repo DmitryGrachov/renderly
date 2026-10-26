@@ -27,12 +27,13 @@ export function IconButton({ children, label, onClick, plain }: { children: Reac
   )
 }
 
-export function SecondaryButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+export function SecondaryButton({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
   return (
     <motion.button
-      whileTap={{ scale: 0.97 }}
+      whileTap={disabled ? undefined : { scale: 0.97 }}
       onClick={onClick}
-      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-fg/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-fg/[0.08] sm:flex-none"
+      disabled={disabled}
+      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-fg/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-fg/[0.08] disabled:opacity-40 sm:flex-none"
     >
       {children}
     </motion.button>
