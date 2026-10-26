@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Brush, Check, Download, Eraser, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Brush, Check, Download, Eraser, SunMedium, Pentagon, SquareDashed, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
@@ -11,6 +11,8 @@ import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
 import { ToolButton } from '../components/ToolButton'
 import { BrushOptions } from '../components/inpaint/Toolbar'
 import { HARDNESS_DEFAULT, type DrawTool, type Shape } from '../lib/brush'
+import { changedRegion, colorize, isNeutral, NEUTRAL, regionOverlay, type ColorValues } from '../lib/colorAdjust'
+import { ColorPanel } from '../components/ColorPanel'
 import { useScene, type Scene } from '../lib/scene'
 import { img2imgMaterials, MATERIAL_STAGES } from '../lib/api'
 import { fmt, modelById, useAccount } from '../lib/account'
@@ -77,6 +79,16 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   // применённый откат можно открыть снова: результат модели до отката и маска мазков
   const [raw, setRaw] = useState<string | null>(null)
   const [brushMask, setBrushMask] = useState<HTMLCanvasElement | null>(null)
+  // цепочка результата: модель (raw) → откат кистью (restored) → цвет (color); result.url — итог
+  const [restored, setRestored] = useState<string | null>(null)
+  const [color, setColor] = useState<ColorValues>(NEUTRAL)
+  const [colorOpen, setColorOpen] = useState(false)
+  const [colorWorking, setColorWorking] = useState(false)
+  const [showRegion, setShowRegion] = useState(false)
+  const [regionUrl, setRegionUrl] = useState<string | null>(null)
+  // область изменений — для того кадра, по которому посчитана (откат её меняет)
+  const region = useRef<{ url: string; mask: HTMLCanvasElement } | null>(null)
+  const colorTimer = useRef(0)
   // сдвиг прежнего кадра под кистью: стрелки — на 1 px, с Shift — на 5
   const [nudge, setNudge] = useState({ x: 0, y: 0 })
   const brush = useRef<RestoreBrushHandle>(null)
@@ -117,7 +129,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setBrushing(false)
     setSource(img)
     setHistory([])
-    setResult(null); setRaw(null); setBrushMask(null)
+    setResult(null); setRaw(null); setBrushMask(null); resetColor()
     setStatus('idle')
     setError(null)
   }
@@ -148,8 +160,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
         ctrl.signal,
       )
       setResult(res)
-      setRaw(null) // новый результат — прежний откат к нему не относится
+      setRaw(null) // новый результат — прежний откат и цвет к нему не относятся
       setBrushMask(null)
+      resetColor()
       for (const r of ready) charge('render', `Img to Img · Материалы · ${r.target.trim()}`, model)
       setView('compare')
       setStatus('done')
@@ -179,20 +192,68 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     const img = await urlToStudioImage(result.url, fileName())
     setHistory((h) => [...h, source])
     setSource(img)
-    setResult(null); setRaw(null); setBrushMask(null)
+    setResult(null); setRaw(null); setBrushMask(null); resetColor()
     setStatus('idle')
     setRows([newRow()])
   }
 
-  // мазки кисти отката — в результат: дальше скачивается, продолжается и уходит в Inpainting уже он
+  function resetColor() {
+    setRestored(null)
+    setColor(NEUTRAL)
+    setColorOpen(false)
+    setShowRegion(false)
+    setRegionUrl(null)
+    region.current = null
+  }
+
+  // кадр без цвета: откат, иначе результат модели
+  const plain = restored ?? raw ?? result?.url ?? null
+
+  async function regionFor(url: string) {
+    if (region.current?.url !== url) region.current = { url, mask: await changedRegion(source!.url, url) }
+    return region.current.mask
+  }
+
+  /** итог цепочки: цвет поверх кадра без цвета (только в области изменений) */
+  async function finalUrl(base: string, v: ColorValues) {
+    return isNeutral(v) ? base : colorize(base, await regionFor(base), v)
+  }
+
+  // мазки кисти отката — в результат: дальше скачивается, продолжается и уходит в Inpainting уже он; цвет, если
+  // был, ложится поверх заново — область по откату другая
   async function applyBrush() {
     if (!result || !brush.current) return
     const blob = await brush.current.toBlob()
+    const url = URL.createObjectURL(blob)
     setBrushMask(brush.current.mask())
     setRaw((r) => r ?? result.url)
-    setResult({ ...result, url: URL.createObjectURL(blob) })
+    setRestored(url)
+    setResult({ ...result, url: await finalUrl(url, color) })
     setBrushing(false)
     setView('result')
+  }
+
+  // ползунки цвета — пересборка с задержкой, пока тянут
+  function changeColor(v: ColorValues) {
+    if (!result || !plain) return
+    setColor(v)
+    setRaw((r) => r ?? plain)
+    clearTimeout(colorTimer.current)
+    const base = plain
+    colorTimer.current = window.setTimeout(async () => {
+      setColorWorking(true)
+      try {
+        const url = await finalUrl(base, v)
+        setResult((r) => (r ? { ...r, url } : r))
+      } finally {
+        setColorWorking(false)
+      }
+    }, 120)
+  }
+
+  async function toggleRegion(on: boolean) {
+    setShowRegion(on)
+    if (on && plain) setRegionUrl(await regionOverlay(await regionFor(plain)))
   }
 
   function undo() {
@@ -200,7 +261,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     if (!prev) return
     setHistory((h) => h.slice(0, -1))
     setSource(prev)
-    setResult(null); setRaw(null); setBrushMask(null)
+    setResult(null); setRaw(null); setBrushMask(null); resetColor()
     setStatus('idle')
   }
 
@@ -232,6 +293,13 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                           ref={brush} before={source.url} after={raw ?? result.url} initialMask={brushMask} imageStyle={imageStyle} size={brushSize}
                           onHistory={setUndoable} offset={nudge} tool={brushTool} shape={brushShape} hardness={hardness}
                         />
+                      ) : colorOpen ? (
+                        <>
+                          <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                          {showRegion && regionUrl && (
+                            <img src={regionUrl} alt="" className="pointer-events-none absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                          )}
+                        </>
                       ) : view === 'compare' ? (
                         <CompareSlider before={source.url} after={result.url} imageStyle={imageStyle} />
                       ) : (
@@ -257,6 +325,16 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                     </motion.div>
                   )}
                 </AnimatePresence>
+
+                {colorOpen && result && !running && !brushing && (
+                  <div className="absolute left-4 top-4 z-20">
+                    <ColorPanel
+                      values={color} onChange={changeColor} working={colorWorking}
+                      showRegion={showRegion} onShowRegion={toggleRegion}
+                      onDone={() => { setColorOpen(false); setShowRegion(false) }}
+                    />
+                  </div>
+                )}
 
                 {brushing && result && !running && (
                   <BrushOverlay
@@ -299,7 +377,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                           <Undo2 className="size-4" />
                         </IconButton>
                       )}
-                      <IconButton label="Убрать изображение" onClick={() => { abort.current?.abort(); setSource(null); setHistory([]); setResult(null); setRaw(null); setBrushMask(null); setStatus('idle') }}>
+                      <IconButton label="Убрать изображение" onClick={() => { abort.current?.abort(); setSource(null); setHistory([]); setResult(null); setRaw(null); setBrushMask(null); resetColor(); setStatus('idle') }}>
                         <X className="size-4" />
                       </IconButton>
                     </div>
@@ -328,7 +406,10 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                     <Download className="size-4" /> Скачать
                   </SecondaryButton>
                   {/* откат уже применён — открывается он же: те же мазки, край и сдвиг можно поменять */}
-                  <SecondaryButton onClick={() => { setUndoable(0); if (!brushMask) setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
+                  <SecondaryButton onClick={() => { setColorOpen(!colorOpen); setBrushing(false); setView('result') }}>
+                    <SunMedium className="size-4" /> {isNeutral(color) ? 'Цвет' : 'Править цвет'}
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => { setColorOpen(false); setUndoable(0); if (!brushMask) setNudge({ x: 0, y: 0 }); setBrushing(true) }}>
                     <Eraser className="size-4" /> {brushMask ? 'Править откат' : 'Кисть отката'}
                   </SecondaryButton>
                   <SecondaryButton onClick={continueFromResult}>

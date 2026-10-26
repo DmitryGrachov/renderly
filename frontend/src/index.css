@@ -185,4 +185,31 @@ html.theme-switching *::after {
     background: #fff;
     box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.18);
   }
+  /* ползунок с нулём посередине (цвет: −100…100): заливка от середины до бегунка */
+  .range-center {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(to right, var(--color-line) var(--from, 50%), var(--color-ink) var(--from, 50%),
+      var(--color-ink) var(--to, 50%), var(--color-line) var(--to, 50%));
+    outline: none;
+  }
+  .range-center::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.18);
+    cursor: grab;
+  }
+  .range-center::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 2px 8px rgb(0 0 0 / 0.18);
+  }
 }

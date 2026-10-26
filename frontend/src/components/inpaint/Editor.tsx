@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Check, Columns2, Download, Eye, History, X } from 'lucide-react'
+import { ArrowRight, Check, Columns2, Download, Eye, History, SunMedium, X } from 'lucide-react'
 import { BrushOptions, MODE_COLOR, ModeSwitch, Toolbar, type Shape, type Tool } from './Toolbar'
 import { ZoomControls } from '../ZoomControls'
 import { CompareSlider } from '../CompareSlider'
@@ -14,12 +14,16 @@ import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
 import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
 import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints } from '../../lib/brush'
+import { changedRegion, colorize, NEUTRAL, regionOverlay, type ColorValues } from '../../lib/colorAdjust'
+import { ColorPanel } from '../ColorPanel'
 
 interface Pt { x: number; y: number }
 interface Box { x: number; y: number; w: number; h: number }
 /** откат кистью: из чего собран и с каким краем — край можно поменять и после «Применить» */
 interface RestoreEdit { cur: string; prev: string; mask: HTMLCanvasElement; hardness: number }
-interface Version { url: string; label: string; mode?: InpaintMode; restore?: RestoreEdit }
+/** цвет сгенерированного: версия «Цвет» — base с поправленным цветом там, где base отличается от prev */
+interface ColorEdit { base: string; prev: string; values: ColorValues }
+interface Version { url: string; label: string; mode?: InpaintMode; restore?: RestoreEdit; color?: ColorEdit }
 /** выбранное инструментом «Выбор маски»: элементы и их маска (в размере карты), нарисованная на канвасе маски */
 interface Pick { ids: Set<number>; mask: Uint8Array | null }
 
@@ -474,6 +478,57 @@ export function Editor({ image, onClose }: Props) {
     }, 250)
   }
 
+  // цвет: версия «Цвет» пересобирается на месте, пока тянут ползунки; область — где правка отличается от прошлой версии
+  const [colorOpen, setColorOpen] = useState(false)
+  const [colorWorking, setColorWorking] = useState(false)
+  const [colorDraft, setColorDraft] = useState<ColorValues | null>(null)
+  const [showRegion, setShowRegion] = useState(false)
+  const [regionUrl, setRegionUrl] = useState<string | null>(null)
+  const colorRegion = useRef<{ key: string; mask: HTMLCanvasElement } | null>(null)
+  const colorTimer = useRef(0)
+  const editedColor = versions[current]?.color
+  useEffect(() => { setColorDraft(null); setShowRegion(false); setRegionUrl(null) }, [current])
+
+  async function colorRegionFor(e: ColorEdit) {
+    const key = `${e.prev} ${e.base}`
+    if (colorRegion.current?.key !== key) colorRegion.current = { key, mask: await changedRegion(e.prev, e.base) }
+    return colorRegion.current.mask
+  }
+
+  // «Цвет»: на версии с цветом — открыть ползунки; иначе новая версия «Цвет» поверх текущей (пока без изменений)
+  function openColor() {
+    if (current === 0 || busy) return
+    if (!editedColor) {
+      const edit: ColorEdit = { base: versions[current].url, prev: versions[current - 1].url, values: NEUTRAL }
+      setVersions((v) => [...v.slice(0, current + 1), { url: edit.base, label: 'Цвет', color: edit }])
+      setCurrent((c) => c + 1)
+    }
+    setColorOpen(true)
+    setCompareOn(false)
+  }
+
+  function changeColor(values: ColorValues) {
+    if (!editedColor) return
+    setColorDraft(values)
+    clearTimeout(colorTimer.current)
+    const at = current
+    const edit = { ...editedColor, values }
+    colorTimer.current = window.setTimeout(async () => {
+      setColorWorking(true)
+      try {
+        const url = await colorize(edit.base, await colorRegionFor(edit), values)
+        setVersions((vs) => vs.map((x, n) => (n === at ? { ...x, url, color: edit } : x)))
+      } finally {
+        setColorWorking(false)
+      }
+    }, 120)
+  }
+
+  async function toggleRegion(on: boolean) {
+    setShowRegion(on)
+    if (on && editedColor) setRegionUrl(await regionOverlay(await colorRegionFor(editedColor)))
+  }
+
   /* ---------------- drawing ---------------- */
 
   const toMask = (e: React.PointerEvent): Pt => {
@@ -819,6 +874,11 @@ export function Editor({ image, onClose }: Props) {
             />
           </AnimatePresence>
 
+          {/* цвет: где действуют ползунки */}
+          {colorOpen && editedColor && showRegion && regionUrl && !peek && (
+            <img src={regionUrl} alt="" draggable={false} className="pointer-events-none absolute inset-0 z-[1] size-full" />
+          )}
+
           {/* кисть отката: предыдущая версия, проступающая под мазками */}
           <canvas
             ref={previewRef}
@@ -985,6 +1045,21 @@ export function Editor({ image, onClose }: Props) {
           </AnimatePresence>
         </div>
 
+        {/* цвет сгенерированного */}
+        <AnimatePresence>
+          {colorOpen && editedColor && !busy && !compare && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+              className="absolute right-16 top-16 z-30"
+            >
+              <ColorPanel
+                values={colorDraft ?? editedColor.values} onChange={changeColor} working={colorWorking}
+                showRegion={showRegion} onShowRegion={toggleRegion} onDone={() => { setColorOpen(false); setShowRegion(false) }}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* слева: инструменты */}
         <div className="absolute left-4 top-1/2 z-20 -translate-y-1/2">
           <Toolbar
@@ -1129,7 +1204,7 @@ export function Editor({ image, onClose }: Props) {
         <div className="-m-1 flex min-w-0 flex-1 gap-2 overflow-x-auto p-1 pb-1.5">
           {versions.map((v, i) => (
             <button
-              key={v.url}
+              key={`${i}-${v.url}`}
               onClick={() => !busy && setCurrent(i)}
               title={v.label}
               className="group flex w-[76px] shrink-0 flex-col gap-1 text-left"
@@ -1170,6 +1245,17 @@ export function Editor({ image, onClose }: Props) {
             title="Шторка: исходник и текущая версия"
           >
             <Columns2 className="size-4" /> До / после
+          </button>
+          <button
+            disabled={current === 0 || !!busy}
+            onClick={() => (colorOpen && editedColor ? setColorOpen(false) : openColor())}
+            aria-pressed={colorOpen && !!editedColor}
+            className={`flex flex-1 select-none items-center justify-center gap-2 rounded-full px-4 py-2.5 text-[13.5px] font-medium transition-colors disabled:opacity-40 sm:flex-none ${
+              colorOpen && editedColor ? 'bg-ink text-on-ink hover:bg-ink-hover' : 'bg-fg/[0.05] hover:bg-fg/[0.08] active:bg-fg/[0.12]'
+            }`}
+            title="Яркость, контраст и насыщенность — только там, где эта правка изменила кадр"
+          >
+            <SunMedium className="size-4" /> Цвет
           </button>
           <button
             onClick={download}
