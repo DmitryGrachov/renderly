@@ -83,9 +83,10 @@ QWEN21 = {
 # площадь кропа для Qwen-Image-2.1 (Мп): модель родная для 2K — на ~1 Мп объект на большом рендере рисовался
 # вдвое мельче итогового и выходил «пластиковым»
 QWEN21_MEGAPIXELS = float(os.getenv("QWEN21_MEGAPIXELS", "2.0"))
-# Img to Img на Qwen-Image-2.1: площадь кадра (Мп). Модель родная для 2K, но в последовательности ещё исходник
-# и референс: на 2 Мп ComfyUI на 16 ГБ падал по CUDA OOM
-QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "1.5"))
+# Img to Img на Qwen-Image-2.1 (рендер и «Материалы»): площадь кадра (Мп). Модель родная для 2K; раньше на 2 Мп
+# ComfyUI на 16 ГБ падал по CUDA OOM, сейчас (RTX 5080, --reserve-vram 2, повтор после OOM в _run) рендер с
+# сохранением зон проходит: пик видеопамяти 15.7 ГБ из 16.3, кадр не уезжает — запас малый
+QWEN21_RENDER_MEGAPIXELS = float(os.getenv("QWEN21_RENDER_MEGAPIXELS", "2.0"))
 # Img to Img на Qwen-Image-2.1, «Сохранить небо / фон / окружение»: шагов перерисовки зон из 8
 # (больше — фотореальнее, но 2.1 начинает подменять деревья и добавлять объекты с референса)
 QWEN21_ZONE_STEPS = int(os.getenv("QWEN21_ZONE_STEPS", "6"))
@@ -99,8 +100,9 @@ IMG2IMG_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, *QWEN21_MODELS]
 # модели генерации, доступные в Inpainting
 INPAINT_MODELS = [*FLUX_MODELS, QWEN_EDIT_MODEL, *QWEN21_MODELS]
 FLUX_VAE = os.getenv("FLUX_VAE", "flux2-vae.safetensors")
-# Площадь кадра генерации в мегапикселях (пропорции исходника сохраняются)
-RENDER_MEGAPIXELS = float(os.getenv("RENDER_MEGAPIXELS", "1.5"))
+# FLUX.2 klein: площадь кадра генерации в мегапикселях (пропорции исходника сохраняются). 2 Мп — верх рекомендации
+# BFL; против 1.5 чётче швы кирпича и фактура камня, klein 9B рендер с зонами ~95 с, без OOM
+RENDER_MEGAPIXELS = float(os.getenv("RENDER_MEGAPIXELS", "2.0"))
 COMFY_TIMEOUT = float(os.getenv("COMFY_TIMEOUT", "600"))
 # «Сохранить небо / фон / окружение»: доля шагов перерисовки сохраняемых зон по маске
 # (меньше — ближе к исходнику, больше — фотореальнее и ближе к референсу, но расклад может поплыть)
@@ -114,5 +116,5 @@ SKY_MATCH = float(os.getenv("SKY_MATCH", "0"))
 LOCAL_LIGHT = float(os.getenv("LOCAL_LIGHT", "0.6"))
 # Inpainting: площадь кропа вокруг маски в мегапикселях (мелкий объект получает полное разрешение модели)
 INPAINT_MEGAPIXELS = float(os.getenv("INPAINT_MEGAPIXELS", "1.0"))
-# кроп правки на FLUX.2 klein (Мп): BFL рекомендует до 2 Мп; 1.5 — как Img to Img, помещается в 16 ГБ с 9B
-FLUX_INPAINT_MEGAPIXELS = float(os.getenv("FLUX_INPAINT_MEGAPIXELS", "1.5"))
+# кроп правки на FLUX.2 klein (Мп): BFL рекомендует до 2 Мп — как Img to Img; 9B помещается в 16 ГБ
+FLUX_INPAINT_MEGAPIXELS = float(os.getenv("FLUX_INPAINT_MEGAPIXELS", "2.0"))
