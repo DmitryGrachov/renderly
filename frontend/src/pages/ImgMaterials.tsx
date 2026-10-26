@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Check, Download, Eraser, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowRight, Check, Download, Eraser, PenLine, Plus, RefreshCw, RotateCcw, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
 import { GeneratingOverlay } from '../components/GeneratingOverlay'
 import { RestoreBrush, type RestoreBrushHandle } from '../components/RestoreBrush'
+import { HintLayer, strokesPng, type HintStroke } from '../components/HintLayer'
 import { TextureDrop } from '../components/inpaint/ActionPopover'
 import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
 import { useScene, type Scene } from '../lib/scene'
@@ -21,6 +22,8 @@ interface Row {
   target: string
   /** ползунок «Размер»: log2 множителя размера элементов, 0 — как на образце */
   size: number
+  /** цвет штрихов-подсказок этого образца на кадре */
+  color: string
 }
 
 interface Props {
@@ -43,7 +46,11 @@ const TARGET_PLACEHOLDER: Record<Scene, string> = {
 }
 
 let nextId = 1
-const newRow = (): Row => ({ id: nextId++, texture: null, target: '', size: 0 })
+// цвета штрихов: у каждого образца свой, различимы на фото и друг с другом
+const HINT_COLORS = ['#ff7a1a', '#2f6bff', '#22c55e']
+const newRow = (taken: string[] = []): Row => ({
+  id: nextId++, texture: null, target: '', size: 0, color: HINT_COLORS.find((c) => !taken.includes(c)) ?? HINT_COLORS[0],
+})
 // размер элементов ×0.25…×3 (как на бэкенде, MIN_SCALE / MAX_SCALE): шкала логарифмическая, ×1 посередине по смыслу
 const SIZE_MIN = -2
 const SIZE_MAX = Math.log2(3)
@@ -58,6 +65,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   // предыдущие исходники — «Продолжить с результатом» можно откатить
   const [history, setHistory] = useState<StudioImage[]>([])
   const [rows, setRows] = useState<Row[]>(() => [newRow()])
+  // штрихи-подсказки на кадре (в его пикселях) и за какой образец сейчас рисуем
+  const [strokes, setStrokes] = useState<HintStroke[]>([])
+  const [hinting, setHinting] = useState<number | null>(null)
   const [status, setStatus] = useState<Status>('idle')
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState('')
@@ -92,12 +102,17 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   }, [incoming])
 
   const running = status === 'running'
-  const ready = rows.filter((r) => r.texture && r.target.trim())
-  const incomplete = rows.some((r) => !!r.texture !== !!r.target.trim())
+  // куда положить — словами или штрихами на кадре (или и тем и другим)
+  const marked = (r: Row) => !!r.target.trim() || strokes.some((s) => s.row === r.id)
+  const ready = rows.filter((r) => r.texture && marked(r))
+  const incomplete = rows.some((r) => !!r.texture !== marked(r))
+  const hintRow = rows.find((r) => r.id === hinting) ?? null
   const canGenerate = !!source && !running && ready.length > 0 && !incomplete
 
   function takeSource(img: StudioImage) {
     abort.current?.abort()
+    setStrokes([])
+    setHinting(null)
     setBrushing(false)
     setSource(img)
     setHistory([])
@@ -122,12 +137,19 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     const ctrl = new AbortController()
     abort.current = ctrl
     setBrushing(false)
+    setHinting(null)
     setStatus('running')
     setProgress(0)
     setError(null)
     try {
       const res = await img2imgMaterials(
-        { image: source.file, imageUrl: source.url, llm, model, items: ready.map((r) => ({ texture: r.texture!, target: r.target, scale: sizeScale(r.size) })) },
+        {
+          image: source.file, imageUrl: source.url, llm, model,
+          items: await Promise.all(ready.map(async (r) => ({
+            texture: r.texture!, target: r.target, scale: sizeScale(r.size),
+            hint: await strokesPng(strokes, r.id, source.width, source.height),
+          }))),
+        },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )
@@ -164,6 +186,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setResult(null)
     setStatus('idle')
     setRows([newRow()])
+    setStrokes([]) // штрихи были к прежнему кадру и его образцам
   }
 
   // мазки кисти отката — в результат: дальше скачивается, продолжается и уходит в Inpainting уже он
@@ -204,9 +227,9 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
                 transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
               >
-                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && (view === 'compare' || brushing))}>
+                <ZoomView aspect={source.width / source.height} panWithLeft={!(hintRow || (result && (view === 'compare' || brushing)))}>
                   {(imageStyle) =>
-                    result && !running ? (
+                    result && !running && !hintRow ? (
                       brushing ? (
                         <RestoreBrush
                           ref={brush} before={source.url} after={result.url} imageStyle={imageStyle} size={brushSize}
@@ -218,7 +241,17 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                         <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
                       )
                     ) : (
-                      <img src={source.url} alt={source.name} className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                      <>
+                        <img src={source.url} alt={source.name} className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                        {/* штрихи — поверх исходника; рисовать — когда у образца нажато «Отметить на кадре» */}
+                        {!running && (
+                          <HintLayer
+                            width={source.width} height={source.height} strokes={strokes} imageStyle={imageStyle}
+                            active={hintRow && { row: hintRow.id, color: hintRow.color }}
+                            onStroke={(s) => setStrokes((ss) => [...ss, s])}
+                          />
+                        )}
+                      </>
                     )
                   }
                 </ZoomView>
@@ -386,7 +419,11 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                         aria-label="Убрать образец"
                         title="Убрать образец"
                         disabled={running}
-                        onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}
+                        onClick={() => {
+                          setRows((rs) => rs.filter((x) => x.id !== r.id))
+                          setStrokes((ss) => ss.filter((s) => s.row !== r.id))
+                          if (hinting === r.id) setHinting(null)
+                        }}
                         className="absolute right-0 top-2 z-10 grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.06] hover:text-ink disabled:opacity-40"
                       >
                         <Trash2 className="size-3.5" />
@@ -396,6 +433,15 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       <TextureDrop texture={r.texture} onTexture={(f) => update(r.id, { texture: f })} width="" />
                     </div>
                     {r.texture && <SizeSlider value={r.size} onChange={(v) => update(r.id, { size: v })} disabled={running} />}
+                    <HintControls
+                      color={r.color}
+                      active={hinting === r.id}
+                      count={strokes.filter((s) => s.row === r.id).length}
+                      disabled={running || !source}
+                      onToggle={() => setHinting((h) => (h === r.id ? null : r.id))}
+                      onUndo={() => setStrokes((ss) => { const i = ss.map((s) => s.row).lastIndexOf(r.id); return ss.filter((_, k) => k !== i) })}
+                      onClear={() => setStrokes((ss) => ss.filter((s) => s.row !== r.id))}
+                    />
                     <textarea
                       value={r.target}
                       onChange={(e) => update(r.id, { target: e.target.value })}
@@ -426,7 +472,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
           {rows.length < MAX_ROWS && (
             <button
-              onClick={() => setRows((rs) => [...rs, newRow()])}
+              onClick={() => setRows((rs) => [...rs, newRow(rs.map((x) => x.color))])}
               disabled={running}
               className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-full py-2 text-[13px] font-medium text-ink-2 ring-1 ring-fg/[0.08] transition-colors hover:bg-fg/[0.04] hover:text-ink disabled:opacity-50"
             >
@@ -502,6 +548,43 @@ function SizeSlider({ value, onChange, disabled }: { value: number; onChange: (v
         <span>Мельче</span>
         <span>Крупнее</span>
       </div>
+    </div>
+  )
+}
+
+/** Штрихи-подсказки образца: «Отметить на кадре» — галочки и прочерки его цветом; подсказка DeepSeek, не маска. */
+function HintControls({ color, active, count, disabled, onToggle, onUndo, onClear }: {
+  color: string
+  active: boolean
+  count: number
+  disabled?: boolean
+  onToggle: () => void
+  onUndo: () => void
+  onClear: () => void
+}) {
+  return (
+    <div className="mt-2 flex items-center gap-2 text-[12.5px]">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onToggle}
+        title="Галочки и прочерки на кадре — подсказка, какие поверхности имеются в виду"
+        className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium ring-1 transition-colors disabled:opacity-50 ${
+          active ? 'text-on-ink ring-transparent' : 'text-ink-2 ring-fg/[0.08] hover:bg-fg/[0.04] hover:text-ink'
+        }`}
+        style={active ? { background: color } : undefined}
+      >
+        <span className="size-2.5 rounded-full ring-1 ring-white/60" style={{ background: color }} />
+        <PenLine className="size-3.5" />
+        {active ? 'Готово' : 'Отметить на кадре'}
+      </button>
+      {count > 0 && (
+        <>
+          <span className="tabular-nums text-faint">{count} {count === 1 ? 'штрих' : count < 5 ? 'штриха' : 'штрихов'}</span>
+          <button type="button" disabled={disabled} onClick={onUndo} className="text-mute hover:text-ink disabled:opacity-50">отменить</button>
+          <button type="button" disabled={disabled} onClick={onClear} className="text-mute hover:text-ink disabled:opacity-50">очистить</button>
+        </>
+      )}
     </div>
   )
 }

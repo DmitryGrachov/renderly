@@ -121,6 +121,9 @@ async def img2img_materials(
     targets: list[str] = Form(...),
     # размер элементов материала ×scale (ползунок «Размер»), попарно с образцами; 1 — как на образце
     scales: list[float] | None = Form(None),
+    # штрихи-подсказки (прозрачный PNG в размере кадра) и к какому образцу каждый (индекс) — только для DeepSeek
+    hints: list[UploadFile] | None = File(None),
+    hint_for: list[int] | None = Form(None),
     seed: int | None = Form(None, ge=0, lt=2**48),
     # модель из селектора в шапке: у каждой свой пайплайн (texturing.py)
     model: str = Form(QWEN_EDIT_MODEL),
@@ -140,11 +143,15 @@ async def img2img_materials(
     scales = scales or [1.0] * len(textures)
     if len(scales) != len(textures) or not all(texturing.MIN_SCALE <= k <= texturing.MAX_SCALE for k in scales):
         raise HTTPException(400, f"Размер: от ×{texturing.MIN_SCALE:g} до ×{texturing.MAX_SCALE:g}")
+    hints, hint_for = hints or [], hint_for or []
+    if len(hints) != len(hint_for) or not all(0 <= k < len(textures) for k in hint_for):
+        raise HTTPException(400, "Штрихи: к каждому — номер образца")
+    by_item = {k: await h.read() for k, h in zip(hint_for, hints)}
     items = []
-    for tex, where, scale in zip(textures, targets, scales):
+    for n, (tex, where, scale) in enumerate(zip(textures, targets, scales)):
         where = " ".join(where.split())[:300]
-        if not where:
-            raise HTTPException(400, "Опишите, куда положить материал")
+        if not where and n not in by_item:
+            raise HTTPException(400, "Опишите или отметьте на кадре, куда положить материал")
         data = await tex.read()
         if len(data) > TEXTURE_MAX_BYTES:
             raise HTTPException(400, f"Текстура больше {TEXTURE_MAX_BYTES // 2**20} МБ")
@@ -152,7 +159,7 @@ async def img2img_materials(
             inpainting.decode_texture(data)
         except Exception as e:  # noqa: BLE001 — не картинка
             raise HTTPException(400, "Текстура: нужен файл изображения (JPG, PNG, WebP, EXR)") from e
-        items.append((data, where, scale))
+        items.append((data, where, scale, by_item.get(n)))
     try:
         result, used_seed = await texturing.run_materials(await image.read(), items, seed, model)
     except comfy.ModelUnavailable as e:

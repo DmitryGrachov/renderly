@@ -106,6 +106,8 @@ export interface MaterialItem {
   target: string
   /** Размер элементов материала ×scale: мельче / крупнее, чем на образце; 1 — как есть */
   scale?: number
+  /** Штрихи-подсказки на кадре (прозрачный PNG в его размере) — только для разбора DeepSeek */
+  hint?: Blob | null
 }
 
 export interface MaterialsRequest {
@@ -142,6 +144,11 @@ export async function img2imgMaterials(req: MaterialsRequest, onProgress: Progre
     }
     const body = new FormData()
     body.append('image', req.image)
+    req.items.forEach((it, i) => {
+      if (!it.hint) return
+      body.append('hints', it.hint, `hint_${i}.png`)
+      body.append('hint_for', String(i))
+    })
     for (const it of req.items) {
       body.append('textures', it.texture)
       body.append('targets', it.target.trim())

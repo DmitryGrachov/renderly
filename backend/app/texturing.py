@@ -63,6 +63,20 @@ TARGET_SYSTEM = (
     '"target": "<the surfaces that get the material, 4-20 words>", '
     '"keep": ["<element that stays, 3-12 words>", ...]}'
 )
+# штрихи пользователя (галочки, прочерки цветом образца) — только для DeepSeek: подсказка, какие поверхности имеются
+# в виду. Модель штрихов не видит: разметку на картинке модели копируют в кадр (в Inpainting — красные кольца и пятна),
+# а как границы она превратила бы подсказку в маску
+HINT_RULE = (
+    " Picture 3 is Picture 1 with the user's coloured strokes: quick ticks and lines put on the surfaces they mean. "
+    "They are hints, not borders: the material goes on the whole face each stroke lies on (that continuous plane up "
+    "to its corners, edges and openings), not just under the stroke. Faces without a stroke keep their current look "
+    "even if they have the same finish, unless the user's words say 'all' or name them: name such faces of the same "
+    "finish in 'keep' first (e.g. 'the white plaster front wall with the entrance'). A stroke end that slips onto the "
+    "ground, sky or a neighbouring element does not count. Describe the target by its look and exact place (which "
+    "face, which side of the building), never mention the strokes."
+)
+HINT_WHERE = "the surfaces marked by the strokes"  # штрихи есть, слов нет
+
 # что сохранить — первым: в длинном запросе 2511 теряла исключения. {a} — кадр, {b} — образец, как их зовёт модель
 PROMPT = (
     "Keep {keep} exactly as in {a}. Only {target} become the {material} from {b}, at true real-world scale, "
@@ -202,21 +216,37 @@ def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
-async def _parts(frame: bytes, sample: bytes, where: str) -> dict:
-    """Части запроса от DeepSeek: material, target, keep. Без DeepSeek или при ошибке — слова пользователя как есть."""
-    fallback = {"material": "material", "target": where, "keep": []}
+def _hinted(frame: Image.Image, hint: bytes) -> bytes:
+    """Кадр со штрихами поверх (Picture 3 для DeepSeek). Штрихи — прозрачный PNG в размере исходника."""
+    strokes = Image.open(io.BytesIO(hint)).convert("RGBA").resize(frame.size, Image.LANCZOS)
+    out = frame.convert("RGBA")
+    out.alpha_composite(strokes)
+    return to_png(out.convert("RGB"))
+
+
+async def _parts(frame: bytes, sample: bytes, where: str, hinted: bytes | None = None) -> dict:
+    """Части запроса от DeepSeek: material, target, keep. Без DeepSeek или при ошибке — слова пользователя как есть.
+    hinted — кадр со штрихами пользователя (Picture 3)."""
+    fallback = {"material": "material", "target": where or HINT_WHERE, "keep": []}
     if not DEEPSEEK_API_KEY:
         return fallback
-    key = hashlib.sha256(b"img2img-material-parts" + frame + sample + where.encode() + llm_model.get().encode()).hexdigest()
+    key = hashlib.sha256(
+        b"img2img-material-parts" + frame + sample + (hinted or b"") + where.encode() + llm_model.get().encode()
+    ).hexdigest()
     if key in _described:
         return _described[key]
+    pictures = [("Picture 1", frame, 1536), ("Picture 2", sample, TEXTURE_SIDE)]
+    if hinted:
+        pictures.append(("Picture 3", hinted, 1536))
     content = []
-    for name, data, side in (("Picture 1", frame, 1536), ("Picture 2", sample, TEXTURE_SIDE)):
+    for name, data, side in pictures:
         content += [{"type": "text", "text": f"{name}:"}, {"type": "image_url", "image_url": {"url": _data_url(data, side)}}]
-    content.append({"type": "text", "text": f"Where the material goes: «{where}»"})
+    content.append({"type": "text", "text": f"Where the material goes: «{where or HINT_WHERE}»"})
     try:
-        data = json.loads(await _chat([{"role": "system", "content": TARGET_SYSTEM}, {"role": "user", "content": content}],
-                                      json_mode=True))
+        data = json.loads(await _chat(
+            [{"role": "system", "content": TARGET_SYSTEM + (HINT_RULE if hinted else "")}, {"role": "user", "content": content}],
+            json_mode=True,
+        ))
     except Exception as e:  # noqa: BLE001 — без DeepSeek остаются слова пользователя
         log.warning("Разбор материала (Img to Img) недоступен: %s", e)
         return fallback
@@ -224,7 +254,7 @@ async def _parts(frame: bytes, sample: bytes, where: str) -> dict:
     keep = [clean(k) for k in data.get("keep") or [] if clean(k)] if isinstance(data.get("keep"), list) else []
     parts = {
         "material": clean(data.get("material")) or "material",
-        "target": clean(data.get("target")) or where,
+        "target": clean(data.get("target")) or where or HINT_WHERE,
         "keep": keep[:5],
     }
     _described[key] = parts
@@ -234,11 +264,13 @@ async def _parts(frame: bytes, sample: bytes, where: str) -> dict:
 
 
 async def run_materials(
-    image: bytes, items: list[tuple[bytes, str, float]], seed: int | None = None, model: str = QWEN_EDIT_MODEL
+    image: bytes, items: list[tuple[bytes, str, float, bytes | None]], seed: int | None = None,
+    model: str = QWEN_EDIT_MODEL,
 ) -> tuple[bytes, int]:
     """JPEG кадра с материалами (в разрешении генерации, в пропорциях исходника) и сид.
 
-    items — [(образец, где положить, размер элементов ×scale — ползунок «Размер»)], по порядку; каждый
+    items — [(образец, где положить, размер элементов ×scale — ползунок «Размер», штрихи-подсказка PNG или None)],
+    по порядку; каждый
     следующий проход идёт по результату предыдущего."""
     if seed is None:
         seed = random.randrange(2**48)
@@ -249,17 +281,17 @@ async def run_materials(
     frame = src.resize(size, Image.LANCZOS)
     async with httpx.AsyncClient(base_url=COMFYUI_URL, timeout=60) as client:
         await _check_model(client, model)  # веса на месте; прежняя модель другого семейства выгружается
-        for i, (data, where, scale) in enumerate(items):
+        for i, (data, where, scale, hint) in enumerate(items):
             sample = _sample_png(data, scale)
             frame_png = to_png(frame)
             # что за материал — по исходному образцу: перемасштабированный — тот же материал, кэш не дробится
-            p = await _parts(frame_png, _sample_png(data), where)
+            p = await _parts(frame_png, _sample_png(data), where, _hinted(frame, hint) if hint else None)
             first = lambda t: t[:1].lower() + t[1:]  # noqa: E731
             fmt = {"target": first(p["target"]), "material": first(p["material"]), "a": a, "b": b}
             prompt = PROMPT.format(keep=first(_join(p["keep"])), **fmt) if p["keep"] else PROMPT_NOKEEP.format(**fmt)
             prompt = prompt[:1].upper() + prompt[1:]
-            log.info("материал %s %d/%d %dx%d seed=%d «%s» размер ×%.2f\n%s",
-                     model, i + 1, len(items), *size, seed + i, where, scale, prompt)
+            log.info("материал %s %d/%d %dx%d seed=%d «%s»%s размер ×%.2f\n%s",
+                     model, i + 1, len(items), *size, seed + i, where, " + штрихи" if hint else "", scale, prompt)
             src_name = await _upload(client, frame_png, f"{uuid.uuid4().hex}.png")
             tex_name = await _upload(client, sample, f"{uuid.uuid4().hex}.png")
             if family == "qwen2511":
