@@ -64,14 +64,16 @@ TARGET_SYSTEM = (
     '"keep": ["<element that stays, 3-12 words>", ...]}'
 )
 # что сохранить — первым: в длинном запросе 2511 теряла исключения. {a} — кадр, {b} — образец, как их зовёт модель
+# тени — отдельно: газон под грунт выходил ровно освещённым, тени деревьев пропадали, и грунт выглядел наклеенным
 PROMPT = (
     "Keep {keep} exactly as in {a}. Only {target} become the {material} from {b}, at true real-world scale, "
-    "following each surface's perspective and the light of {a}. Window frames, doors, roof and everything else "
-    "stay unchanged."
+    "following each surface's perspective and the light of {a}; every shadow that falls on them stays where it "
+    "is. Window frames, doors, roof and everything else stay unchanged."
 )
 PROMPT_NOKEEP = (
     "Only {target} become the {material} from {b}, at true real-world scale, following each surface's perspective "
-    "and the light of {a}. Window frames, doors, roof and everything else stay unchanged."
+    "and the light of {a}; every shadow that falls on them stays where it is. Window frames, doors, roof and "
+    "everything else stay unchanged."
 )
 # как модель зовёт картинки в запросе
 PICTURES = {"qwen2511": ("Picture 1", "Picture 2"), "qwen21": ("<image1>", "<image2>"), "flux": ("image 1", "image 2")}
