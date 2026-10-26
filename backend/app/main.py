@@ -9,6 +9,7 @@ from fastapi.responses import Response
 from . import comfy
 from . import inpaint as inpainting
 from . import materials as material_map
+from . import texturing
 from .auth import current_user
 from .auth import router as auth_router
 from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, log
@@ -106,6 +107,52 @@ async def img2img(
         raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:
         log.exception("img2img failed")
+        raise HTTPException(502, f"Генерация не удалась: {e}") from e
+    return Response(content=result, media_type="image/jpeg", headers={"X-Seed": str(used_seed)})
+
+
+@app.post("/api/img2img/materials")
+async def img2img_materials(
+    image: UploadFile = File(...),
+    # образцы и где их положить — попарно, по порядку («на стены дома», «цоколь»)
+    textures: list[UploadFile] = File(...),
+    targets: list[str] = Form(...),
+    # размер элементов материала ×scale (ползунок «Размер»), попарно с образцами; 1 — как на образце
+    scales: list[float] | None = Form(None),
+    seed: int | None = Form(None, ge=0, lt=2**48),
+    llm: str = Form(DEEPSEEK_MODEL),
+    _user: User = Depends(current_user),
+):
+    """Img to Img, «Материалы»: образцы материалов на поверхности по описанию — Qwen-Image-Edit-2511 без масок."""
+    if llm not in DEEPSEEK_MODELS:
+        raise HTTPException(400, f"Unknown llm: {llm}")
+    llm_model.set(llm)
+    if not textures or len(textures) != len(targets):
+        raise HTTPException(400, "К каждому образцу — где его положить")
+    if len(textures) > texturing.MAX_SAMPLES:
+        raise HTTPException(400, f"Не больше {texturing.MAX_SAMPLES} образцов за раз")
+    scales = scales or [1.0] * len(textures)
+    if len(scales) != len(textures) or not all(texturing.MIN_SCALE <= k <= texturing.MAX_SCALE for k in scales):
+        raise HTTPException(400, f"Размер: от ×{texturing.MIN_SCALE:g} до ×{texturing.MAX_SCALE:g}")
+    items = []
+    for tex, where, scale in zip(textures, targets, scales):
+        where = " ".join(where.split())[:300]
+        if not where:
+            raise HTTPException(400, "Опишите, куда положить материал")
+        data = await tex.read()
+        if len(data) > TEXTURE_MAX_BYTES:
+            raise HTTPException(400, f"Текстура больше {TEXTURE_MAX_BYTES // 2**20} МБ")
+        try:
+            inpainting.decode_texture(data)
+        except Exception as e:  # noqa: BLE001 — не картинка
+            raise HTTPException(400, "Текстура: нужен файл изображения (JPG, PNG, WebP, EXR)") from e
+        items.append((data, where, scale))
+    try:
+        result, used_seed = await texturing.run_materials(await image.read(), items, seed)
+    except comfy.ModelUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    except (comfy.ComfyError, httpx.HTTPError) as e:
+        log.exception("img2img materials failed")
         raise HTTPException(502, f"Генерация не удалась: {e}") from e
     return Response(content=result, media_type="image/jpeg", headers={"X-Seed": str(used_seed)})
 

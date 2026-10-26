@@ -185,7 +185,7 @@ const isExr = (f: File) => f.name.toLowerCase().endsWith('.exr')
 export const isTextureFile = (f: File) => TEXTURE_TYPES.includes(f.type) || isExr(f)
 
 /** Образец материала (фото или BaseColor набора, в т.ч. EXR): перетащить или выбрать по клику; превью, «убрать». */
-function TextureDrop({ texture, onTexture, width, onWidth }: {
+export function TextureDrop({ texture, onTexture, width, onWidth }: {
   texture: File | null
   onTexture: (f: File | null) => void
   width: string

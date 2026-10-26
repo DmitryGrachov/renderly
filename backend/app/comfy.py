@@ -343,9 +343,11 @@ def build_qwen2511_workflow(
     zone_prompt: str = "",
     sky_ref: str | None = None,
     sky_match: bool = False,
+    samples: list[str] | None = None,
 ) -> dict:
     """Img to Img на Qwen-Image-Edit-2511 (см. docstring модуля): Picture 1 — исходник, затем небо референса
-    (и сам референс перед ним при QWEN_EDIT_REF_IMAGE); референс в workflow — для InegoSkyMatch."""
+    (и сам референс перед ним при QWEN_EDIT_REF_IMAGE); референс в workflow — для InegoSkyMatch.
+    samples — образцы материалов (Img to Img, «Материалы»): следующими картинками после исходника."""
     q = QWEN_EDIT
     wf: dict = {
         "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": q["unet"]}},
@@ -365,6 +367,9 @@ def build_qwen2511_workflow(
         if sky_ref and not keep_sky:
             wf["sky_ref_img"] = {"class_type": "LoadImage", "inputs": {"image": sky_ref}}
             images[f"image{len(images) + 1}"] = ["sky_ref_img", 0]
+    for i, name in enumerate(samples or []):
+        wf[f"sample_img{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        images[f"image{len(images) + 1}"] = [f"sample_img{i}", 0]
 
     def encode(tag: str, text: str) -> str:
         for kind, t in (("pos", text), ("neg", "")):

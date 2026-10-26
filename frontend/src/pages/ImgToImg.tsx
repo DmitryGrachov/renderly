@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowRight, Dices, Download, Lock, LockOpen, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
+import { ArrowRight, BrickWall, Dices, Download, Lock, LockOpen, RotateCcw, Sparkles, X, RefreshCw } from 'lucide-react'
 import { Dropzone } from '../components/Dropzone'
 import { PresetCard } from '../components/PresetCard'
 import { CompareSlider } from '../components/CompareSlider'
 import { ZoomView } from '../components/ZoomView'
 import { GeneratingOverlay } from '../components/GeneratingOverlay'
+import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
+import { ImgMaterials } from './ImgMaterials'
 import { CUSTOM_PRESET, presetById, presetsFor, type PresetId } from '../lib/presets'
 import { SCENE_LABEL, useScene, type Scene } from '../lib/scene'
 import { img2img } from '../lib/api'
@@ -20,6 +22,13 @@ interface Props {
 
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
 
+// подразделы Img to Img: рендер света и материалы по образцу (по клею, техническому или готовому рендеру)
+type Section = 'render' | 'materials'
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: 'render', label: 'Рендер' },
+  { id: 'materials', label: 'Материалы' },
+]
+
 const SUBTITLE: Record<Scene, string> = {
   exterior: 'Загрузите визуализацию фасада — нейросеть пересветит сцену, сохранив архитектуру и материалы.',
   interior: 'Загрузите визуализацию интерьера — нейросеть перестроит свет, сохранив мебель, отделку и материалы.',
@@ -27,6 +36,9 @@ const SUBTITLE: Record<Scene, string> = {
 
 export function ImgToImg({ onSendToInpaint }: Props) {
   const { scene } = useScene()
+  const [section, setSection] = useState<Section>('render')
+  // рендер, переданный в «Материалы»
+  const [toMaterials, setToMaterials] = useState<StudioImage | null>(null)
   const { charge, model: chosen, llm } = useAccount()
   // модели «только Inpainting» (Qwen-Image-Edit 2511) — рендер Img to Img идёт на запасной klein 9B
   const fallback = !!modelById(chosen).inpaintOnly
@@ -132,7 +144,15 @@ export function ImgToImg({ onSendToInpaint }: Props) {
     onSendToInpaint(await urlToStudioImage(result.url, name))
   }
 
+  async function sendToMaterials() {
+    if (!result || !source) return
+    const name = `inego_${result.scene}_${result.preset}_${source.name.replace(/\.[^.]+$/, '')}.jpg`
+    setToMaterials(await urlToStudioImage(result.url, name))
+    setSection('materials')
+  }
+
   const activePreset = presetById(preset, scene)
+  const materialsMode = section === 'materials'
 
   return (
     <div className="mx-auto max-w-[1280px] px-5 pb-24 sm:px-8">
@@ -142,27 +162,59 @@ export function ImgToImg({ onSendToInpaint }: Props) {
           initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.05 }}
           className="text-[15px] font-semibold text-gradient sm:text-[17px]"
         >
-          Img to Img · {SCENE_LABEL[scene]}
+          Img to Img · {materialsMode ? 'Материалы' : SCENE_LABEL[scene]}
         </motion.p>
         <motion.h1
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.1 }}
           className="mt-3 text-[44px] font-semibold leading-[1.04] tracking-[-0.035em] sm:text-[64px]"
         >
-          Один рендер.
+          {materialsMode ? 'Один образец.' : 'Один рендер.'}
           <br />
-          <span className="text-faint">Любой свет.</span>
+          <span className="text-faint">{materialsMode ? 'Любая поверхность.' : 'Любой свет.'}</span>
         </motion.h1>
         <motion.p
           initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.18 }}
           className="mx-auto mt-5 max-w-[560px] text-[17px] leading-relaxed text-mute sm:text-[19px]"
         >
           <AnimatePresence mode="wait" initial={false}>
-            <motion.span key={scene} className="block" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-              {SUBTITLE[scene]}
+            <motion.span key={materialsMode ? 'materials' : scene} className="block" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+              {materialsMode
+                ? 'Загрузите клей, технический или готовый рендер и образец материала — напишите, куда его положить, остальное останется как было.'
+                : SUBTITLE[scene]}
             </motion.span>
           </AnimatePresence>
         </motion.p>
+        <motion.div
+          initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring, delay: 0.22 }}
+          className="mt-7 inline-flex rounded-full bg-fg/[0.05] p-1" role="tablist" aria-label="Раздел Img to Img"
+        >
+          {SECTIONS.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={section === t.id}
+              onClick={() => setSection(t.id)}
+              className={`relative z-10 rounded-full px-5 py-1.5 text-[14px] font-medium transition-colors duration-300 ${section === t.id ? 'text-ink' : 'text-mute hover:text-ink'}`}
+            >
+              {section === t.id && (
+                <motion.span
+                  layoutId="section-pill"
+                  className="absolute inset-0 -z-10 rounded-full bg-pill shadow-[0_1px_2px_rgba(0,0,0,0.06),0_2px_8px_rgba(0,0,0,0.06)]"
+                  transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+                />
+              )}
+              {t.label}
+            </button>
+          ))}
+        </motion.div>
       </section>
+
+      <div hidden={!materialsMode}>
+        <ImgMaterials incoming={toMaterials} onSendToInpaint={onSendToInpaint} />
+      </div>
+
+      {/* оба подраздела смонтированы — состояние не теряется при переключении */}
+      <div hidden={materialsMode}>
 
       {/* How it works */}
       <motion.section
@@ -287,6 +339,9 @@ export function ImgToImg({ onSendToInpaint }: Props) {
                   <div className="flex gap-2">
                     <SecondaryButton onClick={download}>
                       <Download className="size-4" /> Скачать
+                    </SecondaryButton>
+                    <SecondaryButton onClick={sendToMaterials}>
+                      <BrickWall className="size-4" /> В Материалы
                     </SecondaryButton>
                     <motion.button
                       whileTap={{ scale: 0.97 }}
@@ -507,6 +562,7 @@ export function ImgToImg({ onSendToInpaint }: Props) {
           </div>
         </aside>
       </motion.section>
+      </div>
     </div>
   )
 }
@@ -544,44 +600,5 @@ function KeepToggle({ title, hint, checked, onChange, disabled }: {
         />
       </span>
     </label>
-  )
-}
-
-function Step({ n, title, hint }: { n: number; title: string; hint: string }) {
-  return (
-    <div className="flex items-start gap-3">
-      <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-ink text-[12px] font-semibold text-on-ink">{n}</span>
-      <div>
-        <div className="text-[17px] font-semibold tracking-[-0.015em]">{title}</div>
-        <div className="text-[13px] text-mute">{hint}</div>
-      </div>
-    </div>
-  )
-}
-
-function IconButton({ children, label, onClick, plain }: { children: React.ReactNode; label: string; onClick: () => void; plain?: boolean }) {
-  return (
-    <button
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className={`grid size-9 place-items-center rounded-full text-ink-2 transition-all duration-300 ease-apple hover:text-ink active:scale-95 ${
-        plain ? 'hover:bg-fg/[0.06]' : 'glass shadow-soft ring-1 ring-fg/5 hover:bg-surface'
-      }`}
-    >
-      {children}
-    </button>
-  )
-}
-
-function SecondaryButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
-  return (
-    <motion.button
-      whileTap={{ scale: 0.97 }}
-      onClick={onClick}
-      className="flex flex-1 items-center justify-center gap-2 rounded-full bg-fg/[0.05] px-5 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-fg/[0.08] sm:flex-none"
-    >
-      {children}
-    </motion.button>
   )
 }

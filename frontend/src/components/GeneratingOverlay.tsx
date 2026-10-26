@@ -7,10 +7,12 @@ interface Props {
   stage: string
   presetSky: string
   onCancel: () => void
+  /** этапы для шкалы; по умолчанию — этапы рендера Img to Img */
+  stages?: readonly string[]
 }
 
-export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel }: Props) {
-  const stageIndex = Math.max(0, STAGES.indexOf(stage as (typeof STAGES)[number]))
+export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel, stages = STAGES }: Props) {
+  const stageIndex = Math.max(0, stages.indexOf(stage))
   const R = 26
   const C = 2 * Math.PI * R
 
@@ -72,7 +74,7 @@ export function GeneratingOverlay({ image, progress, stage, presetSky, onCancel 
           </div>
 
           <div className="mt-5 flex gap-1.5">
-            {STAGES.map((s, i) => (
+            {stages.map((s, i) => (
               <div key={s} className="h-1 flex-1 overflow-hidden rounded-full bg-fg/[0.07]">
                 <div
                   className="h-full rounded-full bg-ink transition-all duration-500 ease-apple"

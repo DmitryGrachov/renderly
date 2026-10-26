@@ -98,3 +98,64 @@ async function realImg2Img(req: Img2ImgRequest, onProgress: ProgressFn, signal?:
     clearInterval(timer)
   }
 }
+
+export interface MaterialItem {
+  /** Образец материала: фото или BaseColor (в т.ч. EXR) */
+  texture: File
+  /** Куда положить: «стены дома», «цоколь» */
+  target: string
+  /** Размер элементов материала ×scale: мельче / крупнее, чем на образце; 1 — как есть */
+  scale?: number
+}
+
+export interface MaterialsRequest {
+  image: File
+  imageUrl: string
+  items: MaterialItem[]
+  llm?: string
+  seed?: number | null
+}
+
+export const MATERIAL_STAGES = ['Разбор образцов', 'Поиск поверхностей', 'Укладка материала', 'Финальный проход'] as const
+
+/** Img to Img, «Материалы»: образцы на поверхности по описанию — Qwen-Image-Edit-2511, проход на каждый образец */
+export async function img2imgMaterials(req: MaterialsRequest, onProgress: ProgressFn, signal?: AbortSignal): Promise<Img2ImgResult> {
+  const expected = 60000 * req.items.length
+  const start = performance.now()
+  const timer = setInterval(() => {
+    const t = (performance.now() - start) / (USE_MOCK ? 4200 : expected)
+    const p = 0.95 * (1 - Math.exp(-2.2 * t))
+    onProgress(p, MATERIAL_STAGES[Math.min(MATERIAL_STAGES.length - 1, Math.floor((p / 0.95) * MATERIAL_STAGES.length))])
+  }, 200)
+  try {
+    if (USE_MOCK) {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, 4200)
+        signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')) })
+      })
+      const blob = await fetch(req.imageUrl).then((r) => r.blob())
+      onProgress(1, MATERIAL_STAGES[MATERIAL_STAGES.length - 1])
+      return { url: URL.createObjectURL(blob), seed: req.seed ?? Math.floor(Math.random() * 1e9) }
+    }
+    const body = new FormData()
+    body.append('image', req.image)
+    for (const it of req.items) {
+      body.append('textures', it.texture)
+      body.append('targets', it.target.trim())
+      body.append('scales', String(it.scale ?? 1))
+    }
+    if (req.llm) body.append('llm', req.llm)
+    if (req.seed != null) body.append('seed', String(req.seed))
+    const res = await fetch('/api/img2img/materials', { method: 'POST', body, signal })
+    if (res.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите снова')
+    if (!res.ok) {
+      const detail = await res.json().then((j) => j.detail as string).catch(() => '')
+      throw new Error(detail || `Сервер ответил ${res.status}`)
+    }
+    const blob = await res.blob()
+    onProgress(1, MATERIAL_STAGES[MATERIAL_STAGES.length - 1])
+    return { url: URL.createObjectURL(blob), seed: Number(res.headers.get('X-Seed')) }
+  } finally {
+    clearInterval(timer)
+  }
+}
