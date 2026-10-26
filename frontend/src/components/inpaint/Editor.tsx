@@ -14,7 +14,8 @@ import { useScene } from '../../lib/scene'
 import { useAccount } from '../../lib/account'
 import { useZoomPan, ZOOM_MAX, ZOOM_MIN } from '../../lib/zoom'
 import { fillPolygon, HARDNESS_DEFAULT, lockAxis, rectPoints } from '../../lib/brush'
-import { changedRegion, colorize, NEUTRAL, regionOverlay, type ColorValues } from '../../lib/colorAdjust'
+import { changedRegion, colorize, combineRegion, NEUTRAL, newEdits, type ColorValues, type RegionEdits } from '../../lib/colorAdjust'
+import { RegionBrush, type RegionBrushHandle, type RegionMode } from '../RegionBrush'
 import { ColorPanel } from '../ColorPanel'
 
 interface Pt { x: number; y: number }
@@ -483,16 +484,30 @@ export function Editor({ image, onClose }: Props) {
   const [colorWorking, setColorWorking] = useState(false)
   const [colorDraft, setColorDraft] = useState<ColorValues | null>(null)
   const [showRegion, setShowRegion] = useState(false)
-  const [regionUrl, setRegionUrl] = useState<string | null>(null)
-  const colorRegion = useRef<{ key: string; mask: HTMLCanvasElement } | null>(null)
+  // кисть области: автоматическая область + правки кистью, свои у каждой версии «Цвет» (по паре prev / base)
+  const [regionView, setRegionView] = useState<{ auto: HTMLCanvasElement; edits: RegionEdits } | null>(null)
+  const [regionMode, setRegionMode] = useState<RegionMode | null>(null)
+  const [regionSize, setRegionSize] = useState(48)
+  const [regionUndo, setRegionUndo] = useState(0)
+  const regionBrush = useRef<RegionBrushHandle>(null)
+  const colorRegion = useRef<{ key: string; auto: HTMLCanvasElement } | null>(null)
+  const regionEdits = useRef(new Map<string, RegionEdits>())
   const colorTimer = useRef(0)
   const editedColor = versions[current]?.color
-  useEffect(() => { setColorDraft(null); setShowRegion(false); setRegionUrl(null) }, [current])
+  useEffect(() => { setColorDraft(null); setShowRegion(false); setRegionView(null); setRegionMode(null); setRegionUndo(0) }, [current])
+
+  async function regionParts(e: ColorEdit) {
+    const key = `${e.prev} ${e.base}`
+    if (colorRegion.current?.key !== key) colorRegion.current = { key, auto: await changedRegion(e.prev, e.base) }
+    const auto = colorRegion.current.auto
+    let ed = regionEdits.current.get(key)
+    if (!ed) { ed = newEdits(auto.width, auto.height); regionEdits.current.set(key, ed) }
+    return { auto, edits: ed }
+  }
 
   async function colorRegionFor(e: ColorEdit) {
-    const key = `${e.prev} ${e.base}`
-    if (colorRegion.current?.key !== key) colorRegion.current = { key, mask: await changedRegion(e.prev, e.base) }
-    return colorRegion.current.mask
+    const { auto, edits } = await regionParts(e)
+    return combineRegion(auto, edits)
   }
 
   // «Цвет»: на версии с цветом — открыть ползунки; иначе новая версия «Цвет» поверх текущей (пока без изменений)
@@ -526,7 +541,29 @@ export function Editor({ image, onClose }: Props) {
 
   async function toggleRegion(on: boolean) {
     setShowRegion(on)
-    if (on && editedColor) setRegionUrl(await regionOverlay(await colorRegionFor(editedColor)))
+    if (on && editedColor) setRegionView(await regionParts(editedColor))
+  }
+
+  async function chooseRegionMode(m: RegionMode | null) {
+    setRegionMode(m)
+    if (m && editedColor) {
+      setShowRegion(true)
+      setRegionView(await regionParts(editedColor))
+    }
+  }
+
+  // мазок по области — версия «Цвет» пересобирается с теми же ползунками по новой области
+  async function regionChanged() {
+    if (!editedColor) return
+    const at = current
+    const edit = { ...editedColor, values: colorDraft ?? editedColor.values }
+    setColorWorking(true)
+    try {
+      const url = await colorize(edit.base, await colorRegionFor(edit), edit.values)
+      setVersions((vs) => vs.map((x, n) => (n === at ? { ...x, url, color: edit } : x)))
+    } finally {
+      setColorWorking(false)
+    }
   }
 
   /* ---------------- drawing ---------------- */
@@ -875,10 +912,6 @@ export function Editor({ image, onClose }: Props) {
           </AnimatePresence>
 
           {/* цвет: где действуют ползунки */}
-          {colorOpen && editedColor && showRegion && regionUrl && !peek && (
-            <img src={regionUrl} alt="" draggable={false} className="pointer-events-none absolute inset-0 z-[1] size-full" />
-          )}
-
           {/* кисть отката: предыдущая версия, проступающая под мазками */}
           <canvas
             ref={previewRef}
@@ -981,6 +1014,14 @@ export function Editor({ image, onClose }: Props) {
               />
             )}
           </div>
+
+          {/* область цвета: подсветка и кисть «добавить / убрать» — поверх поверхности рисования, пока кисть включена */}
+          {colorOpen && editedColor && (showRegion || regionMode) && regionView && !peek && !busy && (
+            <RegionBrush
+              ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
+              onCommit={regionChanged} onHistory={setRegionUndo} className="z-10"
+            />
+          )}
         </div>
 
         {compare && (
@@ -1054,7 +1095,11 @@ export function Editor({ image, onClose }: Props) {
             >
               <ColorPanel
                 values={colorDraft ?? editedColor.values} onChange={changeColor} working={colorWorking}
-                showRegion={showRegion} onShowRegion={toggleRegion} onDone={() => { setColorOpen(false); setShowRegion(false) }}
+                showRegion={showRegion} onShowRegion={toggleRegion}
+                regionMode={regionMode} onRegionMode={chooseRegionMode}
+                brushSize={regionSize} onBrushSize={setRegionSize}
+                undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
+                onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
               />
             </motion.div>
           )}

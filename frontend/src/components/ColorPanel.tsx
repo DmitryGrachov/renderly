@@ -1,4 +1,5 @@
-import { Eye, EyeOff, RotateCcw, SunMedium } from 'lucide-react'
+import { Eye, EyeOff, Minus, Plus, RotateCcw, SunMedium, Undo2 } from 'lucide-react'
+import type { RegionMode } from './RegionBrush'
 import { NEUTRAL, isNeutral, type ColorValues } from '../lib/colorAdjust'
 
 const SLIDERS: { key: keyof ColorValues; label: string }[] = [
@@ -8,7 +9,9 @@ const SLIDERS: { key: keyof ColorValues; label: string }[] = [
 ]
 
 /** Цвет сгенерированного куска: яркость, контраст, насыщенность (−100…100) только в области изменений. */
-export function ColorPanel({ values, onChange, showRegion, onShowRegion, onDone, working }: {
+export function ColorPanel({
+  values, onChange, showRegion, onShowRegion, onDone, working, regionMode, onRegionMode, brushSize, onBrushSize, undoable, onUndo,
+}: {
   values: ColorValues
   onChange: (v: ColorValues) => void
   showRegion: boolean
@@ -16,6 +19,13 @@ export function ColorPanel({ values, onChange, showRegion, onShowRegion, onDone,
   onDone: () => void
   /** пересборка идёт — значок у заголовка */
   working?: boolean
+  /** кисть области: добавить / убрать; null — не рисуем */
+  regionMode: RegionMode | null
+  onRegionMode: (m: RegionMode | null) => void
+  brushSize: number
+  onBrushSize: (n: number) => void
+  undoable: number
+  onUndo: () => void
 }) {
   return (
     <div className="glass w-[min(92vw,340px)] rounded-[22px] p-3.5 shadow-float ring-1 ring-fg/5">
@@ -46,13 +56,53 @@ export function ColorPanel({ values, onChange, showRegion, onShowRegion, onDone,
           )
         })}
       </div>
-      <div className="mt-3 flex items-center gap-1.5">
+      {/* область: показать и поправить кистью */}
+      <div className="mt-3 border-t border-line pt-2.5">
+        <div className="flex items-center gap-1.5">
+          <span className="mr-auto text-[12.5px] text-ink-2">Область</span>
+          {(['add', 'remove'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => onRegionMode(regionMode === m ? null : m)}
+              title={m === 'add' ? 'Кисть: добавить в область' : 'Кисть: убрать из области'}
+              className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                regionMode === m ? 'bg-ink text-on-ink' : 'text-ink-2 ring-1 ring-fg/[0.08] hover:bg-fg/[0.05] hover:text-ink'
+              }`}
+            >
+              {m === 'add' ? <Plus className="size-3.5" /> : <Minus className="size-3.5" />}
+              {m === 'add' ? 'Добавить' : 'Убрать'}
+            </button>
+          ))}
+          <button
+            onClick={onUndo}
+            disabled={!undoable}
+            title="Отменить мазок области"
+            className="grid size-7 place-items-center rounded-full text-mute transition-colors hover:bg-fg/[0.05] hover:text-ink disabled:opacity-35"
+          >
+            <Undo2 className="size-3.5" />
+          </button>
+        </div>
+        {regionMode && (
+          <label className="mt-2 flex items-center gap-3 text-[12px] text-mute">
+            <span className="w-[92px] shrink-0">Кисть</span>
+            <input
+              type="range" min={10} max={300} step={2} value={brushSize}
+              onChange={(e) => onBrushSize(Number(e.target.value))}
+              className="range w-full"
+              style={{ '--fill': `${((brushSize - 10) / 290) * 100}%` } as React.CSSProperties}
+              aria-label="Размер кисти области"
+            />
+            <span className="w-9 shrink-0 text-right tabular-nums text-ink-2">{brushSize}</span>
+          </label>
+        )}
+      </div>
+      <div className="mt-2.5 flex items-center gap-1.5">
         <button
           onClick={() => onShowRegion(!showRegion)}
           className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium transition-colors ${showRegion ? 'bg-fg/[0.08] text-ink' : 'text-mute hover:bg-fg/[0.05] hover:text-ink'}`}
           title="Подсветить, где действуют ползунки"
         >
-          {showRegion ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} Область
+          {showRegion ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} Показать
         </button>
         <button
           onClick={() => onChange(NEUTRAL)}

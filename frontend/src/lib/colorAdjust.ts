@@ -125,3 +125,23 @@ export async function regionOverlay(region: HTMLCanvasElement, color = '#ff2bd6'
   const blob = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/png'))
   return URL.createObjectURL(blob)
 }
+
+/** Правки области кистью: что добавлено и что убрано (альфа-маски в размере области) */
+export interface RegionEdits {
+  add: HTMLCanvasElement
+  remove: HTMLCanvasElement
+}
+
+export const newEdits = (w: number, h: number): RegionEdits => ({ add: canvas(w, h), remove: canvas(w, h) })
+
+/** Итоговая область: найденная автоматически + добавленное кистью − убранное кистью. */
+export function combineRegion(auto: HTMLCanvasElement, edits: RegionEdits | null | undefined): HTMLCanvasElement {
+  if (!edits) return auto
+  const out = canvas(auto.width, auto.height)
+  const o = out.getContext('2d')!
+  o.drawImage(auto, 0, 0)
+  o.drawImage(edits.add, 0, 0, auto.width, auto.height)
+  o.globalCompositeOperation = 'destination-out'
+  o.drawImage(edits.remove, 0, 0, auto.width, auto.height)
+  return out
+}

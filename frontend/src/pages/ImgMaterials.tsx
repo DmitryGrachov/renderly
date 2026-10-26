@@ -11,7 +11,8 @@ import { IconButton, SecondaryButton, Step } from '../components/StudioControls'
 import { ToolButton } from '../components/ToolButton'
 import { BrushOptions } from '../components/inpaint/Toolbar'
 import { HARDNESS_DEFAULT, type DrawTool, type Shape } from '../lib/brush'
-import { changedRegion, colorize, isNeutral, NEUTRAL, regionOverlay, type ColorValues } from '../lib/colorAdjust'
+import { changedRegion, colorize, combineRegion, isNeutral, NEUTRAL, newEdits, type ColorValues, type RegionEdits } from '../lib/colorAdjust'
+import { RegionBrush, type RegionBrushHandle, type RegionMode } from '../components/RegionBrush'
 import { ColorPanel } from '../components/ColorPanel'
 import { useScene, type Scene } from '../lib/scene'
 import { img2imgMaterials, MATERIAL_STAGES } from '../lib/api'
@@ -85,9 +86,15 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const [colorOpen, setColorOpen] = useState(false)
   const [colorWorking, setColorWorking] = useState(false)
   const [showRegion, setShowRegion] = useState(false)
-  const [regionUrl, setRegionUrl] = useState<string | null>(null)
+  // кисть области: автоматическая область + правки кистью (переживают пересчёт области после отката)
+  const [regionView, setRegionView] = useState<{ auto: HTMLCanvasElement; edits: RegionEdits } | null>(null)
+  const [regionMode, setRegionMode] = useState<RegionMode | null>(null)
+  const [regionSize, setRegionSize] = useState(60)
+  const [regionUndo, setRegionUndo] = useState(0)
+  const regionBrush = useRef<RegionBrushHandle>(null)
+  const edits = useRef<RegionEdits | null>(null)
   // область изменений — для того кадра, по которому посчитана (откат её меняет)
-  const region = useRef<{ url: string; mask: HTMLCanvasElement } | null>(null)
+  const region = useRef<{ url: string; auto: HTMLCanvasElement } | null>(null)
   const colorTimer = useRef(0)
   // сдвиг прежнего кадра под кистью: стрелки — на 1 px, с Shift — на 5
   const [nudge, setNudge] = useState({ x: 0, y: 0 })
@@ -202,16 +209,29 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setColor(NEUTRAL)
     setColorOpen(false)
     setShowRegion(false)
-    setRegionUrl(null)
+    setRegionView(null)
+    setRegionMode(null)
+    setRegionUndo(0)
     region.current = null
+    edits.current = null
   }
 
   // кадр без цвета: откат, иначе результат модели
   const plain = restored ?? raw ?? result?.url ?? null
 
+  /** автоматическая область для кадра без цвета и правки кистью (одни на результат) */
+  async function regionParts(url: string) {
+    if (region.current?.url !== url) region.current = { url, auto: await changedRegion(source!.url, url) }
+    const auto = region.current.auto
+    if (!edits.current || edits.current.add.width !== auto.width || edits.current.add.height !== auto.height) {
+      edits.current = newEdits(auto.width, auto.height)
+    }
+    return { auto, edits: edits.current }
+  }
+
   async function regionFor(url: string) {
-    if (region.current?.url !== url) region.current = { url, mask: await changedRegion(source!.url, url) }
-    return region.current.mask
+    const { auto, edits: e } = await regionParts(url)
+    return combineRegion(auto, e)
   }
 
   /** итог цепочки: цвет поверх кадра без цвета (только в области изменений) */
@@ -253,7 +273,27 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
 
   async function toggleRegion(on: boolean) {
     setShowRegion(on)
-    if (on && plain) setRegionUrl(await regionOverlay(await regionFor(plain)))
+    if (on && plain) setRegionView(await regionParts(plain))
+  }
+
+  async function chooseRegionMode(m: RegionMode | null) {
+    setRegionMode(m)
+    if (m && plain) {
+      setShowRegion(true)
+      setRegionView(await regionParts(plain))
+    }
+  }
+
+  // мазок по области — цвет пересобирается по новой области
+  async function regionChanged() {
+    if (!plain) return
+    setColorWorking(true)
+    try {
+      const url = await finalUrl(plain, color)
+      setResult((r) => (r ? { ...r, url } : r))
+    } finally {
+      setColorWorking(false)
+    }
   }
 
   function undo() {
@@ -285,7 +325,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                 initial={{ opacity: 0, scale: 1.02 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
                 transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
               >
-                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && (view === 'compare' || brushing))}>
+                <ZoomView aspect={source.width / source.height} panWithLeft={!(result && (view === 'compare' || brushing || (colorOpen && regionMode)))}>
                   {(imageStyle) =>
                     result && !running ? (
                       brushing ? (
@@ -296,8 +336,11 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                       ) : colorOpen ? (
                         <>
                           <img src={result.url} alt="Результат" className="absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
-                          {showRegion && regionUrl && (
-                            <img src={regionUrl} alt="" className="pointer-events-none absolute inset-0 size-full object-contain" style={imageStyle} draggable={false} />
+                          {(showRegion || regionMode) && regionView && (
+                            <RegionBrush
+                              ref={regionBrush} auto={regionView.auto} edits={regionView.edits} mode={regionMode} size={regionSize}
+                              imageStyle={imageStyle} onCommit={regionChanged} onHistory={setRegionUndo}
+                            />
                           )}
                         </>
                       ) : view === 'compare' ? (
@@ -331,7 +374,10 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
                     <ColorPanel
                       values={color} onChange={changeColor} working={colorWorking}
                       showRegion={showRegion} onShowRegion={toggleRegion}
-                      onDone={() => { setColorOpen(false); setShowRegion(false) }}
+                      regionMode={regionMode} onRegionMode={chooseRegionMode}
+                      brushSize={regionSize} onBrushSize={setRegionSize}
+                      undoable={regionUndo} onUndo={() => regionBrush.current?.undo()}
+                      onDone={() => { setColorOpen(false); setShowRegion(false); setRegionMode(null) }}
                     />
                   </div>
                 )}
