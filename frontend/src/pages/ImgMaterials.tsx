@@ -29,8 +29,6 @@ interface Props {
 }
 
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const
-// материалы кладёт Qwen-Image-Edit-2511 — независимо от модели в шапке
-const MODEL = modelById('qwen-edit-2511')
 const MAX_ROWS = 3
 
 const TARGET_CHIPS: Record<Scene, string[]> = {
@@ -52,7 +50,9 @@ const sizeScale = (v: number) => Math.round(2 ** v * 100) / 100
 
 export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
   const { scene } = useScene()
-  const { charge, llm } = useAccount()
+  // модель — из селектора в шапке: у каждой свой пайплайн на бэкенде (texturing.py)
+  const { charge, llm, model } = useAccount()
+  const activeModel = modelById(model)
   const [source, setSource] = useState<StudioImage | null>(null)
   // предыдущие исходники — «Продолжить с результатом» можно откатить
   const [history, setHistory] = useState<StudioImage[]>([])
@@ -105,12 +105,12 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
     setError(null)
     try {
       const res = await img2imgMaterials(
-        { image: source.file, imageUrl: source.url, llm, items: ready.map((r) => ({ texture: r.texture!, target: r.target, scale: sizeScale(r.size) })) },
+        { image: source.file, imageUrl: source.url, llm, model, items: ready.map((r) => ({ texture: r.texture!, target: r.target, scale: sizeScale(r.size) })) },
         (p, s) => { setProgress(p); setStage(s) },
         ctrl.signal,
       )
       setResult(res)
-      for (const r of ready) charge('render', `Img to Img · Материалы · ${r.target.trim()}`, MODEL.id)
+      for (const r of ready) charge('render', `Img to Img · Материалы · ${r.target.trim()}`, model)
       setView('compare')
       setStatus('done')
     } catch (e) {
@@ -364,7 +364,7 @@ export function ImgMaterials({ incoming, onSendToInpaint }: Props) {
               ? 'Загрузите клей, технический или готовый рендер'
               : incomplete || ready.length === 0
                 ? 'К каждому образцу — куда его положить'
-                : `${MODEL.name} · ${MODEL.time}${ready.length > 1 ? ` × ${ready.length}` : ''} · ${fmt(MODEL.cost * ready.length)} ток.`}
+                : `${activeModel.name} · ${activeModel.time}${ready.length > 1 ? ` × ${ready.length}` : ''} · ${fmt(activeModel.cost * ready.length)} ток.`}
           </p>
 
           <AnimatePresence>

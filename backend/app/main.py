@@ -12,7 +12,9 @@ from . import materials as material_map
 from . import texturing
 from .auth import current_user
 from .auth import router as auth_router
-from .config import CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, log
+from .config import (
+    CORS_ORIGINS, DEEPSEEK_MODEL, DEEPSEEK_MODELS, DEFAULT_MODEL, IMG2IMG_MODELS, INPAINT_MODELS, QWEN_EDIT_MODEL, log,
+)
 from .db import init_db
 from .models import User
 from .presets import PRESETS, SCENES
@@ -120,10 +122,14 @@ async def img2img_materials(
     # размер элементов материала ×scale (ползунок «Размер»), попарно с образцами; 1 — как на образце
     scales: list[float] | None = Form(None),
     seed: int | None = Form(None, ge=0, lt=2**48),
+    # модель из селектора в шапке: у каждой свой пайплайн (texturing.py)
+    model: str = Form(QWEN_EDIT_MODEL),
     llm: str = Form(DEEPSEEK_MODEL),
     _user: User = Depends(current_user),
 ):
-    """Img to Img, «Материалы»: образцы материалов на поверхности по описанию — Qwen-Image-Edit-2511 без масок."""
+    """Img to Img, «Материалы»: образцы материалов на поверхности по описанию — без масок, моделью из селектора."""
+    if model not in IMG2IMG_MODELS:
+        raise HTTPException(400, f"Unknown model: {model}")
     if llm not in DEEPSEEK_MODELS:
         raise HTTPException(400, f"Unknown llm: {llm}")
     llm_model.set(llm)
@@ -148,7 +154,7 @@ async def img2img_materials(
             raise HTTPException(400, "Текстура: нужен файл изображения (JPG, PNG, WebP, EXR)") from e
         items.append((data, where, scale))
     try:
-        result, used_seed = await texturing.run_materials(await image.read(), items, seed)
+        result, used_seed = await texturing.run_materials(await image.read(), items, seed, model)
     except comfy.ModelUnavailable as e:
         raise HTTPException(503, str(e)) from e
     except (comfy.ComfyError, httpx.HTTPError) as e:

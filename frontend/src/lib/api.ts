@@ -112,6 +112,8 @@ export interface MaterialsRequest {
   image: File
   imageUrl: string
   items: MaterialItem[]
+  /** Модель из селектора: klein-4b | klein-9b | qwen-edit-2511 | qwen-image-2.1 */
+  model?: string
   llm?: string
   seed?: number | null
 }
@@ -120,7 +122,8 @@ export const MATERIAL_STAGES = ['Разбор образцов', 'Поиск п�
 
 /** Img to Img, «Материалы»: образцы на поверхности по описанию — Qwen-Image-Edit-2511, проход на каждый образец */
 export async function img2imgMaterials(req: MaterialsRequest, onProgress: ProgressFn, signal?: AbortSignal): Promise<Img2ImgResult> {
-  const expected = 60000 * req.items.length
+  // на образец — проход модели: Qwen ~1 мин, klein ~30 с
+  const expected = (req.model?.startsWith('qwen') ? 60000 : 30000) * req.items.length
   const start = performance.now()
   const timer = setInterval(() => {
     const t = (performance.now() - start) / (USE_MOCK ? 4200 : expected)
@@ -144,6 +147,7 @@ export async function img2imgMaterials(req: MaterialsRequest, onProgress: Progre
       body.append('targets', it.target.trim())
       body.append('scales', String(it.scale ?? 1))
     }
+    if (req.model) body.append('model', req.model)
     if (req.llm) body.append('llm', req.llm)
     if (req.seed != null) body.append('seed', String(req.seed))
     const res = await fetch('/api/img2img/materials', { method: 'POST', body, signal })
